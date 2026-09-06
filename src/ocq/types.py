@@ -19,6 +19,7 @@ class QuantAlgorithm(str, Enum):
     AWQ = "awq"
     GPTQ = "gptq"
     BNB = "bnb"
+    GGUF = "gguf"
 
 
 @dataclass(frozen=True)

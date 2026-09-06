@@ -19,6 +19,10 @@ def get_quantizer(algorithm: QuantAlgorithm) -> Quantizer:
         from ocq.quantizers.bnb import BnbQuantizer
 
         return BnbQuantizer()
+    if algorithm == QuantAlgorithm.GGUF:
+        from ocq.quantizers.gguf import GGUFQuantizer
+
+        return GGUFQuantizer()
     msg = f"Unknown quantizer: {algorithm}"
     raise ValueError(msg)
 
@@ -26,10 +30,11 @@ def get_quantizer(algorithm: QuantAlgorithm) -> Quantizer:
 def available_backends() -> list[QuantAlgorithm]:
     from ocq.quantizers.awq import AwqQuantizer
     from ocq.quantizers.bnb import BnbQuantizer
+    from ocq.quantizers.gguf import GGUFQuantizer
     from ocq.quantizers.gptq import GptqQuantizer
 
     out: list[QuantAlgorithm] = []
-    for cls in (AwqQuantizer, GptqQuantizer, BnbQuantizer):
+    for cls in (AwqQuantizer, GptqQuantizer, BnbQuantizer, GGUFQuantizer):
         if cls.is_available():
             out.append(cls.algorithm)
     return out
