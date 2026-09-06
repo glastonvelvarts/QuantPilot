@@ -1,4 +1,4 @@
-# OCQ — One-Click Quantizer
+# QuantPilor- An OCQ(One click optimizer)
 
 Terminal-only tool: **model + hardware + goal -> quantization plan -> (future) quantized artifact**.
 
