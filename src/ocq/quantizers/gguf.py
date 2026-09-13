@@ -7,9 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
-
-from ocq.quantizers.base import StubQuantizer
+from ocq.quantizers.protocol import Quantizer
 from ocq.types import (
     BenchmarkResult,
     OptimizationPlan,
@@ -17,7 +15,7 @@ from ocq.types import (
 )
 
 
-class GGUFQuantizer(StubQuantizer):
+class GGUFQuantizer(Quantizer):
     """
     GGUF backend powered by llama.cpp.
 
@@ -32,6 +30,12 @@ class GGUFQuantizer(StubQuantizer):
         llama-quantize
             ↓
         Quantized GGUF
+
+    Inherits Quantizer (protocol.py) directly, NOT StubQuantizer —
+    StubQuantizer.run() hardcodes success=False with an "not implemented
+    yet" message, which is correct for backends that are only an
+    availability check, but would silently discard a REAL quantize() result
+    here. Quantizer.run() actually reports what happened.
     """
 
     algorithm = QuantAlgorithm.GGUF
@@ -74,6 +78,9 @@ class GGUFQuantizer(StubQuantizer):
         Validate llama.cpp and the model configuration.
         """
 
+        if not self.is_available():
+            return False, f"GGUF backend not ready. {self.pip_hint}"
+
         quantize_bin = self._find_quantize_binary()
 
         if quantize_bin is None:
@@ -104,7 +111,12 @@ class GGUFQuantizer(StubQuantizer):
     def prepare(self, plan: OptimizationPlan) -> None:
         """
         Download the HuggingFace model into the OCQ workspace.
+
+        huggingface_hub import is deliberately kept inside this method
+        (not at module top) so importing GGUFQuantizer to just check
+        is_available() never requires huggingface_hub to be installed.
         """
+        from huggingface_hub import snapshot_download
 
         workspace = plan.output_dir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
