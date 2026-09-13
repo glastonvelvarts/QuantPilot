@@ -10,6 +10,7 @@ from ocq.types import (
     ModelSnapshot,
     OptimizationGoal,
     OptimizationPlan,
+    QuantAlgorithm,
 )
 
 
@@ -19,8 +20,9 @@ def generate_plan(
     model: ModelSnapshot,
     goal: OptimizationGoal,
     output_dir: Path,
+    algorithm: QuantAlgorithm | None = None,
 ) -> OptimizationPlan:
-    config = decide_quant_config(hardware, model, goal)
+    config = decide_quant_config(hardware, model, goal, algorithm=algorithm)
     rationale = build_rationale(hardware, model, config, goal)
     warnings: list[str] = []
 

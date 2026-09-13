@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import ClassVar
 
 from ocq.types import BenchmarkResult, OptimizationPlan, QuantAlgorithm, QuantizationResult
@@ -61,10 +62,13 @@ class Quantizer(ABC):
         self.quantize(plan)
         artifact = self.save(plan)
         bench = self.benchmark(plan, artifact)
+        artifact_path = (
+            Path(artifact) if Path(artifact).is_absolute() else plan.output_dir / artifact
+        )
         return (
             QuantizationResult(
                 plan=plan,
-                artifact_path=plan.output_dir / artifact if not artifact.startswith("/") else None,
+                artifact_path=artifact_path,
                 backend=self.algorithm.value,
                 success=True,
                 message=f"Quantized with {self.algorithm.value}",

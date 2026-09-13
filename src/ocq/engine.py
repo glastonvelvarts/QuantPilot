@@ -32,11 +32,15 @@ def decide_quant_config(
     hardware: HardwareProfile,
     model: ModelSnapshot,
     goal: OptimizationGoal,
+    algorithm: QuantAlgorithm | None = None,
 ) -> QuantConfig:
     """Pick quantization algorithm and parameters from hardware + llmfit tier."""
 
     bits = _bits_for_goal(model, goal)
-    algorithm = _pick_algorithm(hardware, model, bits)
+    if algorithm is None:
+        algorithm = _pick_algorithm(hardware, model, bits)
+    elif algorithm == QuantAlgorithm.AWQ:
+        bits = 4
     group_size = _default_group_size(algorithm, bits)
     target_label = model.llmfit_best_quant
 
@@ -70,7 +74,11 @@ def build_rationale(
         f"Selected backend: {config.summary()}",
     ]
     backend = hardware.backend.lower()
-    if "cuda" in backend:
+    if config.algorithm == QuantAlgorithm.GGUF:
+        lines.append("GGUF selected - llama.cpp export for CPU/GPU cross-platform inference.")
+    elif config.algorithm == QuantAlgorithm.AWQ:
+        lines.append("AWQ selected - 4-bit activation-aware weight quantization for CUDA.")
+    elif "cuda" in backend:
         lines.append("CUDA detected - AWQ/GPTQ preferred for deployment throughput.")
     elif "metal" in backend:
         lines.append("Apple Silicon - consider MLX export post-quant (v2); BNB for HF weights.")

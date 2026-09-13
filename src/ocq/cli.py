@@ -16,7 +16,7 @@ from ocq.model_analyzer import resolve_model
 from ocq.pipeline import run_optimize
 from ocq.plan import generate_plan
 from ocq.quantizers import available_backends
-from ocq.types import OptimizationGoal
+from ocq.types import OptimizationGoal, QuantAlgorithm
 
 app = typer.Typer(
     name="ocq",
@@ -31,6 +31,16 @@ def _goal(value: str) -> OptimizationGoal:
         return OptimizationGoal(value.lower())
     except ValueError as exc:
         valid = ", ".join(g.value for g in OptimizationGoal)
+        raise typer.BadParameter(f"Use one of: {valid}") from exc
+
+
+def _backend(value: str | None) -> QuantAlgorithm | None:
+    if not value:
+        return None
+    try:
+        return QuantAlgorithm(value.lower())
+    except ValueError as exc:
+        valid = ", ".join(b.value for b in QuantAlgorithm)
         raise typer.BadParameter(f"Use one of: {valid}") from exc
 
 
@@ -101,17 +111,22 @@ def cmd_feasibility(
 def cmd_plan(
     model: Annotated[str, typer.Argument(help="HuggingFace model id")],
     goal: Annotated[str, typer.Option("--goal", "-g")] = "balanced",
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="Quantization backend (awq, gguf, gptq, bnb)"),
+    ] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     llmfit_bin: Annotated[str | None, typer.Option("--llmfit-bin")] = None,
 ) -> None:
     """Generate optimization plan without executing."""
     g = _goal(goal)
+    b = _backend(backend)
     out = output or _default_output(model)
     try:
         bridge = _bridge(llmfit_bin)
         hardware = bridge.hardware_profile()
         snapshot = resolve_model(model, hardware, bridge)
-        plan = generate_plan(model, hardware, snapshot, g, out)
+        plan = generate_plan(model, hardware, snapshot, g, out, algorithm=b)
     except LlmfitError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -123,6 +138,10 @@ def cmd_plan(
 def cmd_optimize(
     model: Annotated[str, typer.Argument(help="HuggingFace model id")],
     goal: Annotated[str, typer.Option("--goal", "-g")] = "balanced",
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="Quantization backend (awq, gguf, gptq, bnb)"),
+    ] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     dry_run: Annotated[
         bool,
@@ -132,16 +151,18 @@ def cmd_optimize(
 ) -> None:
     """One-click: analyze -> plan -> quantize -> validate -> benchmark."""
     g = _goal(goal)
+    b = _backend(backend)
     out = output or _default_output(model)
-    if not available_backends() and not dry_run:
+    backends = available_backends()
+    if not dry_run and b is None and not backends:
         console.print(
             "[yellow]No quant backends installed - forcing --dry-run.[/yellow]\n"
-            "Install: uv sync --extra awq  (or gptq / bnb)"
+            "Install: uv sync --extra awq  (or build llama.cpp for gguf)"
         )
         dry_run = True
 
     try:
-        result = run_optimize(model, g, out, dry_run=dry_run, llmfit_bin=llmfit_bin)
+        result = run_optimize(model, g, out, dry_run=dry_run, llmfit_bin=llmfit_bin, algorithm=b)
     except LlmfitError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
