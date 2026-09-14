@@ -1,4 +1,4 @@
-# QuantPilot- An OCQ(One click optimizer)
+# QuantPilot- An OCQ(One click Quantizer)
 
 Terminal-only tool: **model + hardware + goal -> quantization plan -> (future) quantized artifact**.
 
