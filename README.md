@@ -1,4 +1,4 @@
-# QuantPilot — An OCQ (One-Click Quantizer)
+# QuantPilot- An OCQ(One click Quantizer)
 
 Terminal LLM optimizer: **model + hardware telemetry + goal -> optimal quantization plan -> quantized artifact**.
 
