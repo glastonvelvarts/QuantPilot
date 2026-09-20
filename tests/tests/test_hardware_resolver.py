@@ -1,6 +1,6 @@
 """Tests for UniversalHardwareResolver."""
 
-from ocq.hardware_resolver import BandwidthProfile, UniversalHardwareResolver
+from ocq.hardware_resolver import UniversalHardwareResolver
 from ocq.types import GpuProfile, HardwareProfile
 
 

@@ -10,7 +10,6 @@ hallucinations in fitment and throughput estimates.
 from __future__ import annotations
 
 import ctypes
-import os
 import platform
 import re
 import shutil
@@ -20,7 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ocq.types import GpuProfile, HardwareProfile
+    from ocq.types import HardwareProfile
 
 
 @dataclass(frozen=True)
@@ -271,7 +270,9 @@ class UniversalHardwareResolver:
         host_cpu = ""
         try:
             if platform.system() == "Darwin":
-                host_cpu = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], text=True).strip()
+                host_cpu = subprocess.check_output(
+                    ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
+                ).strip()
             elif platform.system() == "Linux":
                 with open("/proc/cpuinfo") as f:
                     for line in f:
@@ -296,11 +297,14 @@ class UniversalHardwareResolver:
         cpu_lower = cpu_name.lower()
 
         is_explicit_x86 = any(
-            tok in cpu_lower for tok in ["amd", "intel", "ryzen", "xeon", "epyc", "core i", "pentium", "celeron"]
+            tok in cpu_lower
+            for tok in ["amd", "intel", "ryzen", "xeon", "epyc", "core i", "pentium", "celeron"]
         )
 
         # 1. Apple Silicon (macOS Metal)
-        if not is_explicit_x86 and (system == "Darwin" or "metal" in backend.lower() or "apple" in cpu_lower):
+        if not is_explicit_x86 and (
+            system == "Darwin" or "metal" in backend.lower() or "apple" in cpu_lower
+        ):
             bw = cls._detect_apple_silicon_bandwidth(cpu_name)
             if bw > 0:
                 return bw
@@ -368,7 +372,10 @@ class UniversalHardwareResolver:
                     text=True,
                     stderr=subprocess.DEVNULL,
                 )
-                speeds = [int(m.group(1)) for m in re.finditer(r"Speed:\s+(\d+)\s+(?:MT/s|MHz)", out)]
+                speeds = [
+                    int(m.group(1))
+                    for m in re.finditer(r"Speed:\s+(\d+)\s+(?:MT/s|MHz)", out)
+                ]
                 active_speeds = [s for s in speeds if s > 0]
                 if active_speeds:
                     channels = min(len(active_speeds), 8)
@@ -472,7 +479,10 @@ class UniversalHardwareResolver:
         # 2. Integrated Graphics (Intel UHD/Iris/Xe, AMD Radeon APU)
         is_integrated = (
             not gpu_name
-            or ("intel" in gpu_lower and any(t in gpu_lower for t in ["graphics", "uhd", "iris", "hd"]))
+            or (
+                "intel" in gpu_lower
+                and any(t in gpu_lower for t in ["graphics", "uhd", "iris", "hd"])
+            )
             or "radeon(tm) graphics" in gpu_lower
             or "radeon vega" in gpu_lower
         )
@@ -564,7 +574,8 @@ class UniversalHardwareResolver:
 
                 if out:
                     gen, width = map(int, [x.strip() for x in out.split("\n")[0].split(",")])
-                    # Throughput per PCIe lane: Gen 1 = 0.25, Gen 2 = 0.5, Gen 3 = 0.985, Gen 4 = 1.969, Gen 5 = 3.938 GB/s
+                    # Throughput per PCIe lane (GB/s):
+                    # Gen 1=0.25, Gen 2=0.5, Gen 3=0.985, Gen 4=1.969, Gen 5=3.938
                     per_lane_bw = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938}
                     return round(per_lane_bw.get(gen, 1.969) * width, 1)
             except Exception:

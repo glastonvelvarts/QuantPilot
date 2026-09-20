@@ -10,7 +10,6 @@ from ocq.types import (
     QuantConfig,
 )
 
-
 # Map llmfit GGUF labels to approximate target bit widths for HF quant backends.
 _GGUF_TO_BITS: dict[str, int] = {
     "Q8_0": 8,
@@ -132,7 +131,9 @@ def _pick_algorithm(
     if "metal" in backend or "mlx" in runtime:
         return QuantAlgorithm.BNB
 
-    if not hardware.has_gpu or (hardware.primary_vram_gb or 0) < model.feasibility.memory_required_gb:
+    if not hardware.has_gpu or (hardware.primary_vram_gb or 0) < (
+        model.feasibility.memory_required_gb
+    ):
         return QuantAlgorithm.BNB
 
     return QuantAlgorithm.GPTQ

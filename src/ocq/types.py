@@ -175,7 +175,11 @@ class ModelSnapshot:
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        if self.params_b == 0.0 and isinstance(self.parameter_count, (int, float)) and self.parameter_count > 0:
+        if (
+            self.params_b == 0.0
+            and isinstance(self.parameter_count, (int, float))
+            and self.parameter_count > 0
+        ):
             object.__setattr__(self, "params_b", float(self.parameter_count) / 1_000_000_000.0)
 
     @property
