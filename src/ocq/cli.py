@@ -68,12 +68,21 @@ def cmd_profile(
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("CPU", f"{hw.cpu_name} ({hw.cpu_cores} cores)")
-    table.add_row("RAM", f"{hw.available_ram_gb:.1f} / {hw.total_ram_gb:.1f} GB")
+    ram_bw_parts = []
+    if hw.ram_bandwidth_gbs > 0:
+        ram_bw_parts.append(f"{hw.ram_bandwidth_gbs:.1f} GB/s peak")
+    if hw.measured_ram_bandwidth_gbs > 0:
+        ram_bw_parts.append(f"{hw.measured_ram_bandwidth_gbs:.1f} GB/s live")
+    ram_bw = f" ({', '.join(ram_bw_parts)})" if ram_bw_parts else ""
+    table.add_row("RAM", f"{hw.available_ram_gb:.1f} / {hw.total_ram_gb:.1f} GB{ram_bw}")
     table.add_row("Backend", hw.backend)
     table.add_row("GPU", "yes" if hw.has_gpu else "no")
     for i, g in enumerate(hw.gpus):
         vram = f"{g.vram_gb:.1f} GB" if g.vram_gb is not None else "?"
-        table.add_row(f"GPU {i}", f"{g.name} - {vram}")
+        gpu_bw = f" @ {g.bandwidth_gbs:.1f} GB/s" if g.bandwidth_gbs > 0 else ""
+        table.add_row(f"GPU {i}", f"{g.name} - {vram}{gpu_bw}")
+    if hw.has_gpu and hw.pcie_bandwidth_gbs > 0 and not hw.unified_memory:
+        table.add_row("PCIe Bandwidth", f"{hw.pcie_bandwidth_gbs:.1f} GB/s")
     console.print(table)
 
 

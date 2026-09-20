@@ -16,7 +16,10 @@ class StubQuantizer(Quantizer, ABC):
 
     def validate(self, plan: OptimizationPlan) -> tuple[bool, str]:
         if not self.is_available():
-            return False, f"{self.algorithm.value.upper()} backend not installed. Run: {self.pip_hint}"
+            return (
+                False,
+                f"{self.algorithm.value.upper()} backend not installed. Run: {self.pip_hint}",
+            )
         return True, "ok"
 
     def prepare(self, plan: OptimizationPlan) -> None:
@@ -66,7 +69,8 @@ class StubQuantizer(Quantizer, ABC):
                 backend=self.algorithm.value,
                 success=False,
                 message=(
-                    f"{self.algorithm.value.upper()} deps found but quantize() is not implemented yet. "
+                    f"{self.algorithm.value.upper()} deps found but "
+                    f"quantize() is not implemented yet. "
                     f"See ocq/quantizers/{self.algorithm.value}.py"
                 ),
             ),

@@ -8,11 +8,14 @@ import shutil
 import subprocess
 from typing import Any
 
+from ocq.hardware_resolver import UniversalHardwareResolver
 from ocq.types import (
     FeasibilityEstimate,
+    FitLevel,
     GpuProfile,
     HardwareProfile,
     ModelSnapshot,
+    RunMode,
 )
 
 
@@ -107,7 +110,7 @@ def _parse_hardware(system: dict[str, Any]) -> HardwareProfile:
         )
         for g in system.get("gpus", [])
     )
-    return HardwareProfile(
+    raw_profile = HardwareProfile(
         total_ram_gb=float(system.get("total_ram_gb", 0)),
         available_ram_gb=float(system.get("available_ram_gb", 0)),
         cpu_cores=int(system.get("cpu_cores", 0)),
@@ -118,6 +121,7 @@ def _parse_hardware(system: dict[str, Any]) -> HardwareProfile:
         gpus=gpus,
         raw=system,
     )
+    return UniversalHardwareResolver.resolve_profile(raw_profile)
 
 
 def _optional_int(value: Any) -> int | None:
@@ -130,10 +134,23 @@ def _optional_int(value: Any) -> int | None:
 
 
 def _parse_feasibility(fit: dict[str, Any]) -> FeasibilityEstimate:
+    fit_level_raw = str(fit.get("fit_level") or fit.get("fit_label") or "unknown")
+    run_mode_raw = str(fit.get("run_mode") or fit.get("run_mode_label") or "unknown")
+
+    try:
+        fit_level = FitLevel(fit_level_raw)
+    except ValueError:
+        fit_level = fit_level_raw
+
+    try:
+        run_mode = RunMode(run_mode_raw)
+    except ValueError:
+        run_mode = run_mode_raw
+
     return FeasibilityEstimate(
         quant_label=str(fit.get("best_quant") or fit.get("quantization") or "unknown"),
-        fit_level=str(fit.get("fit_level") or fit.get("fit_label") or "unknown"),
-        run_mode=str(fit.get("run_mode") or fit.get("run_mode_label") or "unknown"),
+        fit_level=fit_level,
+        run_mode=run_mode,
         score=float(fit.get("score", 0)),
         estimated_tps=float(fit.get("estimated_tps", 0)),
         memory_required_gb=float(fit.get("memory_required_gb", 0)),

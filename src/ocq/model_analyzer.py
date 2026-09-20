@@ -27,7 +27,10 @@ def resolve_model(
     except LlmfitError as exc:
         if "not_found" not in str(exc).lower() and "no models" not in str(exc).lower():
             # Hardware errors etc. should still fail loudly.
-            if "llmfit not found" in str(exc).lower() or "binary not executable" in str(exc).lower():
+            if (
+                "llmfit not found" in str(exc).lower()
+                or "binary not executable" in str(exc).lower()
+            ):
                 raise
         # Fall through to HuggingFace for models outside the llmfit catalog.
 
