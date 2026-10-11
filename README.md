@@ -1,5 +1,5 @@
+![QuantPilot banner](assets/banner.svg)
 # QuantPilot — One-Click Quantizer (OCQ)
-
 Terminal LLM optimizer: **inspect the PC -> see which models it can run -> pick a quantization -> get a quantized, validated, benchmarked artifact**.
 
 QuantPilot combines [llmfit](https://github.com/AlexsJones/llmfit) with a **universal hardware resolver**, live memory micro-probing, and four working quantization backends (GGUF, AWQ, GPTQ, bitsandbytes). Every run ends by loading the artifact, generating text with it, and measuring real tokens/sec and time to first token.
