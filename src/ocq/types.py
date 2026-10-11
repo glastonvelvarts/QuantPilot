@@ -10,6 +10,9 @@ from typing import Any
 DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I8": 1, "U8": 1}
 
 
+FLOAT_TYPES = ("F32", "BF16", "F16")
+
+
 class OcqError(RuntimeError):
     pass
 
@@ -245,6 +248,13 @@ class ModelSnapshot:
     @property
     def architecture_known(self) -> bool:
         return self.architecture != "unknown"
+
+    @property
+    def stored_precision(self) -> str:
+        """F32, BF16 or F16: the type most of the weights are stored in. Empty when unknown."""
+        counts = (self.raw.get("safetensors") or {}).get("parameters") or {}
+        floats = {dtype: count for dtype, count in counts.items() if dtype in FLOAT_TYPES}
+        return max(floats, key=floats.get) if floats else ""
 
     @property
     def original_gb(self) -> float:

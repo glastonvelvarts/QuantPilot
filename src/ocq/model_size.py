@@ -27,6 +27,9 @@ BLOCKS = {
 }
 
 BASE_TYPE = {
+    "F32": "F32",
+    "BF16": "F16",
+    "F16": "F16",
     "FP16": "F16",
     "Q2_K": "Q2_K",
     "Q3_K_S": "Q3_K",
@@ -63,8 +66,8 @@ def gguf_weights_bytes(tensors: list[Tensor], gguf_type: str, heads_per_kv_head:
         count = math.prod(shape)
         if len(shape) < 2:
             tensor_type = "F32"
-        elif base == "F16":
-            tensor_type = "F16"
+        elif base in ("F16", "F32"):
+            tensor_type = base
         else:
             tensor_type = quantized_type(
                 gguf_type,

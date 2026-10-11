@@ -236,7 +236,7 @@ def cmd_feasibility(
         )
     )
 
-    table = Table(title="By quantization level, sizes in GB (FP16 is the original model)")
+    table = Table(title="By quantization level, sizes in GB (first row is the model as stored)")
     table.add_column("Level", no_wrap=True)
     for column in ("Bits", "Weights", "Context", "Needs"):
         table.add_column(column, no_wrap=True, justify="right")

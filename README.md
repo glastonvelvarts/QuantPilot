@@ -32,6 +32,7 @@ QuantPilot combines [llmfit](https://github.com/AlexsJones/llmfit) with a **univ
 | `bnb` | 4, 8 | NVIDIA GPU | transformers |
 
 - **GGUF** uses llama.cpp. The official llama.cpp release for your OS is downloaded on first use into `~/.cache/ocq/llama.cpp` (CUDA build on NVIDIA PCs), so no compiler or manual build is needed.
+  The model is first converted at the precision it is stored in (`f32`, `bf16` or `f16`) and quantized from that, so no weight is rounded before quantization. Going through 16-bit for a 32-bit model changes the result: on a real 32-bit model, 9 of 12 quantized tensors came out different.
 - **AWQ and GPTQ** use [llm-compressor](https://github.com/vllm-project/llm-compressor) and save in the compressed-tensors format that vLLM loads directly.
 - When no backend is chosen, OCQ picks AWQ/GPTQ on a Linux NVIDIA machine where the model fits in VRAM, and GGUF everywhere else.
 
@@ -155,6 +156,8 @@ If a repo has no readable safetensors headers or `config.json`, sizes fall back 
 
 - `<= N` is a limit: every token reads all the weights once, so speed cannot exceed bandwidth / model size. On the test machine a 7B model reached 98% of this limit on the GPU; small models and CPU runs stay well below it.
 - `~ N` is the expected speed, fitted to GGUF benchmarks already run on this PC (`seconds per token = fixed + per GB x size`). It appears once two models of different sizes have been benchmarked on the same device, and every `optimize --execute` adds a data point. On the test machine the fit reproduces its own measurements within 6% on CPU, and within about 20% on GPU for models under 1 GB and 1% at 7B.
+
+The fit assumes models of ordinary depth, like the ones it was measured on. A 1-layer test model ran 7x faster than the fit expected, because the fixed cost per token depends on the number of layers.
 
 Time to first token is always measured, never predicted.
 

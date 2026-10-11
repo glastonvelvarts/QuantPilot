@@ -59,9 +59,10 @@ class GGUFQuantizer(Quantizer):
         gguf_type = plan.quant_config.gguf_type
         workspace = plan.output_dir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
-        full_precision = workspace / "model-f16.gguf"
+        precision = intermediate_precision(plan.model.stored_precision)
+        full_precision = workspace / f"model-{precision}.gguf"
 
-        print("Converting to GGUF (f16) ...", flush=True)
+        print(f"Converting to GGUF ({precision}, the precision the model is stored in) ...")
         run_tool(
             [
                 sys.executable,
@@ -70,7 +71,7 @@ class GGUFQuantizer(Quantizer):
                 "--outfile",
                 str(full_precision),
                 "--outtype",
-                "f16",
+                precision,
             ],
             log=workspace / "convert.log",
         )
@@ -159,6 +160,15 @@ class GGUFQuantizer(Quantizer):
             sample_output=text.strip(),
             notes=notes,
         )
+
+
+def intermediate_precision(stored_precision: str) -> str:
+    """Quantize from exactly what the repo stores.
+
+    A 16-bit copy of a 32-bit model rounds almost every weight before quantization starts.
+    f32 holds any model without loss, so it is also the answer when the precision is unknown.
+    """
+    return {"BF16": "bf16", "F16": "f16"}.get(stored_precision, "f32")
 
 
 def has_openmp_runtime() -> bool:

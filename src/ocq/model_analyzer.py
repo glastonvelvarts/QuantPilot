@@ -37,11 +37,15 @@ MODEL_CACHE = Path.home() / ".cache" / "ocq" / "models"
 GB = 1024**3
 DEFAULT_CONTEXT = 4096
 
-LEVELS = ("FP16", "Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")
+UNQUANTIZED = ("F32", "BF16", "F16", "FP16")
+QUANTIZED_LEVELS = ("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")
 
 # Only used when a repo has no readable tensor shapes. Computed with model_size.py on
 # Qwen2.5-7B, so they are real averages for a typical model rather than nominal bit widths.
 AVERAGE_BITS = {
+    "F32": 32.0,
+    "BF16": 16.0,
+    "F16": 16.0,
     "FP16": 16.0,
     "Q8_0": 8.5,
     "Q6_K": 6.56,
@@ -260,8 +264,10 @@ def architecture_from(config: dict) -> dict:
 def quant_options(
     model: ModelSnapshot, hardware: HardwareProfile, context: int = DEFAULT_CONTEXT
 ) -> list[QuantOption]:
+    """The model as it is stored first, then each quantization level from best to smallest."""
+    levels = (model.stored_precision or "FP16", *QUANTIZED_LEVELS)
     return [
-        fit_at(label, gguf_weights_gb(model, label), model, hardware, context) for label in LEVELS
+        fit_at(label, gguf_weights_gb(model, label), model, hardware, context) for label in levels
     ]
 
 
@@ -296,7 +302,7 @@ def gguf_weights_gb(model: ModelSnapshot, gguf_type: str) -> float:
 
 
 def best_option(options: list[QuantOption]) -> QuantOption:
-    quantized = [option for option in options if option.label != "FP16"]
+    quantized = [option for option in options if option.label not in UNQUANTIZED]
     for option in quantized:
         if option.fit_level in (FitLevel.PERFECT, FitLevel.GOOD):
             return option
