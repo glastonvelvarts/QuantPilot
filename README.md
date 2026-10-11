@@ -12,7 +12,7 @@ QuantPilot combines [llmfit](https://github.com/AlexsJones/llmfit) with a **univ
 ## Key Features
 
 - **Works on any PC**: hardware comes from llmfit when it is available and from a built-in probe (psutil, `nvidia-smi`, OS queries) when it is not. Nothing hard-fails because a tool is missing.
-- **Tells you what can and cannot run**: `feasibility` shows, for every quantization level from FP16 down to Q2, exactly how much memory the model needs, whether it fits in the VRAM that is free right now, spills into RAM, or does not fit at all.
+- **Tells you what can and cannot run**: `feasibility` lists the model **as stored** (F32, BF16, or F16 from HuggingFace safetensors metadata) and each **GGUF quant level** from Q8_0 down to Q2_K, with exact weight + context memory, fit, run mode, and speed.
 - **No invented numbers**: sizes are computed from the model's real tensor shapes with llama.cpp's own rules, hardware figures are read or measured on the machine, and speed is either a physical limit or a fit to benchmarks this PC has already run. See [How the numbers are calculated](#how-the-numbers-are-calculated).
 - **Quantization control**: choose the backend, bit width, exact GGUF type, group size and calibration size, or leave any of them on auto.
 - **Dynamic Hardware & Interconnect Resolution**:
@@ -37,7 +37,23 @@ QuantPilot combines [llmfit](https://github.com/AlexsJones/llmfit) with a **univ
 - **GGUF** uses llama.cpp. The official llama.cpp release for your OS is downloaded on first use into `~/.cache/ocq/llama.cpp` (CUDA build on NVIDIA PCs), so no compiler or manual build is needed.
   The model is first converted at the precision it is stored in (`f32`, `bf16` or `f16`) and quantized from that, so no weight is rounded before quantization. Going through 16-bit for a 32-bit model changes the result: on a real 32-bit model, 9 of 12 quantized tensors came out different.
 - **AWQ and GPTQ** use [llm-compressor](https://github.com/vllm-project/llm-compressor) and save in the compressed-tensors format that vLLM loads directly.
-- When no backend is chosen, OCQ picks AWQ/GPTQ on a Linux NVIDIA machine where the model fits in VRAM, and GGUF everywhere else.
+- When no backend is chosen, OCQ picks AWQ/GPTQ on a **Linux** NVIDIA machine when the model fits in VRAM and calibration fits in RAM; **GGUF** everywhere else (including **Windows with NVIDIA**).
+
+---
+
+## Precisions (what is and is not supported)
+
+| Layer | Supported | Notes |
+|-------|-----------|--------|
+| **Feasibility / sizing** | **F32**, **BF16**, **F16** (shown as stored dtype), **Q8_0 … Q2_K** | Weights sized from real tensor shapes + llama.cpp quant rules; `original_gb` uses HF per-dtype byte counts when available. |
+| **GGUF convert (intermediate)** | **f32**, **bf16**, **f16** | Chosen from the model’s stored precision (`--outtype` matches the checkpoint, not always f16). |
+| **GGUF output (`optimize`)** | **Q2_K … Q8_0** (all `--gguf-type` values) | Always quantizes; there is no “export full BF16/F32 GGUF only” mode yet. |
+| **AWQ** | **4-bit** | NVIDIA GPU, Linux for auto-pick; [llm-compressor](https://github.com/vllm-project/llm-compressor). |
+| **GPTQ** | **4-bit**, **8-bit** | GPU or slow CPU calibration. |
+| **BNB** | **4-bit** (NF4), **8-bit** | NVIDIA GPU. |
+| **Not supported** | FP8, MXFP4, MLX export, “quantize to FP16 file” | — |
+
+KV cache in fit math is modeled as **16-bit** keys/values (standard for llama.cpp-style serving).
 
 ---
 
@@ -64,6 +80,13 @@ $env:UV_PROJECT_ENVIRONMENT = "$HOME\.venvs\quantpilot"
 ```
 
 Linux needs the OpenMP runtime for llama.cpp: `sudo apt install libgomp1` (already there if `gcc` is installed).
+
+**Quick end-to-end demo** (~2 min, needs `--extra gguf`):
+
+```sh
+uv sync --group dev --extra gguf
+uv run ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct --backend gguf --gguf-type Q4_K_M --execute
+```
 
 ---
 
@@ -94,7 +117,7 @@ uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct --execute
 | `profile` | CPU, RAM, GPU, memory bandwidth, PCIe rate, free disk. |
 | `backends` | Which quantization backends are installed and usable on this PC, and why not. |
 | `recommend` | Models that suit this PC (llmfit catalog, or a built-in list of open models). |
-| `feasibility` | Fit, run mode (`gpu`, `gpu_offload`, `cpu`, `unfit`) and predicted tokens/sec per quantization level. |
+| `feasibility` | Stored precision row + Q8_0…Q2_K table: fit, run mode (`gpu`, `gpu_offload`, `cpu`, `unfit`), tokens/sec. |
 | `plan` | The quantization that would run, with warnings about disk, RAM and VRAM. |
 | `optimize` | Full pipeline: analyze -> plan -> quantize -> validate -> benchmark. Dry run unless `--execute`. |
 
@@ -139,7 +162,7 @@ GGUF artifacts are benchmarked with llama.cpp: speed is the average of 3 runs of
 
 **Memory needed = weights + context.**
 
-- **Weights** come from the name and shape of every tensor in the model, read from the safetensors file headers on HuggingFace (the weights themselves are not downloaded). For GGUF, each tensor gets the type llama-quantize would give it, including the mixed types inside `Q4_K_M` and friends and the fallback types for widths that are not a multiple of 256. Checked against `llama-quantize --dry-run` for all 12 types on two models: within 0.02%. For AWQ, GPTQ and bitsandbytes the packed size is within 1% of the real artifacts.
+- **Weights** come from the name and shape of every tensor in the model, read from the safetensors file headers on HuggingFace (the weights themselves are not downloaded). The first feasibility row uses the **stored dtype** (F32/BF16/F16). For GGUF quants, each tensor gets the type llama-quantize would give it, including mixed types inside `Q4_K_M` and fallbacks for odd widths. For AWQ, GPTQ and bitsandbytes the packed size is computed from the same tensor list.
 - **Context** is the key/value cache (`2 x layers x context x kv_heads x head_dim x 2 bytes`, from the model's `config.json`) plus llama.cpp's output buffer (`vocab x 512 x 4 bytes`). The cache matches llama.cpp's load log to the megabyte. A few tens of MB of scratch buffers are not counted.
 - **Fit** compares that with the VRAM and RAM that are free at this moment, not the totals.
 
