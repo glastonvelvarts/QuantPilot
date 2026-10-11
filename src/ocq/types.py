@@ -185,6 +185,8 @@ class QuantOption:
     run_mode: RunMode
     estimated_tps: float
     speed_basis: str = ""
+    # stored = checkpoint as saved; gguf = llama.cpp quant; awq/gptq/bnb = HF serving formats
+    row_kind: str = "gguf"
 
     @property
     def runnable(self) -> bool:
@@ -234,7 +236,8 @@ class ModelSnapshot:
     # Name and shape of every weight tensor, read from the model's files without downloading them.
     tensors: tuple[tuple[str, tuple[int, ...]], ...] = field(default=(), repr=False)
 
-    catalog_source: str = "llmfit"  # llmfit | huggingface
+    catalog_source: str = "llmfit"  # llmfit | huggingface | local
+    weights_dir: Path | None = None  # local HuggingFace-format folder; skip Hub download
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:

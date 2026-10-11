@@ -180,6 +180,19 @@ def packed_weights_bytes(tensors: list[Tensor], bits: int, group_size: int) -> i
     return int(total)
 
 
+def group_size_that_fits(tensors: list[Tensor], wanted: int) -> int:
+    """AWQ and GPTQ need the group size to divide the width of every layer they quantize."""
+    widths = {
+        shape[-1]
+        for name, shape in tensors
+        if len(shape) >= 2 and tensor_role(name) not in ("token_embd", "output")
+    }
+    for size in (wanted, 128, 64, 32, 16, 8):
+        if size <= wanted and all(width % size == 0 for width in widths):
+            return size
+    return wanted
+
+
 def kv_cache_bytes(layers: int, kv_heads: int, head_dim: int, context: int) -> int:
     """Keys and values, 16-bit each, for every layer and every token of context."""
     return 2 * layers * context * kv_heads * head_dim * 2

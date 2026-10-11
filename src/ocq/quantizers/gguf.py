@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ocq.quantizers.base import download_model, model_slug
+from ocq.quantizers.base import model_slug, model_weights_dir
 from ocq.quantizers.llama_cpp import converter_script, tool_path
 from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, Quantizer
 from ocq.types import (
@@ -50,7 +50,7 @@ class GGUFQuantizer(Quantizer):
     def prepare(self, plan: OptimizationPlan) -> None:
         self.converter = converter_script()
         self.quantize_tool = tool_path("llama-quantize", plan.hardware)
-        self.model_dir = download_model(plan.model_id)
+        self.model_dir = model_weights_dir(plan)
 
     def calibrate(self, plan: OptimizationPlan) -> None:
         return

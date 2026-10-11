@@ -73,3 +73,22 @@ QWEN_CONFIG = {
     "vocab_size": 151936,
     "max_position_embeddings": 32768,
 }
+
+
+def write_safetensors(path, tensors, dtype: str = "BF16") -> None:
+    """Writes only the header of a safetensors file: names, shapes and types, no weight data."""
+    import json
+    import math
+
+    width = {"F32": 4, "BF16": 2, "F16": 2}[dtype]
+    header, offset = {}, 0
+    for name, shape in tensors:
+        size = math.prod(shape) * width
+        header[name] = {
+            "dtype": dtype,
+            "shape": list(shape),
+            "data_offsets": [offset, offset + size],
+        }
+        offset += size
+    encoded = json.dumps(header).encode()
+    path.write_bytes(len(encoded).to_bytes(8, "little") + encoded)

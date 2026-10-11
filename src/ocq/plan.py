@@ -11,6 +11,7 @@ from ocq.engine import (
     calibration_fits_in_ram,
     decide_quant_config,
 )
+from ocq.local_model import NO_TOKENIZER, has_tokenizer
 from ocq.model_analyzer import predict_for_config
 from ocq.quantizers import get_quantizer
 from ocq.types import (
@@ -51,6 +52,14 @@ def generate_plan(
         )
     if not model.feasibility.runnable:
         warnings.append("Model is Too Tight on this PC. It may not load after quantization.")
+    asked_group = choices.group_size if choices else None
+    if asked_group and asked_group != config.group_size:
+        warnings.append(
+            f"Group size {asked_group} does not divide this model's layer widths, "
+            f"using {config.group_size}."
+        )
+    if model.weights_dir is not None and not has_tokenizer(model.weights_dir):
+        warnings.append(NO_TOKENIZER.format(folder=model.weights_dir))
     warnings += quantization_warnings(hardware, model, config, output_dir)
 
     return OptimizationPlan(

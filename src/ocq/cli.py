@@ -17,7 +17,7 @@ from ocq.hardware import detect_hardware
 from ocq.model_analyzer import DEFAULT_CONTEXT, quant_options, recommend_models, resolve_model
 from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
-from ocq.quantizers import backend_status
+from ocq.quantizers import backend_status, get_quantizer
 from ocq.types import (
     FitLevel,
     OcqError,
@@ -43,7 +43,12 @@ FIT_COLORS = {
 }
 
 ModelArg = Annotated[
-    str, typer.Argument(help="HuggingFace model id, for example Qwen/Qwen2.5-7B-Instruct")
+    str | None,
+    typer.Argument(help="HuggingFace id (org/name) or path to a local model folder"),
+]
+ModelPath = Annotated[
+    Path | None,
+    typer.Option("--model-path", "-m", help="Local model folder saved with save_pretrained()"),
 ]
 LlmfitBin = Annotated[str | None, typer.Option("--llmfit-bin", help="Path to the llmfit binary")]
 Goal = Annotated[str, typer.Option("--goal", "-g", help="balanced, speed, quality or memory")]
@@ -109,8 +114,23 @@ def read_choices(
     )
 
 
-def default_output(model_id: str) -> Path:
-    return Path.cwd() / "ocq-output" / model_id.replace("/", "--")
+def model_ref(model: str | None, model_path: Path | None) -> str:
+    if model_path is not None:
+        if model:
+            raise typer.BadParameter("Pass either MODEL or --model-path (-m), not both.")
+        return str(model_path)
+    if not model:
+        raise typer.BadParameter(
+            "Pass a HuggingFace model id or --model-path (-m) to a local checkpoint folder."
+        )
+    return model
+
+
+def default_output(model_ref: str) -> Path:
+    from ocq.local_model import parse_model_ref, slug_local
+
+    display_id, _ = parse_model_ref(model_ref)
+    return Path.cwd() / "ocq-output" / slug_local(display_id)
 
 
 def colored_fit(fit_level) -> str:
@@ -205,12 +225,16 @@ def cmd_recommend(
 
 @app.command("feasibility")
 def cmd_feasibility(
-    model: ModelArg, context: Context = DEFAULT_CONTEXT, llmfit_bin: LlmfitBin = None
+    model: ModelArg = None,
+    model_path: ModelPath = None,
+    context: Context = DEFAULT_CONTEXT,
+    llmfit_bin: LlmfitBin = None,
 ) -> None:
     """Show whether a model can run on this PC at each quantization level."""
+    ref = model_ref(model, model_path)
     try:
         hw = detect_hardware(llmfit_bin)
-        snapshot = resolve_model(model, hw, llmfit_bin, context)
+        snapshot = resolve_model(ref, hw, llmfit_bin, context)
     except OcqError as exc:
         raise fail(exc) from exc
 
@@ -236,8 +260,11 @@ def cmd_feasibility(
         )
     )
 
-    table = Table(title="By quantization level, sizes in GB (first row is the model as stored)")
+    table = Table(
+        title="By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB — same tensor math)"
+    )
     table.add_column("Level", no_wrap=True)
+    table.add_column("Backend", no_wrap=True)
     for column in ("Bits", "Weights", "Context", "Needs"):
         table.add_column(column, no_wrap=True, justify="right")
     table.add_column("Fit", no_wrap=True)
@@ -246,6 +273,7 @@ def cmd_feasibility(
     for option in options:
         table.add_row(
             option.label,
+            backend_cell(option, hw),
             f"{option.bits:.2f}",
             f"{option.weights_gb:.2f}",
             f"{option.context_gb:.2f}",
@@ -265,6 +293,21 @@ def cmd_feasibility(
         )
 
 
+def backend_cell(option, hardware) -> str:
+    if option.row_kind == "stored":
+        return "original"
+    if option.row_kind == "gguf":
+        ready, _ = get_quantizer(QuantAlgorithm.GGUF).check(hardware)
+        return "gguf" if ready else "gguf [dim](install --extra gguf)[/dim]"
+    try:
+        algorithm = QuantAlgorithm(option.row_kind)
+    except ValueError:
+        return option.row_kind
+    ready, _ = get_quantizer(algorithm).check(hardware)
+    name = algorithm.value
+    return name if ready else f"{name} [dim](install --extra {name})[/dim]"
+
+
 def speed_cell(option) -> str:
     if not option.runnable:
         return "-"
@@ -274,7 +317,8 @@ def speed_cell(option) -> str:
 
 @app.command("plan")
 def cmd_plan(
-    model: ModelArg,
+    model: ModelArg = None,
+    model_path: ModelPath = None,
     goal: Goal = "balanced",
     backend: Backend = None,
     bits: Bits = None,
@@ -287,12 +331,18 @@ def cmd_plan(
     llmfit_bin: LlmfitBin = None,
 ) -> None:
     """Show the quantization plan without running it."""
+    ref = model_ref(model, model_path)
     choices = read_choices(backend, bits, gguf_type, group_size, samples, seq_len, context)
     try:
         hw = detect_hardware(llmfit_bin)
-        snapshot = resolve_model(model, hw, llmfit_bin, context)
+        snapshot = resolve_model(ref, hw, llmfit_bin, context)
         plan = generate_plan(
-            model, hw, snapshot, read_goal(goal), output or default_output(model), choices
+            snapshot.model_id,
+            hw,
+            snapshot,
+            read_goal(goal),
+            output or default_output(ref),
+            choices,
         )
     except OcqError as exc:
         raise fail(exc) from exc
@@ -302,7 +352,8 @@ def cmd_plan(
 
 @app.command("optimize")
 def cmd_optimize(
-    model: ModelArg,
+    model: ModelArg = None,
+    model_path: ModelPath = None,
     goal: Goal = "balanced",
     backend: Backend = None,
     bits: Bits = None,
@@ -319,12 +370,13 @@ def cmd_optimize(
     llmfit_bin: LlmfitBin = None,
 ) -> None:
     """One click: analyze -> plan -> quantize -> validate -> benchmark."""
+    ref = model_ref(model, model_path)
     choices = read_choices(backend, bits, gguf_type, group_size, samples, seq_len, context)
     try:
         result = run_optimize(
-            model,
+            ref,
             read_goal(goal),
-            output or default_output(model),
+            output or default_output(ref),
             dry_run=dry_run,
             llmfit_bin=llmfit_bin,
             choices=choices,

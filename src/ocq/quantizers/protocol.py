@@ -114,5 +114,6 @@ class Quantizer(ABC):
 
 
 def size_gb(path: Path) -> float:
-    files = [path] if path.is_file() else [f for f in path.rglob("*") if f.is_file()]
+    """Size of the weights. A model folder also holds tokenizer files, which are not counted."""
+    files = [path] if path.is_file() else list(path.rglob("*.safetensors"))
     return sum(f.stat().st_size for f in files) / 1024**3

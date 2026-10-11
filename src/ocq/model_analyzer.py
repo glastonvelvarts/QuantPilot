@@ -12,10 +12,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from ocq import measurements
+from ocq.engine import default_group_size
 from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
+from ocq.local_model import fetch_local_model_files, local_hf_meta, parse_model_ref
 from ocq.model_size import (
     Tensor,
     gguf_weights_bytes,
+    group_size_that_fits,
     kv_cache_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
@@ -39,6 +42,15 @@ DEFAULT_CONTEXT = 4096
 
 UNQUANTIZED = ("F32", "BF16", "F16", "FP16")
 QUANTIZED_LEVELS = ("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")
+
+# Rows shown after GGUF levels — packed size from tensor shapes + default group sizes.
+HF_QUANT_ROWS = (
+    (QuantAlgorithm.AWQ, 4),
+    (QuantAlgorithm.GPTQ, 4),
+    (QuantAlgorithm.GPTQ, 8),
+    (QuantAlgorithm.BNB, 4),
+    (QuantAlgorithm.BNB, 8),
+)
 
 # Only used when a repo has no readable tensor shapes. Computed with model_size.py on
 # Qwen2.5-7B, so they are real averages for a typical model rather than nominal bit widths.
@@ -80,11 +92,25 @@ STARTER_MODELS = {
 
 
 def resolve_model(
-    model_id: str,
+    model_ref: str,
     hardware: HardwareProfile,
     llmfit_bin: str | None = None,
     context: int = DEFAULT_CONTEXT,
 ) -> ModelSnapshot:
+    display_id, local_dir = parse_model_ref(model_ref)
+    if local_dir is not None:
+        config, tensors, parameters = fetch_local_model_files(local_dir)
+        meta = local_hf_meta(parameters)
+        snapshot = build_snapshot(display_id, meta, config, tensors, hardware, context)
+        return replace(
+            snapshot,
+            provider="local",
+            use_case="Fine-tuned / local checkpoint",
+            catalog_source="local",
+            weights_dir=local_dir,
+        )
+
+    model_id = display_id
     catalog = catalog_entry(model_id, llmfit_bin)
     try:
         meta = fetch_hf_model(model_id)
@@ -237,10 +263,18 @@ def build_snapshot(
             memory_required_gb=best.memory_required_gb,
             memory_available_gb=best.memory_available_gb,
             utilization_pct=best.utilization_pct,
-            runtime="llama.cpp",
+            runtime=runtime_for_row(best),
             estimate_confidence=best.speed_basis,
         ),
     )
+
+
+def runtime_for_row(option: QuantOption) -> str:
+    if option.row_kind == "gguf":
+        return "llama.cpp"
+    if option.row_kind == "stored":
+        return "transformers (full precision)"
+    return "vLLM / transformers"
 
 
 def architecture_from(config: dict) -> dict:
@@ -264,11 +298,60 @@ def architecture_from(config: dict) -> dict:
 def quant_options(
     model: ModelSnapshot, hardware: HardwareProfile, context: int = DEFAULT_CONTEXT
 ) -> list[QuantOption]:
-    """The model as it is stored first, then each quantization level from best to smallest."""
-    levels = (model.stored_precision or "FP16", *QUANTIZED_LEVELS)
-    return [
-        fit_at(label, gguf_weights_gb(model, label), model, hardware, context) for label in levels
+    """Stored checkpoint, GGUF levels, then AWQ/GPTQ/BNB packed sizes from the same tensors."""
+    stored = model.stored_precision or "FP16"
+    options: list[QuantOption] = [
+        fit_at(
+            stored,
+            gguf_weights_gb(model, stored),
+            model,
+            hardware,
+            context,
+            use_measurements=False,
+            row_kind="stored",
+        )
     ]
+    for label in QUANTIZED_LEVELS:
+        options.append(
+            fit_at(
+                label,
+                gguf_weights_gb(model, label),
+                model,
+                hardware,
+                context,
+                use_measurements=True,
+                row_kind="gguf",
+            )
+        )
+    for algorithm, bits in HF_QUANT_ROWS:
+        options.append(hf_quant_option(model, hardware, context, algorithm, bits))
+    return options
+
+
+def hf_quant_option(
+    model: ModelSnapshot,
+    hardware: HardwareProfile,
+    context: int,
+    algorithm: QuantAlgorithm,
+    bits: int,
+) -> QuantOption:
+    group_size = default_group_size(algorithm, bits)
+    if model.tensors:
+        if group_size:
+            group_size = group_size_that_fits(list(model.tensors), group_size)
+        weights_gb = packed_weights_bytes(list(model.tensors), bits, group_size) / GB
+    else:
+        weights_gb = model.params_b * 1e9 * (bits + 0.5) / 8 / GB
+    label = f"{algorithm.value.upper()} {bits}-bit"
+    return fit_at(
+        label,
+        weights_gb,
+        model,
+        hardware,
+        context,
+        use_measurements=False,
+        row_kind=algorithm.value,
+    )
 
 
 def predict_for_config(
@@ -291,6 +374,7 @@ def predict_for_config(
         hardware,
         config.context,
         use_measurements=config.algorithm == QuantAlgorithm.GGUF,
+        row_kind=("gguf" if config.algorithm == QuantAlgorithm.GGUF else config.algorithm.value),
     )
 
 
@@ -302,7 +386,7 @@ def gguf_weights_gb(model: ModelSnapshot, gguf_type: str) -> float:
 
 
 def best_option(options: list[QuantOption]) -> QuantOption:
-    quantized = [option for option in options if option.label not in UNQUANTIZED]
+    quantized = [option for option in options if option.row_kind != "stored"]
     for option in quantized:
         if option.fit_level in (FitLevel.PERFECT, FitLevel.GOOD):
             return option
@@ -319,6 +403,7 @@ def fit_at(
     hardware: HardwareProfile,
     context: int,
     use_measurements: bool = True,
+    row_kind: str = "gguf",
 ) -> QuantOption:
     context_gb = 0.0
     if model.architecture_known:
@@ -361,6 +446,7 @@ def fit_at(
         run_mode=run_mode,
         estimated_tps=speed,
         speed_basis=speed_basis,
+        row_kind=row_kind,
     )
 
 
