@@ -1,4 +1,4 @@
-# QuantPilot- An OCQ(One click Quantizer)
+# QuantPilot — One-Click Quantizer (OCQ)
 
 Terminal LLM optimizer: **model + hardware telemetry + goal -> optimal quantization plan -> quantized artifact**.
 
@@ -26,8 +26,16 @@ QuantPilot integrates [llmfit](https://github.com/AlexsJones/llmfit) with a **un
 
 ## Setup
 
+Project directory on disk: **`quantPilot`** (not `llmfit`). If your folder is still named `llmfit`, close Cursor/terminals using it, then:
+
+```powershell
+Rename-Item "$HOME\OneDrive\Desktop\llmfit" "quantPilot"
+```
+
+Reopen the `quantPilot` folder in Cursor.
+
 ```sh
-# Clone and install dependencies with uv
+cd quantPilot
 uv sync --group dev
 
 # Install llmfit (external system detection dependency)

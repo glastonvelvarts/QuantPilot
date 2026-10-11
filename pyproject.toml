@@ -1,12 +1,12 @@
 [project]
 name = "ocq"
 version = "0.1.0"
-description = "OCQ - One-Click Quantizer, terminal LLM optimizer"
+description = "QuantPilot (OCQ) - terminal LLM quantization optimizer"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "OCQ contributors" }]
-keywords = ["llm", "quantization", "awq", "gptq", "llmfit", "cli"]
+authors = [{ name = "QuantPilot contributors" }]
+keywords = ["llm", "quantization", "awq", "gptq", "quantpilot", "ocq", "cli"]
 dependencies = [
     "typer>=0.12",
     "rich>=13.7",
