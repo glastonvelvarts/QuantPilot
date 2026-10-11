@@ -1,4 +1,7 @@
-![QuantPilot banner](assets/banner.svg)
+<p align="center">
+  <img src="assets/banner.png" alt="QuantPilot — One-Click Quantizer" width="100%" />
+</p>
+
 # QuantPilot — One-Click Quantizer (OCQ)
 Terminal LLM optimizer: **inspect the PC -> see which models it can run -> pick a quantization -> get a quantized, validated, benchmarked artifact**.
 
