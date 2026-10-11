@@ -1,49 +1,67 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img" aria-labelledby="title desc">
-  <title id="title">QuantPilot — One-Click Quantizer</title>
-  <desc id="desc">Terminal LLM optimizer: inspect, fit, quantize, validate, benchmark.</desc>
+  <title id="title">QuantPilot — quantization planner and validator for local LLM inference</title>
+  <desc id="desc">Bit-width ladder from FP16 to 2-bit, and the inspect, plan, quantize, validate, benchmark pipeline.</desc>
   <defs>
-    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#101827"/>
-      <stop offset="100%" stop-color="#0c1322"/>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#6366f1"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.85" cy="0.1" r="0.55">
-      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.16"/>
-      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#22c55e"/>
-      <stop offset="50%" stop-color="#eab308"/>
-      <stop offset="100%" stop-color="#f43f5e"/>
-    </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#22d3ee"/>
-      <stop offset="100%" stop-color="#818cf8"/>
-    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#e5e7eb" stroke-width="1"/>
+    </pattern>
   </defs>
 
-  <!-- Page background -->
-  <rect width="1280" height="400" fill="#0a0f1a"/>
+  <!-- Background -->
+  <rect width="1280" height="400" fill="#fafafa"/>
+  <rect width="1280" height="400" fill="url(#grid)" opacity="0.6"/>
 
-  <!-- Hero card -->
-  <rect x="60" y="40" width="1160" height="320" rx="24" fill="url(#card)" stroke="#1e293b" stroke-width="1.5"/>
-  <rect x="60" y="40" width="1160" height="320" rx="24" fill="url(#glow)"/>
+  <!-- Left: identity -->
+  <text x="72" y="130" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="64" font-weight="700" fill="#111827" letter-spacing="-1.5">QuantPilot</text>
+  <text x="74" y="172" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="500" fill="#4b5563">Quantization planner and validator</text>
+  <text x="74" y="200" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="500" fill="#4b5563">for local LLM inference</text>
+  <text x="74" y="262" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="18" fill="#6b7280">gguf · awq · gptq · bnb</text>
+  <text x="74" y="290" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="18" fill="#6b7280">ocq optimize &lt;model&gt; --execute</text>
 
-  <!-- Gauge icon -->
-  <g transform="translate(250 130)">
-    <path d="M 0 90 A 70 70 0 0 1 140 90" fill="none" stroke="url(#arc)" stroke-width="14" stroke-linecap="round"/>
-    <line x1="70" y1="90" x2="118" y2="46" stroke="#e2e8f0" stroke-width="6" stroke-linecap="round"/>
-    <circle cx="70" cy="90" r="11" fill="#0c1322" stroke="#e2e8f0" stroke-width="5"/>
-    <rect x="12" y="130" width="116" height="7" rx="3.5" fill="#334155"/>
-    <rect x="12" y="150" width="82" height="7" rx="3.5" fill="#f43f5e"/>
-    <rect x="12" y="170" width="116" height="7" rx="3.5" fill="#334155"/>
+  <!-- Right: bit-width ladder -->
+  <g font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="16">
+    <text x="520" y="64" fill="#6b7280">BITS    WEIGHT SIZE (RELATIVE)</text>
+
+    <text x="520" y="104" fill="#111827">FP16</text>
+    <rect x="600" y="88" width="600" height="22" rx="3" fill="#cbd5e1"/>
+
+    <text x="520" y="142" fill="#111827">8</text>
+    <rect x="600" y="126" width="300" height="22" rx="3" fill="url(#bar)"/>
+
+    <text x="520" y="180" fill="#111827">6</text>
+    <rect x="600" y="164" width="225" height="22" rx="3" fill="url(#bar)"/>
+
+    <text x="520" y="218" fill="#111827">5</text>
+    <rect x="600" y="202" width="187" height="22" rx="3" fill="url(#bar)"/>
+
+    <text x="520" y="256" fill="#111827">4</text>
+    <rect x="600" y="240" width="150" height="22" rx="3" fill="url(#bar)"/>
+
+    <text x="520" y="294" fill="#111827">3</text>
+    <rect x="600" y="278" width="112" height="22" rx="3" fill="url(#bar)"/>
+
+    <text x="520" y="332" fill="#111827">2</text>
+    <rect x="600" y="316" width="75" height="22" rx="3" fill="url(#bar)"/>
   </g>
 
-  <!-- Wordmark -->
-  <text x="450" y="235" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="128" font-weight="800" letter-spacing="-4"><tspan fill="#e2e8f0">quant</tspan><tspan fill="url(#accent)">pilot</tspan></text>
-
-  <!-- Tagline -->
-  <text x="452" y="296" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" font-weight="500" fill="#94a3b8">One-Click Quantizer — quantize, validate and benchmark LLMs for your PC</text>
-
-  <!-- Terminal prompt -->
-  <text x="452" y="334" font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="22" fill="#22d3ee">$ ocq optimize &lt;model&gt; --execute</text>
+  <!-- Bottom: pipeline -->
+  <rect x="0" y="352" width="1280" height="48" fill="#111827"/>
+  <g font-family="'JetBrains Mono', Menlo, Consolas, monospace" font-size="16" fill="#e5e7eb" text-anchor="middle">
+    <text x="130" y="382">analyze</text>
+    <text x="320" y="382">plan</text>
+    <text x="510" y="382">quantize</text>
+    <text x="700" y="382">validate</text>
+    <text x="900" y="382">benchmark</text>
+    <text x="1120" y="382" fill="#38bdf8">load → generate</text>
+  </g>
+  <g stroke="#38bdf8" stroke-width="2" fill="none">
+    <line x1="190" y1="376" x2="262" y2="376"/>
+    <line x1="380" y1="376" x2="452" y2="376"/>
+    <line x1="570" y1="376" x2="642" y2="376"/>
+    <line x1="760" y1="376" x2="832" y2="376"/>
+  </g>
 </svg>
