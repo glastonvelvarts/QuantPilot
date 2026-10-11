@@ -1,55 +1,92 @@
-"""Optimization engine — selects algorithm, bit width, and calibration params."""
+"""Optimization engine: picks the backend, bit width and calibration settings."""
 
 from __future__ import annotations
 
 from ocq.types import (
     HardwareProfile,
     ModelSnapshot,
+    OcqError,
     OptimizationGoal,
     QuantAlgorithm,
+    QuantChoices,
     QuantConfig,
 )
 
-# Map llmfit GGUF labels to approximate target bit widths for HF quant backends.
-_GGUF_TO_BITS: dict[str, int] = {
-    "Q8_0": 8,
-    "Q6_K": 6,
-    "Q5_K_M": 5,
-    "Q5_K_S": 5,
-    "Q4_K_M": 4,
-    "Q4_0": 4,
-    "Q3_K_M": 3,
-    "Q2_K": 2,
-    "AWQ-4bit": 4,
-    "GPTQ-Int4": 4,
-    "mlx-4bit": 4,
-    "mlx-8bit": 8,
+SUPPORTED_BITS = {
+    QuantAlgorithm.GGUF: (2, 3, 4, 5, 6, 8),
+    QuantAlgorithm.AWQ: (4,),
+    QuantAlgorithm.GPTQ: (4, 8),
+    QuantAlgorithm.BNB: (4, 8),
 }
+
+GGUF_TYPES = {
+    "Q2_K": 2,
+    "Q3_K_S": 3,
+    "Q3_K_M": 3,
+    "Q3_K_L": 3,
+    "Q4_0": 4,
+    "Q4_K_S": 4,
+    "Q4_K_M": 4,
+    "Q5_0": 5,
+    "Q5_K_S": 5,
+    "Q5_K_M": 5,
+    "Q6_K": 6,
+    "Q8_0": 8,
+}
+
+DEFAULT_GGUF_TYPE = {2: "Q2_K", 3: "Q3_K_M", 4: "Q4_K_M", 5: "Q5_K_M", 6: "Q6_K", 8: "Q8_0"}
+
+# Bit width implied by the quantization label llmfit recommends.
+LABEL_BITS = {**GGUF_TYPES, "AWQ-4bit": 4, "GPTQ-Int4": 4, "mlx-4bit": 4, "mlx-8bit": 8}
 
 
 def decide_quant_config(
     hardware: HardwareProfile,
     model: ModelSnapshot,
     goal: OptimizationGoal,
-    algorithm: QuantAlgorithm | None = None,
+    choices: QuantChoices | None = None,
 ) -> QuantConfig:
-    """Pick quantization algorithm and parameters from hardware + llmfit tier."""
+    choices = choices or QuantChoices()
+    algorithm = choices.algorithm
+    asked_bits = choices.bits
+    gguf_type = (choices.gguf_type or "").upper()
 
-    bits = _bits_for_goal(model, goal)
+    if gguf_type:
+        if gguf_type not in GGUF_TYPES:
+            raise OcqError(f"Unknown GGUF type {gguf_type!r}. Use one of: {', '.join(GGUF_TYPES)}")
+        if algorithm not in (None, QuantAlgorithm.GGUF):
+            raise OcqError("--gguf-type only works with the gguf backend.")
+        if asked_bits and asked_bits != GGUF_TYPES[gguf_type]:
+            raise OcqError(f"{gguf_type} is {GGUF_TYPES[gguf_type]}-bit, not {asked_bits}-bit.")
+        algorithm = QuantAlgorithm.GGUF
+        asked_bits = GGUF_TYPES[gguf_type]
+
+    bits = asked_bits or bits_for_goal(model, goal)
     if algorithm is None:
-        algorithm = _pick_algorithm(hardware, model, bits)
-    elif algorithm == QuantAlgorithm.AWQ:
-        bits = 4
-    group_size = _default_group_size(algorithm, bits)
-    target_label = model.llmfit_best_quant
+        algorithm = pick_algorithm(hardware, model, bits)
+
+    supported = SUPPORTED_BITS[algorithm]
+    if bits not in supported:
+        if asked_bits:
+            allowed = ", ".join(str(b) for b in supported)
+            raise OcqError(
+                f"{algorithm.value.upper()} supports {allowed}-bit, not {bits}-bit. "
+                "GGUF covers 2 to 8 bits."
+            )
+        bits = min(supported, key=lambda candidate: abs(candidate - bits))
+
+    if algorithm == QuantAlgorithm.GGUF and not gguf_type:
+        gguf_type = DEFAULT_GGUF_TYPE[bits]
 
     return QuantConfig(
         algorithm=algorithm,
         bits=bits,
-        group_size=group_size,
-        calibration_samples=_calibration_samples(model.params_b),
-        calibration_seq_len=512,
-        target_quant_label=target_label,
+        group_size=choices.group_size or default_group_size(algorithm, bits),
+        calibration_samples=choices.calibration_samples or calibration_samples(model.params_b),
+        calibration_seq_len=choices.calibration_seq_len or 512,
+        target_quant_label=model.llmfit_best_quant,
+        gguf_type=gguf_type if algorithm == QuantAlgorithm.GGUF else "",
+        context=choices.context or 4096,
     )
 
 
@@ -59,95 +96,70 @@ def build_rationale(
     config: QuantConfig,
     goal: OptimizationGoal,
 ) -> list[str]:
+    fit = model.feasibility
     lines = [
         f"Goal: {goal.value}",
-        f"llmfit fit: {model.feasibility.fit_level} ({model.feasibility.run_mode})",
-        (
-            f"llmfit hypothesis: {model.feasibility.estimated_tps:.1f} tok/s "
-            f"@ {model.feasibility.quant_label} "
-            f"({model.feasibility.estimate_confidence})"
-        ),
-        f"Memory: {model.feasibility.memory_required_gb:.1f} GB required / "
-        f"{model.feasibility.memory_available_gb:.1f} GB available "
-        f"({model.feasibility.utilization_pct:.0f}% util)",
-        f"Selected backend: {config.summary()}",
+        f"Best fit on this PC: {fit.quant_label}, {fit.fit_level} ({fit.run_mode}), "
+        f"{fit.memory_required_gb:.2f} of {fit.memory_available_gb:.2f} GB free "
+        f"({fit.utilization_pct:.0f}%)",
+        f"Selected: {config.summary()}",
     ]
-    backend = hardware.backend.lower()
     if config.algorithm == QuantAlgorithm.GGUF:
-        lines.append("GGUF selected - llama.cpp export for CPU/GPU cross-platform inference.")
+        lines.append("GGUF runs on CPU, NVIDIA, AMD and Apple GPUs through llama.cpp or Ollama.")
     elif config.algorithm == QuantAlgorithm.AWQ:
-        lines.append("AWQ selected - 4-bit activation-aware weight quantization for CUDA.")
-    elif "cuda" in backend:
-        lines.append("CUDA detected - AWQ/GPTQ preferred for deployment throughput.")
-    elif "metal" in backend:
-        lines.append("Apple Silicon - consider MLX export post-quant (v2); BNB for HF weights.")
-    elif not hardware.has_gpu:
-        lines.append("No GPU - BNB 4-bit load-in-8bit path for CPU/RAM constrained inference.")
-    if not model.feasibility.runnable:
-        lines.append(
-            "Warning: llmfit marks this model Too Tight - quantization may still help "
-            "but validate memory after quant."
-        )
+        lines.append("AWQ keeps the weights that matter most accurate. Serve it with vLLM.")
+    elif config.algorithm == QuantAlgorithm.GPTQ:
+        lines.append("GPTQ corrects quantization error layer by layer. Serve it with vLLM.")
+    elif config.algorithm == QuantAlgorithm.BNB:
+        lines.append("bitsandbytes needs no calibration and loads straight into transformers.")
+    if not fit.runnable:
+        lines.append("This model is Too Tight for this PC even after quantization.")
     return lines
 
 
-def _bits_for_goal(model: ModelSnapshot, goal: OptimizationGoal) -> int:
-    base = _gguf_bits(model.llmfit_best_quant)
+def bits_for_goal(model: ModelSnapshot, goal: OptimizationGoal) -> int:
+    base = label_bits(model.llmfit_best_quant)
     if goal == OptimizationGoal.QUALITY:
         return min(8, max(base, 4))
-    if goal == OptimizationGoal.MEMORY:
-        return min(base, 4)
-    if goal == OptimizationGoal.SPEED:
+    if goal in (OptimizationGoal.MEMORY, OptimizationGoal.SPEED):
         return min(base, 4)
     return base
 
 
-def _gguf_bits(label: str) -> int:
-    for key, bits in _GGUF_TO_BITS.items():
+def label_bits(label: str) -> int:
+    for key, bits in LABEL_BITS.items():
         if key.upper() in label.upper():
             return bits
     return 4
 
 
-def _pick_algorithm(
-    hardware: HardwareProfile,
-    model: ModelSnapshot,
-    bits: int,
-) -> QuantAlgorithm:
-    backend = hardware.backend.lower()
-    runtime = model.feasibility.runtime.lower()
+def pick_algorithm(hardware: HardwareProfile, model: ModelSnapshot, bits: int) -> QuantAlgorithm:
+    """AWQ/GPTQ for a Linux GPU box that can serve with vLLM, GGUF for everything else."""
+    gpu_server = (
+        hardware.has_cuda
+        and hardware.os_name != "Windows"
+        and str(model.feasibility.run_mode).lower() in ("gpu", "gpu_full")
+    )
+    if not gpu_server or not calibration_fits_in_ram(hardware, model):
+        return QuantAlgorithm.GGUF
 
-    if "awq" in model.llmfit_best_quant.lower():
-        return QuantAlgorithm.AWQ
-    if "gptq" in model.llmfit_best_quant.lower():
+    if "gptq" in model.llmfit_best_quant.lower() or bits >= 8:
         return QuantAlgorithm.GPTQ
-
-    if hardware.has_gpu and ("cuda" in backend or "rocm" in backend):
-        # AWQ tends to win on Ampere+; GPTQ has broader tooling
-        if bits <= 4 and model.params_b >= 13:
-            return QuantAlgorithm.AWQ
-        return QuantAlgorithm.GPTQ
-
-    if "metal" in backend or "mlx" in runtime:
-        return QuantAlgorithm.BNB
-
-    if not hardware.has_gpu or (hardware.primary_vram_gb or 0) < (
-        model.feasibility.memory_required_gb
-    ):
-        return QuantAlgorithm.BNB
-
-    return QuantAlgorithm.GPTQ
+    return QuantAlgorithm.AWQ
 
 
-def _default_group_size(algorithm: QuantAlgorithm, bits: int) -> int:
-    if algorithm == QuantAlgorithm.BNB:
+def calibration_fits_in_ram(hardware: HardwareProfile, model: ModelSnapshot) -> bool:
+    """AWQ and GPTQ load the whole original model into RAM before they start."""
+    return model.original_gb <= hardware.available_ram_gb
+
+
+def default_group_size(algorithm: QuantAlgorithm, bits: int) -> int:
+    if algorithm in (QuantAlgorithm.BNB, QuantAlgorithm.GGUF):
         return 0
-    if bits <= 4:
-        return 128
-    return 64
+    return 128 if bits <= 4 else 64
 
 
-def _calibration_samples(params_b: float) -> int:
+def calibration_samples(params_b: float) -> int:
     if params_b >= 70:
         return 256
     if params_b >= 13:

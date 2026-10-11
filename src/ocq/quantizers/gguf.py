@@ -1,403 +1,187 @@
-"""GGUF quantization backend using llama.cpp."""
+"""GGUF: convert with llama.cpp's script, then quantize with llama-quantize."""
 
 from __future__ import annotations
 
+import ctypes
+import importlib.util
+import json
 import os
-import shutil
+import platform
+import re
 import subprocess
+import sys
 from pathlib import Path
 
-from ocq.quantizers.protocol import Quantizer
+from ocq.quantizers.base import download_model, model_slug
+from ocq.quantizers.llama_cpp import converter_script, tool_path
+from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, Quantizer
 from ocq.types import (
     BenchmarkResult,
+    HardwareProfile,
+    OcqError,
     OptimizationPlan,
     QuantAlgorithm,
 )
 
+BENCHMARK_REPEATS = 3
+
 
 class GGUFQuantizer(Quantizer):
-    """
-    GGUF backend powered by llama.cpp.
-
-    Pipeline:
-
-        HuggingFace model
-            ↓
-        convert_hf_to_gguf.py
-            ↓
-        FP16/BF16 GGUF
-            ↓
-        llama-quantize
-            ↓
-        Quantized GGUF
-
-    Inherits Quantizer (protocol.py) directly, NOT StubQuantizer —
-    StubQuantizer.run() hardcodes success=False with an "not implemented
-    yet" message, which is correct for backends that are only an
-    availability check, but would silently discard a REAL quantize() result
-    here. Quantizer.run() actually reports what happened.
-    """
-
     algorithm = QuantAlgorithm.GGUF
-
-    package_extra = "gguf"
-    pip_hint = (
-        "Install/build llama.cpp and make sure "
-        "`llama-quantize` is available on PATH."
-    )
+    summary = "2 to 8 bit. Runs on CPU and any GPU with llama.cpp or Ollama."
+    install_hint = "uv sync --extra gguf"
 
     def __init__(self) -> None:
         self.model_dir: Path | None = None
-        self.fp_gguf: Path | None = None
-        self.quantized_gguf: Path | None = None
-
-    # ------------------------------------------------------------------
-    # Availability
-    # ------------------------------------------------------------------
+        self.converter: Path | None = None
+        self.quantize_tool: Path | None = None
+        self.artifact: Path | None = None
 
     @classmethod
     def is_available(cls) -> bool:
-        """
-        Check whether llama.cpp's quantization binary is available.
-        """
+        # The converter script needs these. The llama.cpp binaries are downloaded on first use.
+        return all(importlib.util.find_spec(module) for module in ("torch", "transformers"))
 
-        return (
-            shutil.which("llama-quantize") is not None
-            or shutil.which("llama-quantize.exe") is not None
-        )
-
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
-
-    def validate(
-        self,
-        plan: OptimizationPlan,
-    ) -> tuple[bool, str]:
-        """
-        Validate llama.cpp and the model configuration.
-        """
-
-        if not self.is_available():
-            return False, f"GGUF backend not ready. {self.pip_hint}"
-
-        quantize_bin = self._find_quantize_binary()
-
-        if quantize_bin is None:
-            return (
-                False,
-                "llama-quantize not found. "
-                "Build llama.cpp and add its bin directory to PATH.",
-            )
-
-        if not plan.model_id:
-            return False, "Model ID is required."
-
-        if plan.quant_config.bits not in {2, 3, 4, 5, 6, 8}:
-            return (
-                False,
-                f"Unsupported GGUF bit width: {plan.quant_config.bits}",
-            )
-
-        return (
-            True,
-            f"GGUF backend ready: {quantize_bin}",
-        )
-
-    # ------------------------------------------------------------------
-    # Prepare
-    # ------------------------------------------------------------------
+    def check(self, hardware: HardwareProfile) -> tuple[bool, str]:
+        if platform.system() == "Linux" and not has_openmp_runtime():
+            return False, "llama.cpp needs the OpenMP runtime. Run: sudo apt install libgomp1"
+        return super().check(hardware)
 
     def prepare(self, plan: OptimizationPlan) -> None:
-        """
-        Download the HuggingFace model into the OCQ workspace.
-
-        huggingface_hub import is deliberately kept inside this method
-        (not at module top) so importing GGUFQuantizer to just check
-        is_available() never requires huggingface_hub to be installed.
-        """
-        from huggingface_hub import snapshot_download
-
-        workspace = plan.output_dir / "workspace"
-        workspace.mkdir(parents=True, exist_ok=True)
-
-        model_dir = workspace / "hf_model"
-
-        if model_dir.exists() and any(model_dir.iterdir()):
-            self.model_dir = model_dir
-            return
-
-        self.model_dir = Path(
-            snapshot_download(
-                repo_id=plan.model_id,
-                local_dir=str(model_dir),
-            )
-        )
-
-    # ------------------------------------------------------------------
-    # Calibration
-    # ------------------------------------------------------------------
+        self.converter = converter_script()
+        self.quantize_tool = tool_path("llama-quantize", plan.hardware)
+        self.model_dir = download_model(plan.model_id)
 
     def calibrate(self, plan: OptimizationPlan) -> None:
-        """
-        GGUF quantization through llama.cpp does not use the same
-        calibration workflow as AWQ/GPTQ.
-
-        The HF → GGUF conversion and llama-quantize stages are
-        sufficient for this backend.
-
-        Kept as a no-op because the Quantizer interface expects
-        every backend to expose a calibration stage.
-        """
-
         return
 
-    # ------------------------------------------------------------------
-    # Quantization
-    # ------------------------------------------------------------------
-
     def quantize(self, plan: OptimizationPlan) -> None:
-        """
-        Convert the HuggingFace model to GGUF and then quantize it.
-        """
-
-        if self.model_dir is None:
-            raise RuntimeError("prepare() must run before quantize().")
-
-        llama_cpp_dir = self._find_llama_cpp_dir()
-
-        converter = llama_cpp_dir / "convert_hf_to_gguf.py"
-
-        if not converter.exists():
-            raise RuntimeError(
-                f"GGUF converter not found: {converter}"
-            )
-
+        gguf_type = plan.quant_config.gguf_type
         workspace = plan.output_dir / "workspace"
-        fp_dir = workspace / "converted"
+        workspace.mkdir(parents=True, exist_ok=True)
+        full_precision = workspace / "model-f16.gguf"
 
-        fp_dir.mkdir(parents=True, exist_ok=True)
-
-        fp_gguf = fp_dir / "model-f16.gguf"
-
-        # --------------------------------------------------------------
-        # Step 1: HF → GGUF
-        # --------------------------------------------------------------
-
-        if not fp_gguf.exists():
-            convert_cmd = [
-                os.environ.get("PYTHON", "python"),
-                str(converter),
+        print("Converting to GGUF (f16) ...", flush=True)
+        run_tool(
+            [
+                sys.executable,
+                str(self.converter),
                 str(self.model_dir),
                 "--outfile",
-                str(fp_gguf),
+                str(full_precision),
                 "--outtype",
                 "f16",
-            ]
-
-            self._run_command(
-                convert_cmd,
-                cwd=llama_cpp_dir,
-            )
-
-        self.fp_gguf = fp_gguf
-
-        # --------------------------------------------------------------
-        # Step 2: GGUF → quantized GGUF
-        # --------------------------------------------------------------
-
-        quant_type = self._quant_type(plan)
-
-        output_dir = plan.output_dir / "artifact"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        output_file = (
-            output_dir
-            / f"{self._model_slug(plan.model_id)}-{quant_type}.gguf"
+            ],
+            log=workspace / "convert.log",
         )
 
-        quantize_bin = self._find_quantize_binary()
+        artifact_dir = plan.output_dir / "artifact"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.artifact = artifact_dir / f"{model_slug(plan.model_id)}-{gguf_type}.gguf"
 
-        if quantize_bin is None:
-            raise RuntimeError(
-                "llama-quantize binary not found."
-            )
-
-        quantize_cmd = [
-            quantize_bin,
-            str(fp_gguf),
-            str(output_file),
-            quant_type,
-        ]
-
-        self._run_command(quantize_cmd)
-
-        self.quantized_gguf = output_file
-
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
+        print(f"Quantizing to {gguf_type} ...", flush=True)
+        run_tool(
+            [str(self.quantize_tool), str(full_precision), str(self.artifact), gguf_type],
+            log=workspace / "quantize.log",
+        )
+        full_precision.unlink()
 
     def save(self, plan: OptimizationPlan) -> str:
-        """
-        Return the generated GGUF artifact path.
-        """
+        return str(self.artifact)
 
-        if self.quantized_gguf is None:
-            raise RuntimeError(
-                "Quantized GGUF artifact does not exist."
-            )
+    def benchmark(self, plan: OptimizationPlan, artifact_path: str) -> BenchmarkResult:
+        workspace = plan.output_dir / "workspace"
 
-        if not self.quantized_gguf.exists():
-            raise RuntimeError(
-                f"Quantized GGUF file missing: {self.quantized_gguf}"
-            )
+        # One real answer: the sample text, the time to first token, and where the layers ran.
+        text, log = run_tool(
+            [
+                str(tool_path("llama-completion", plan.hardware)),
+                "-m",
+                artifact_path,
+                "-p",
+                BENCHMARK_PROMPT,
+                "-n",
+                str(BENCHMARK_TOKENS),
+                "-c",
+                str(plan.quant_config.context),
+                "--temp",
+                "0",
+                "--single-turn",
+                "--no-display-prompt",
+                "--log-verbosity",
+                "4",
+            ],
+            log=workspace / "benchmark.log",
+        )
+        prompt = re.search(r"prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens", log)
+        on_gpu = re.search(r"offloaded (\d+)/(\d+) layers to GPU", log)
+        gpu_layers = int(on_gpu.group(1)) if on_gpu else 0
 
-        return str(self.quantized_gguf)
+        device = "cpu"
+        if gpu_layers:
+            device = "gpu"
+            if on_gpu.group(1) != on_gpu.group(2):
+                device = f"gpu+cpu ({on_gpu.group(1)}/{on_gpu.group(2)} layers on gpu)"
 
-    # ------------------------------------------------------------------
-    # Benchmark
-    # ------------------------------------------------------------------
+        # Speed comes from llama-bench: a fixed number of tokens, repeated, then averaged.
+        report, _ = run_tool(
+            [
+                str(tool_path("llama-bench", plan.hardware)),
+                "-m",
+                artifact_path,
+                "-p",
+                "0",
+                "-n",
+                str(BENCHMARK_TOKENS),
+                "-r",
+                str(BENCHMARK_REPEATS),
+                "-ngl",
+                str(gpu_layers),
+                "-o",
+                "json",
+            ],
+            log=workspace / "speed.log",
+        )
+        speed = json.loads(report)[0]
 
-    def benchmark(
-        self,
-        plan: OptimizationPlan,
-        artifact_path: str,
-    ) -> BenchmarkResult:
-        """
-        Benchmarking will eventually invoke llama.cpp's inference
-        runtime.
-
-        For now we verify the artifact exists and expose the path.
-        """
-
-        artifact = Path(artifact_path)
-
-        if not artifact.exists():
-            return BenchmarkResult(
-                tokens_per_second=None,
-                method="gguf-bench",
-                notes=[
-                    "GGUF artifact does not exist.",
-                ],
-            )
+        notes = [
+            f"Speed is the average of {BENCHMARK_REPEATS} runs of {BENCHMARK_TOKENS} tokens "
+            f"(+/- {speed['stddev_ts']:.1f} tok/s)."
+        ]
+        if prompt:
+            notes.append(f"Time to first token is for a {prompt.group(2)} token prompt.")
 
         return BenchmarkResult(
-            tokens_per_second=None,
-            method="gguf-bench",
-            notes=[
-                "GGUF quantization completed.",
-                "Runtime benchmark not implemented yet.",
-                f"Artifact: {artifact}",
-            ],
+            tokens_per_second=speed["avg_ts"],
+            time_to_first_token_s=float(prompt.group(1)) / 1000 if prompt else None,
+            method="llama.cpp",
+            device=device,
+            sample_output=text.strip(),
+            notes=notes,
         )
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _model_slug(model_id: str) -> str:
-        return model_id.replace("/", "--")
+def has_openmp_runtime() -> bool:
+    try:
+        ctypes.CDLL("libgomp.so.1")
+        return True
+    except OSError:
+        return False
 
-    @staticmethod
-    def _quant_type(plan: OptimizationPlan) -> str:
-        """
-        Convert OCQ's requested bit width into a GGUF quantization type.
-        """
 
-        bits = plan.quant_config.bits
-
-        mapping = {
-            2: "Q2_K",
-            3: "Q3_K_M",
-            4: "Q4_K_M",
-            5: "Q5_K_M",
-            6: "Q6_K",
-            8: "Q8_0",
-        }
-
-        try:
-            return mapping[bits]
-        except KeyError as exc:
-            raise ValueError(
-                f"No GGUF quantization mapping for {bits}-bit."
-            ) from exc
-
-    @staticmethod
-    def _find_quantize_binary() -> str | None:
-        """
-        Locate llama-quantize executable.
-        """
-
-        for name in (
-            "llama-quantize",
-            "llama-quantize.exe",
-        ):
-            path = shutil.which(name)
-
-            if path:
-                return path
-
-        return None
-
-    @staticmethod
-    def _find_llama_cpp_dir() -> Path:
-        """
-        Locate llama.cpp source directory.
-
-        Preferred:
-
-            OCQ_LLAMA_CPP=/path/to/llama.cpp
-        """
-
-        env_path = os.environ.get("OCQ_LLAMA_CPP")
-
-        if env_path:
-            path = Path(env_path).expanduser().resolve()
-
-            if path.exists():
-                return path
-
-            raise RuntimeError(
-                f"OCQ_LLAMA_CPP does not exist: {path}"
-            )
-
-        raise RuntimeError(
-            "llama.cpp source directory not configured. "
-            "Set OCQ_LLAMA_CPP=/path/to/llama.cpp"
-        )
-
-    @staticmethod
-    def _run_command(
-        command: list[str],
-        *,
-        cwd: Path | None = None,
-    ) -> None:
-        """
-        Execute a subprocess and surface useful errors.
-        """
-
-        print(
-            "Running:",
-            " ".join(command),
-        )
-
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=cwd,
-                check=False,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"Executable not found: {command[0]}"
-            ) from exc
-
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"Command failed with exit code "
-                f"{completed.returncode}: "
-                f"{' '.join(command)}"
-            )
+def run_tool(command: list[str], log: Path) -> tuple[str, str]:
+    """Run a command quietly, keep its output in a log file, and fail with the last lines of it."""
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    log.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
+    if completed.returncode != 0:
+        last_lines = "\n".join((completed.stderr or completed.stdout).strip().splitlines()[-15:])
+        raise OcqError(f"{log.stem} step failed, full log in {log}\n{last_lines}")
+    return completed.stdout, completed.stderr

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ocq.quantizers.protocol import Quantizer
-from ocq.types import QuantAlgorithm
+from ocq.types import BackendStatus, HardwareProfile, QuantAlgorithm
 
 
 def get_quantizer(algorithm: QuantAlgorithm) -> Quantizer:
@@ -23,21 +23,19 @@ def get_quantizer(algorithm: QuantAlgorithm) -> Quantizer:
         from ocq.quantizers.gguf import GGUFQuantizer
 
         return GGUFQuantizer()
-    msg = f"Unknown quantizer: {algorithm}"
-    raise ValueError(msg)
+    raise ValueError(f"Unknown quantizer: {algorithm}")
+
+
+def backend_status(hardware: HardwareProfile) -> list[BackendStatus]:
+    statuses = []
+    for algorithm in QuantAlgorithm:
+        ready, detail = get_quantizer(algorithm).check(hardware)
+        statuses.append(BackendStatus(algorithm=algorithm, ready=ready, detail=detail))
+    return statuses
 
 
 def available_backends() -> list[QuantAlgorithm]:
-    from ocq.quantizers.awq import AwqQuantizer
-    from ocq.quantizers.bnb import BnbQuantizer
-    from ocq.quantizers.gguf import GGUFQuantizer
-    from ocq.quantizers.gptq import GptqQuantizer
-
-    out: list[QuantAlgorithm] = []
-    for cls in (AwqQuantizer, GptqQuantizer, BnbQuantizer, GGUFQuantizer):
-        if cls.is_available():
-            out.append(cls.algorithm)
-    return out
+    return [algorithm for algorithm in QuantAlgorithm if get_quantizer(algorithm).is_available()]
 
 
-__all__ = ["Quantizer", "available_backends", "get_quantizer"]
+__all__ = ["Quantizer", "available_backends", "backend_status", "get_quantizer"]

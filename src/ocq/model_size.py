@@ -1,0 +1,186 @@
+"""Exact memory of a model, computed from its real tensor shapes.
+
+GGUF sizes follow the same per-tensor rules llama-quantize applies (llama-quant.cpp, build b11429),
+so the result matches the file it will write.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+
+Tensor = tuple[str, tuple[int, ...]]
+
+# (bytes per block, weights per block) of every llama.cpp tensor type we can end up with.
+BLOCKS = {
+    "F32": (4, 1),
+    "F16": (2, 1),
+    "Q4_0": (18, 32),
+    "Q5_0": (22, 32),
+    "Q5_1": (24, 32),
+    "Q8_0": (34, 32),
+    "Q2_K": (84, 256),
+    "Q3_K": (110, 256),
+    "Q4_K": (144, 256),
+    "Q5_K": (176, 256),
+    "Q6_K": (210, 256),
+}
+
+BASE_TYPE = {
+    "FP16": "F16",
+    "Q2_K": "Q2_K",
+    "Q3_K_S": "Q3_K",
+    "Q3_K_M": "Q3_K",
+    "Q3_K_L": "Q3_K",
+    "Q4_0": "Q4_0",
+    "Q4_K_S": "Q4_K",
+    "Q4_K_M": "Q4_K",
+    "Q5_0": "Q5_0",
+    "Q5_K_S": "Q5_K",
+    "Q5_K_M": "Q5_K",
+    "Q6_K": "Q6_K",
+    "Q8_0": "Q8_0",
+}
+
+# Used when a tensor's width is not a multiple of the block size.
+FALLBACK = {"Q2_K": "Q4_0", "Q3_K": "Q4_0", "Q4_K": "Q5_0", "Q5_K": "Q5_1", "Q6_K": "Q8_0"}
+
+# llama.cpp evaluates this many tokens at once and keeps their output scores in memory.
+EVAL_BATCH = 512
+
+
+def gguf_weights_bytes(tensors: list[Tensor], gguf_type: str, heads_per_kv_head: int = 1) -> int:
+    base = BASE_TYPE[gguf_type]
+    tied_embeddings = not any(tensor_role(name) == "output" for name, _ in tensors)
+    layers = 1 + max((layer_index(name) for name, _ in tensors), default=0)
+    value_tensors = sorted(
+        (layer_index(name), name) for name, _ in tensors if tensor_role(name) == "attn_v"
+    )
+    value_order = {name: position for position, (_, name) in enumerate(value_tensors)}
+
+    total = 0
+    for name, shape in tensors:
+        count = math.prod(shape)
+        if len(shape) < 2:
+            tensor_type = "F32"
+        elif base == "F16":
+            tensor_type = "F16"
+        else:
+            tensor_type = quantized_type(
+                gguf_type,
+                base,
+                tensor_role(name),
+                tied_embeddings,
+                columns=shape[-1],
+                layer=layer_index(name),
+                layers=layers,
+                value_index=value_order.get(name, 0),
+                value_count=len(value_tensors),
+                heads_per_kv_head=heads_per_kv_head,
+            )
+        block_bytes, block_weights = BLOCKS[tensor_type]
+        size = count // block_weights * block_bytes
+        total += -(-size // 32) * 32
+    return total
+
+
+def quantized_type(
+    gguf_type: str,
+    base: str,
+    role: str,
+    tied_embeddings: bool,
+    columns: int,
+    layer: int,
+    layers: int,
+    value_index: int,
+    value_count: int,
+    heads_per_kv_head: int,
+) -> str:
+    chosen = base
+
+    if role == "output" or (tied_embeddings and role == "token_embd"):
+        if columns % BLOCKS[base][1] != 0:
+            chosen = "Q8_0"
+        elif base != "Q8_0":
+            chosen = "Q6_K"
+    elif role == "attn_v":
+        if gguf_type == "Q2_K":
+            chosen = "Q4_K" if heads_per_kv_head >= 4 else "Q3_K"
+        elif gguf_type == "Q3_K_M":
+            chosen = "Q5_K" if value_index < 2 else "Q4_K"
+        elif gguf_type == "Q3_K_L":
+            chosen = "Q5_K"
+        elif gguf_type in ("Q4_K_M", "Q5_K_M") and more_bits(value_index, value_count):
+            chosen = "Q6_K"
+        elif gguf_type == "Q4_K_S" and value_index < 4:
+            chosen = "Q5_K"
+    elif role == "ffn_down":
+        if gguf_type == "Q2_K":
+            chosen = "Q3_K"
+        elif gguf_type == "Q3_K_M":
+            chosen = "Q5_K" if layer < layers // 16 else "Q4_K"
+        elif gguf_type == "Q3_K_L":
+            chosen = "Q5_K"
+        elif gguf_type in ("Q4_K_M", "Q5_K_M") and more_bits(layer, layers):
+            chosen = "Q6_K"
+        elif gguf_type == "Q4_K_S" and layer < layers // 8:
+            chosen = "Q5_K"
+    elif role == "attn_output":
+        if gguf_type == "Q2_K":
+            chosen = "Q3_K"
+        elif gguf_type == "Q3_K_M":
+            chosen = "Q4_K"
+        elif gguf_type == "Q3_K_L":
+            chosen = "Q5_K"
+
+    if columns % BLOCKS[chosen][1] != 0:
+        chosen = FALLBACK.get(chosen, chosen)
+        if columns % BLOCKS[chosen][1] != 0:
+            chosen = "F16"
+    return chosen
+
+
+def more_bits(index: int, count: int) -> bool:
+    return index < count // 8 or index >= 7 * count // 8 or (index - count // 8) % 3 == 2
+
+
+def tensor_role(name: str) -> str:
+    if "lm_head" in name:
+        return "output"
+    if "embed_tokens" in name or name.endswith("wte.weight"):
+        return "token_embd"
+    if "v_proj" in name or "qkv_proj" in name:
+        return "attn_v"
+    if "o_proj" in name:
+        return "attn_output"
+    if "down_proj" in name:
+        return "ffn_down"
+    return "other"
+
+
+def layer_index(name: str) -> int:
+    match = re.search(r"\.(\d+)\.", name)
+    return int(match.group(1)) if match else 0
+
+
+def packed_weights_bytes(tensors: list[Tensor], bits: int, group_size: int) -> int:
+    """AWQ, GPTQ and bitsandbytes pack the linear layers and leave the embeddings at 16-bit."""
+    total = 0.0
+    for name, shape in tensors:
+        count = math.prod(shape)
+        if len(shape) < 2 or tensor_role(name) in ("token_embd", "output"):
+            total += count * 2
+            continue
+        total += count * bits / 8
+        if group_size:
+            total += count / group_size * 3
+    return int(total)
+
+
+def kv_cache_bytes(layers: int, kv_heads: int, head_dim: int, context: int) -> int:
+    """Keys and values, 16-bit each, for every layer and every token of context."""
+    return 2 * layers * context * kv_heads * head_dim * 2
+
+
+def output_buffer_bytes(vocab_size: int) -> int:
+    return vocab_size * EVAL_BATCH * 4

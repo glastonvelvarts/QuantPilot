@@ -63,9 +63,7 @@ def test_resolve_profile_enriches_hardware_profile():
         has_gpu=True,
         backend="CUDA",
         unified_memory=False,
-        gpus=(
-            GpuProfile(name="NVIDIA GeForce RTX 3090", vram_gb=24.0, backend="CUDA"),
-        ),
+        gpus=(GpuProfile(name="NVIDIA GeForce RTX 3090", vram_gb=24.0, backend="CUDA"),),
     )
     enriched = UniversalHardwareResolver.resolve_profile(raw_hw)
 
@@ -92,4 +90,3 @@ def test_resolve_generic_cloud_vm():
     # Generic cloud VM should resolve a non-zero valid bandwidth (via live probe or baseline)
     assert profile.ram_bandwidth_gbs > 0.0
     assert profile.is_integrated_gpu is True  # No GPU -> integrated
-

@@ -35,7 +35,7 @@ class BandwidthProfile:
 # Apple Silicon architectural peak bandwidths (GB/s)
 # Derived from memory bus width and LPDDR clock specifications:
 # Base: 128-bit bus | Pro: 192-256-bit bus | Max: 384-512-bit bus | Ultra: Dual-die UltraFusion
-_APPLE_SILICON_SPECS: dict[str, float] = {
+APPLE_SILICON_SPECS: dict[str, float] = {
     # M1 Family (LPDDR4X-4266)
     "m1 ultra": 819.2,
     "m1 max": 409.6,
@@ -58,7 +58,7 @@ _APPLE_SILICON_SPECS: dict[str, float] = {
 
 # Known GPU architectural specifications (GB/s)
 # Used when drivers restrict raw hardware query access (e.g. unprivileged containers)
-_KNOWN_GPU_SPECS: dict[str, float] = {
+KNOWN_GPU_SPECS: dict[str, float] = {
     # NVIDIA Hopper & Blackwell
     "b200": 8000.0,
     "h200": 4800.0,
@@ -139,6 +139,29 @@ _KNOWN_GPU_SPECS: dict[str, float] = {
 }
 
 
+def host_cpu_name() -> str:
+    system = platform.system()
+    try:
+        if system == "Windows":
+            import winreg
+
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+            )
+            return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+        if system == "Darwin":
+            return subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
+            ).strip()
+        with open("/proc/cpuinfo") as cpuinfo:
+            for line in cpuinfo:
+                if line.lower().startswith(("model name", "hardware")):
+                    return line.split(":", 1)[1].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return platform.processor() or platform.machine()
+
+
 class UniversalHardwareResolver:
     """Accurately calculates memory bandwidth and interconnect rates across any platform."""
 
@@ -186,7 +209,7 @@ class UniversalHardwareResolver:
 
         updated_gpus = []
         for g in hardware.gpus:
-            g_bw, _ = cls._detect_gpu_bandwidth(
+            g_bw, _ = cls.detect_gpu_bandwidth(
                 gpu_name=g.name,
                 backend=g.backend or hardware.backend,
                 unified_memory=g.unified_memory or hardware.unified_memory,
@@ -200,6 +223,8 @@ class UniversalHardwareResolver:
                     bandwidth_gbs=g_bw,
                     count=g.count,
                     unified_memory=g.unified_memory or hardware.unified_memory,
+                    free_vram_gb=g.free_vram_gb,
+                    measured_bandwidth_gbs=g.measured_bandwidth_gbs,
                 )
             )
 
@@ -215,6 +240,8 @@ class UniversalHardwareResolver:
             pcie_bandwidth_gbs=profile.pcie_bandwidth_gbs,
             measured_ram_bandwidth_gbs=profile.measured_ram_bandwidth_gbs,
             gpus=tuple(updated_gpus),
+            os_name=hardware.os_name,
+            source=hardware.source,
             raw=hardware.raw,
         )
 
@@ -229,18 +256,20 @@ class UniversalHardwareResolver:
         """Calculates exact RAM, VRAM, and PCIe bandwidth for the target hardware."""
         # 1. Measure live RAM bandwidth if running on local host
         measured_ram = 0.0
-        if cls._is_local_host(cpu_name):
+        local = cls.is_local_host(cpu_name)
+        if local:
             measured_ram = cls.probe_live_ram_bandwidth()
 
         # 2. Determine peak RAM bandwidth from architecture / OS telemetry
-        ram_bw = cls._detect_ram_bandwidth(
+        ram_bw = cls.detect_ram_bandwidth(
             cpu_name=cpu_name,
             backend=backend,
             measured_ram=measured_ram,
+            local=local,
         )
 
         # 3. Determine GPU bandwidth
-        vram_bw, is_integrated = cls._detect_gpu_bandwidth(
+        vram_bw, is_integrated = cls.detect_gpu_bandwidth(
             gpu_name=gpu_name,
             backend=backend,
             unified_memory=unified_memory,
@@ -248,7 +277,7 @@ class UniversalHardwareResolver:
         )
 
         # 4. Determine PCIe bandwidth for CPU-to-GPU offloading
-        pcie_bw = cls._detect_pcie_bandwidth(
+        pcie_bw = cls.detect_pcie_bandwidth(
             is_integrated=is_integrated or unified_memory,
             backend=backend,
         )
@@ -263,38 +292,36 @@ class UniversalHardwareResolver:
         )
 
     @classmethod
-    def _is_local_host(cls, cpu_name: str) -> bool:
+    def is_local_host(cls, cpu_name: str) -> bool:
         """Checks whether the requested CPU profile represents the current host machine."""
         if not cpu_name:
             return True
-        host_cpu = ""
-        try:
-            if platform.system() == "Darwin":
-                host_cpu = subprocess.check_output(
-                    ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
-                ).strip()
-            elif platform.system() == "Linux":
-                with open("/proc/cpuinfo") as f:
-                    for line in f:
-                        if "model name" in line:
-                            host_cpu = line.split(":", 1)[1].strip()
-                            break
-        except Exception:
-            pass
+        host_cpu = host_cpu_name()
         if not host_cpu:
             return True
         return cpu_name.lower() in host_cpu.lower() or host_cpu.lower() in cpu_name.lower()
 
     @classmethod
-    def _detect_ram_bandwidth(
+    def detect_ram_bandwidth(
         cls,
         cpu_name: str = "",
         backend: str = "",
         measured_ram: float = 0.0,
+        local: bool = False,
     ) -> float:
         """Calculates peak RAM bandwidth using OS telemetry, Apple Silicon specs, or physics."""
         system = platform.system()
         cpu_lower = cpu_name.lower()
+
+        # On this machine the installed memory modules say exactly how fast they run.
+        if local and system == "Windows":
+            bw = cls.detect_windows_memory_telemetry()
+            if bw > 0:
+                return bw
+        if local and system == "Linux":
+            bw = cls.detect_linux_memory_telemetry()
+            if bw > 0:
+                return bw
 
         is_explicit_x86 = any(
             tok in cpu_lower
@@ -305,24 +332,24 @@ class UniversalHardwareResolver:
         if not is_explicit_x86 and (
             system == "Darwin" or "metal" in backend.lower() or "apple" in cpu_lower
         ):
-            bw = cls._detect_apple_silicon_bandwidth(cpu_name)
+            bw = cls.detect_apple_silicon_bandwidth(cpu_name)
             if bw > 0:
                 return bw
 
         # 2. Linux OS telemetry
         if system == "Linux" and not is_explicit_x86:
-            bw = cls._detect_linux_memory_telemetry()
+            bw = cls.detect_linux_memory_telemetry()
             if bw > 0:
                 return bw
 
         # 3. Windows WMI telemetry
         if system == "Windows" and not is_explicit_x86:
-            bw = cls._detect_windows_memory_telemetry()
+            bw = cls.detect_windows_memory_telemetry()
             if bw > 0:
                 return bw
 
         # 4. Generational architecture calculation from CPU memory controller
-        arch_bw = cls._calculate_ram_bandwidth_from_cpu_arch(cpu_name)
+        arch_bw = cls.calculate_ram_bandwidth_from_cpu_arch(cpu_name)
         if arch_bw > 0:
             return arch_bw
 
@@ -334,7 +361,7 @@ class UniversalHardwareResolver:
         return 38.4  # Standard baseline: dual-channel DDR4-2400
 
     @classmethod
-    def _detect_apple_silicon_bandwidth(cls, cpu_name: str = "") -> float:
+    def detect_apple_silicon_bandwidth(cls, cpu_name: str = "") -> float:
         """Determines Apple Silicon memory bandwidth based on chip family architecture."""
         name_to_check = cpu_name
         if not name_to_check:
@@ -351,7 +378,7 @@ class UniversalHardwareResolver:
         lower_name = name_to_check.lower()
 
         # Match longest tokens first (e.g. 'm1 ultra' before 'm1')
-        for token, bw in sorted(_APPLE_SILICON_SPECS.items(), key=lambda x: -len(x[0])):
+        for token, bw in sorted(APPLE_SILICON_SPECS.items(), key=lambda x: -len(x[0])):
             if token in lower_name:
                 return bw
 
@@ -362,7 +389,7 @@ class UniversalHardwareResolver:
         return 0.0
 
     @classmethod
-    def _detect_linux_memory_telemetry(cls) -> float:
+    def detect_linux_memory_telemetry(cls) -> float:
         """Queries Linux memory controller telemetry (speed and channel count)."""
         # 1. dmidecode if accessible
         if shutil.which("dmidecode"):
@@ -373,8 +400,7 @@ class UniversalHardwareResolver:
                     stderr=subprocess.DEVNULL,
                 )
                 speeds = [
-                    int(m.group(1))
-                    for m in re.finditer(r"Speed:\s+(\d+)\s+(?:MT/s|MHz)", out)
+                    int(m.group(1)) for m in re.finditer(r"Speed:\s+(\d+)\s+(?:MT/s|MHz)", out)
                 ]
                 active_speeds = [s for s in speeds if s > 0]
                 if active_speeds:
@@ -401,25 +427,37 @@ class UniversalHardwareResolver:
         return 0.0
 
     @classmethod
-    def _detect_windows_memory_telemetry(cls) -> float:
-        """Queries Windows WMI CimInstance for memory speed and channel count."""
+    def detect_windows_memory_telemetry(cls) -> float:
+        """Reads the running speed and channel of every installed memory module from WMI."""
         try:
-            cmd = "Get-CimInstance Win32_PhysicalMemory | Select-Object -ExpandProperty Speed"
+            cmd = (
+                "Get-CimInstance Win32_PhysicalMemory | ForEach-Object "
+                '{ "$($_.ConfiguredClockSpeed);$($_.Speed);$($_.BankLabel)" }'
+            )
             out = subprocess.check_output(
                 ["powershell", "-NoProfile", "-Command", cmd],
                 text=True,
                 stderr=subprocess.DEVNULL,
+                timeout=20,
             )
-            speeds = [int(s) for s in re.findall(r"\d+", out)]
-            if speeds and max(speeds) > 0:
-                channels = max(1, len(speeds))
-                return round((max(speeds) * 8 * min(channels, 8)) / 1000.0, 1)
+            speeds, channels = [], set()
+            for line in out.strip().splitlines():
+                configured, rated, bank = (line.split(";") + ["", ""])[:3]
+                speed = int(configured or 0) or int(rated or 0)
+                if speed > 0:
+                    speeds.append(speed)
+                channel = re.search(r"channel\s*(\w+)", bank, re.IGNORECASE)
+                if channel:
+                    channels.add(channel.group(1).upper())
+            if speeds:
+                channel_count = len(channels) or min(len(speeds), 8)
+                return round(min(speeds) * 8 * channel_count / 1000.0, 1)
         except Exception:
             pass
         return 0.0
 
     @classmethod
-    def _calculate_ram_bandwidth_from_cpu_arch(cls, cpu_name: str) -> float:
+    def calculate_ram_bandwidth_from_cpu_arch(cls, cpu_name: str) -> float:
         """Calculates theoretical RAM bandwidth based on CPU memory controller architecture."""
         cpu = cpu_name.lower()
 
@@ -461,7 +499,7 @@ class UniversalHardwareResolver:
         return 38.4
 
     @classmethod
-    def _detect_gpu_bandwidth(
+    def detect_gpu_bandwidth(
         cls,
         gpu_name: str,
         backend: str,
@@ -491,12 +529,12 @@ class UniversalHardwareResolver:
 
         # 3. NVIDIA GPU: calculate dynamically from driver hardware bus telemetry
         if shutil.which("nvidia-smi"):
-            bw = cls._query_nvidia_hardware_bus()
+            bw = cls.query_nvidia_hardware_bus()
             if bw > 0:
                 return bw, False
 
         # 4. Known GPU architectural database
-        for model_name, bw in sorted(_KNOWN_GPU_SPECS.items(), key=lambda x: -len(x[0])):
+        for model_name, bw in sorted(KNOWN_GPU_SPECS.items(), key=lambda x: -len(x[0])):
             if model_name in gpu_lower:
                 return bw, False
 
@@ -504,7 +542,7 @@ class UniversalHardwareResolver:
         return 360.0, False
 
     @classmethod
-    def _query_nvidia_hardware_bus(cls) -> float:
+    def query_nvidia_hardware_bus(cls) -> float:
         """Calculates NVIDIA bandwidth from bus width and memory clock directly:
         Bandwidth (GB/s) = (Bus Width in Bits * Effective Clock in MHz) / 8000
         """
@@ -544,7 +582,7 @@ class UniversalHardwareResolver:
         return 0.0
 
     @classmethod
-    def _detect_pcie_bandwidth(cls, is_integrated: bool = False, backend: str = "") -> float:
+    def detect_pcie_bandwidth(cls, is_integrated: bool = False, backend: str = "") -> float:
         """Calculates PCIe transfer rate dynamically from link width and generation."""
         if is_integrated or "metal" in backend.lower():
             return 0.0

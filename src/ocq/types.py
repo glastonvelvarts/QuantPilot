@@ -7,6 +7,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I8": 1, "U8": 1}
+
+
+class OcqError(RuntimeError):
+    pass
+
 
 class OptimizationGoal(str, Enum):
     BALANCED = "balanced"
@@ -35,10 +41,10 @@ class RunMode(str, Enum):
 
 
 class FitLevel(str, Enum):
-    PERFECT = "Perfect"    # Fits entirely in VRAM with headroom
-    GOOD = "Good"          # Fits comfortably in VRAM
+    PERFECT = "Perfect"  # Fits entirely in VRAM with headroom
+    GOOD = "Good"  # Fits comfortably in VRAM
     MARGINAL = "Marginal"  # Requires heavy offloading or tight RAM
-    TOO_TIGHT = "Too Tight"# Out of memory / unusable
+    TOO_TIGHT = "Too Tight"  # Out of memory / unusable
 
     def __str__(self) -> str:
         return self.value
@@ -52,10 +58,12 @@ class GpuProfile:
     bandwidth_gbs: float = 0.0
     count: int = 1
     unified_memory: bool = False
+    free_vram_gb: float | None = None
+    measured_bandwidth_gbs: float = 0.0
 
     @property
     def vram_bytes(self) -> int:
-        return int(self.vram_gb * (1024 ** 3)) if self.vram_gb is not None else 0
+        return int(self.vram_gb * (1024**3)) if self.vram_gb is not None else 0
 
 
 @dataclass(frozen=True)
@@ -73,15 +81,21 @@ class HardwareProfile:
     pcie_bandwidth_gbs: float = 0.0
     measured_ram_bandwidth_gbs: float = 0.0
     gpus: tuple[GpuProfile, ...] = ()
+    os_name: str = ""
+    source: str = "llmfit"  # llmfit | native
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
+    def has_cuda(self) -> bool:
+        return self.has_gpu and "cuda" in self.backend.lower()
+
+    @property
     def total_ram_bytes(self) -> int:
-        return int(self.total_ram_gb * (1024 ** 3))
+        return int(self.total_ram_gb * (1024**3))
 
     @property
     def available_ram_bytes(self) -> int:
-        return int(self.available_ram_gb * (1024 ** 3))
+        return int(self.available_ram_gb * (1024**3))
 
     @property
     def primary_vram_bytes(self) -> int | None:
@@ -102,6 +116,21 @@ class HardwareProfile:
         if not self.gpus:
             return 0.0
         return max(g.bandwidth_gbs for g in self.gpus)
+
+    @property
+    def primary_gpu(self) -> GpuProfile | None:
+        with_vram = [g for g in self.gpus if g.vram_gb is not None]
+        return max(with_vram, key=lambda g: g.vram_gb) if with_vram else None
+
+    @property
+    def free_vram_gb(self) -> float:
+        """VRAM a model can really use right now. Unified memory shares the free RAM."""
+        gpu = self.primary_gpu
+        if not self.has_gpu or gpu is None:
+            return 0.0
+        if self.unified_memory:
+            return self.available_ram_gb
+        return gpu.free_vram_gb if gpu.free_vram_gb is not None else gpu.vram_gb
 
 
 @dataclass(frozen=True)
@@ -125,17 +154,44 @@ class FeasibilityEstimate:
 
     @property
     def memory_required_bytes(self) -> int:
-        return int(self.memory_required_gb * (1024 ** 3))
+        return int(self.memory_required_gb * (1024**3))
 
     @property
     def memory_available_bytes(self) -> int:
-        return int(self.memory_available_gb * (1024 ** 3))
+        return int(self.memory_available_gb * (1024**3))
 
     @property
     def runnable(self) -> bool:
         if isinstance(self.fit_level, FitLevel):
             return self.fit_level != FitLevel.TOO_TIGHT
         return str(self.fit_level).lower() != "too tight"
+
+
+@dataclass(frozen=True)
+class QuantOption:
+    """One row of the "what can this PC run" table."""
+
+    label: str
+    bits: float
+    weights_gb: float
+    context_gb: float
+    exact: bool
+    memory_required_gb: float
+    memory_available_gb: float
+    fit_level: FitLevel
+    run_mode: RunMode
+    estimated_tps: float
+    speed_basis: str = ""
+
+    @property
+    def runnable(self) -> bool:
+        return self.fit_level != FitLevel.TOO_TIGHT
+
+    @property
+    def utilization_pct(self) -> float:
+        if self.memory_available_gb <= 0:
+            return 999.0
+        return self.memory_required_gb / self.memory_available_gb * 100
 
 
 @dataclass(frozen=True)
@@ -170,6 +226,10 @@ class ModelSnapshot:
     num_attention_heads: int = 32
     num_kv_heads: int = 32
     vocab_size: int = 32000
+    attention_head_dim: int = 0
+
+    # Name and shape of every weight tensor, read from the model's files without downloading them.
+    tensors: tuple[tuple[str, tuple[int, ...]], ...] = field(default=(), repr=False)
 
     catalog_source: str = "llmfit"  # llmfit | huggingface
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -183,10 +243,38 @@ class ModelSnapshot:
             object.__setattr__(self, "params_b", float(self.parameter_count) / 1_000_000_000.0)
 
     @property
+    def architecture_known(self) -> bool:
+        return self.architecture != "unknown"
+
+    @property
+    def original_gb(self) -> float:
+        """Size of the weights as the repo stores them, from HuggingFace's per-type counts."""
+        counts = (self.raw.get("safetensors") or {}).get("parameters") or {}
+        if counts:
+            stored = sum(count * DTYPE_BYTES.get(dtype, 2) for dtype, count in counts.items())
+            return stored / 1024**3
+        return self.params_b * 2e9 / 1024**3
+
+    @property
     def head_dim(self) -> int:
+        if self.attention_head_dim:
+            return self.attention_head_dim
         if self.num_attention_heads > 0:
             return self.hidden_size // self.num_attention_heads
         return 0
+
+
+@dataclass(frozen=True)
+class QuantChoices:
+    """What the user asked for on the command line. Anything left as None is decided for them."""
+
+    algorithm: QuantAlgorithm | None = None
+    bits: int | None = None
+    gguf_type: str | None = None
+    group_size: int | None = None
+    calibration_samples: int | None = None
+    calibration_seq_len: int | None = None
+    context: int | None = None
 
 
 @dataclass(frozen=True)
@@ -197,10 +285,21 @@ class QuantConfig:
     calibration_samples: int = 128
     calibration_seq_len: int = 512
     target_quant_label: str = "Q4_K_M"
+    gguf_type: str = ""
+    context: int = 4096
 
     def summary(self) -> str:
+        if self.algorithm == QuantAlgorithm.GGUF:
+            return f"GGUF {self.gguf_type} ({self.bits}-bit)"
         gs = f", gs={self.group_size}" if self.group_size else ""
         return f"{self.algorithm.value.upper()} {self.bits}-bit{gs}"
+
+
+@dataclass(frozen=True)
+class BackendStatus:
+    algorithm: QuantAlgorithm
+    ready: bool
+    detail: str
 
 
 @dataclass
@@ -214,6 +313,7 @@ class OptimizationPlan:
     rationale: list[str] = field(default_factory=list)
     llmfit_hypothesis_tps: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    predicted: QuantOption | None = None
 
 
 @dataclass
@@ -223,6 +323,7 @@ class QuantizationResult:
     backend: str
     success: bool
     message: str
+    artifact_size_gb: float = 0.0
 
 
 @dataclass
@@ -239,6 +340,9 @@ class BenchmarkResult:
     tokens_per_second: float | None
     method: str
     notes: list[str] = field(default_factory=list)
+    time_to_first_token_s: float | None = None
+    device: str = ""
+    sample_output: str = ""
 
 
 @dataclass

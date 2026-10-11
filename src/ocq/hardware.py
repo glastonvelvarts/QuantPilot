@@ -1,0 +1,155 @@
+"""Find out what this PC has: llmfit when it works, a plain OS probe when it does not."""
+
+from __future__ import annotations
+
+import json
+import platform
+import shutil
+import subprocess
+import time
+from dataclasses import replace
+from pathlib import Path
+
+import psutil
+
+from ocq.hardware_resolver import UniversalHardwareResolver, host_cpu_name
+from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
+from ocq.types import GpuProfile, HardwareProfile
+
+GB = 1024**3
+GPU_PROBE_CACHE = Path.home() / ".cache" / "ocq" / "gpu_bandwidth.json"
+
+
+def detect_hardware(llmfit_bin: str | None = None) -> HardwareProfile:
+    try:
+        profile = LlmfitBridge(llmfit_bin).hardware_profile()
+    except LlmfitError:
+        profile = UniversalHardwareResolver.resolve_profile(probe_hardware())
+    return with_live_gpu_readings(profile)
+
+
+def probe_hardware() -> HardwareProfile:
+    memory = psutil.virtual_memory()
+    gpus = nvidia_gpus() or apple_gpus(memory.total)
+    return HardwareProfile(
+        total_ram_gb=round(memory.total / GB, 2),
+        available_ram_gb=round(memory.available / GB, 2),
+        cpu_cores=psutil.cpu_count(logical=True) or 1,
+        cpu_name=host_cpu_name(),
+        has_gpu=bool(gpus),
+        backend=gpus[0].backend if gpus else "CPU",
+        unified_memory=any(gpu.unified_memory for gpu in gpus),
+        gpus=tuple(gpus),
+        os_name=platform.system(),
+        source="native",
+    )
+
+
+def nvidia_gpus() -> list[GpuProfile]:
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return []
+
+    gpus = []
+    for line in output.strip().splitlines():
+        try:
+            name, total_mib, free_mib = (part.strip() for part in line.rsplit(",", 2))
+            gpus.append(
+                GpuProfile(
+                    name=name,
+                    vram_gb=round(float(total_mib) / 1024, 2),
+                    backend="CUDA",
+                    free_vram_gb=round(float(free_mib) / 1024, 2),
+                )
+            )
+        except ValueError:
+            continue
+    return gpus
+
+
+def apple_gpus(total_ram_bytes: int) -> list[GpuProfile]:
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return []
+    return [
+        GpuProfile(
+            name=host_cpu_name(),
+            vram_gb=round(total_ram_bytes / GB, 1),
+            backend="Metal",
+            unified_memory=True,
+        )
+    ]
+
+
+def with_live_gpu_readings(profile: HardwareProfile) -> HardwareProfile:
+    """Adds what only the running machine knows: free VRAM and measured VRAM bandwidth."""
+    if not profile.has_cuda:
+        return profile
+
+    live = {gpu.name: gpu for gpu in nvidia_gpus()}
+    gpus = []
+    for gpu in profile.gpus:
+        reading = live.get(gpu.name)
+        gpus.append(
+            replace(
+                gpu,
+                vram_gb=reading.vram_gb if reading else gpu.vram_gb,
+                free_vram_gb=reading.free_vram_gb if reading else gpu.free_vram_gb,
+                measured_bandwidth_gbs=measured_gpu_bandwidth(gpu.name),
+            )
+        )
+    return replace(profile, gpus=tuple(gpus))
+
+
+def measured_gpu_bandwidth(gpu_name: str) -> float:
+    """Measured once per GPU and remembered, because loading PyTorch takes a few seconds."""
+    try:
+        cache = json.loads(GPU_PROBE_CACHE.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    if gpu_name not in cache:
+        measured = probe_gpu_bandwidth()
+        if measured <= 0:
+            return 0.0
+        cache[gpu_name] = measured
+        GPU_PROBE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        GPU_PROBE_CACHE.write_text(json.dumps(cache, indent=2))
+    return cache[gpu_name]
+
+
+def probe_gpu_bandwidth(size_mb: int = 512, runs: int = 5) -> float:
+    """Copies a buffer inside VRAM and times it, the same idea as the RAM probe."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0.0
+        size = size_mb * 1024 * 1024
+        source = torch.ones(size, dtype=torch.uint8, device="cuda")
+        target = torch.empty_like(source)
+        target.copy_(source)
+        torch.cuda.synchronize()
+
+        fastest = float("inf")
+        for _ in range(runs):
+            start = time.perf_counter()
+            target.copy_(source)
+            torch.cuda.synchronize()
+            fastest = min(fastest, time.perf_counter() - start)
+
+        del source, target
+        torch.cuda.empty_cache()
+        return round(2 * size / fastest / GB, 1)
+    except (ImportError, RuntimeError):
+        return 0.0

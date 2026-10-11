@@ -1,11 +1,14 @@
-"""Minimal llmfit CLI wrapper — hardware profile + catalog fit only."""
+"""Thin wrapper around the llmfit CLI: hardware profile, catalog fit, recommendations."""
 
 from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 from ocq.hardware_resolver import UniversalHardwareResolver
@@ -15,42 +18,29 @@ from ocq.types import (
     GpuProfile,
     HardwareProfile,
     ModelSnapshot,
+    OcqError,
     RunMode,
 )
 
 
-class LlmfitError(RuntimeError):
-    """llmfit subprocess failed or returned unexpected JSON."""
+class LlmfitError(OcqError):
+    """llmfit is missing, failed, or returned something we cannot read."""
 
 
 class LlmfitBridge:
-    """OCQ only needs two llmfit commands: `system` and `info`."""
-
     def __init__(self, llmfit_bin: str | None = None) -> None:
-        self.llmfit_bin = llmfit_bin or os.environ.get("OCQ_LLMFIT_BIN") or self._discover_bin()
+        self.llmfit_bin = llmfit_bin or os.environ.get("OCQ_LLMFIT_BIN") or find_llmfit()
 
-    @staticmethod
-    def _discover_bin() -> str:
-        found = shutil.which("llmfit")
-        if found:
-            return found
-        msg = (
-            "llmfit not found on PATH. Install: uv tool install llmfit\n"
-            "Or set OCQ_LLMFIT_BIN / pass --llmfit-bin."
-        )
-        raise LlmfitError(msg)
-
-    def _run_json(self, *args: str) -> dict[str, Any]:
+    def run_json(self, *args: str) -> dict[str, Any]:
         cmd = [self.llmfit_bin, "--no-dashboard", "--json", *args]
         try:
             completed = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
+                cmd, check=False, capture_output=True, text=True, encoding="utf-8", timeout=120
             )
-        except FileNotFoundError as exc:
+        except OSError as exc:
             raise LlmfitError(f"llmfit binary not executable: {self.llmfit_bin}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise LlmfitError("llmfit timed out") from exc
 
         stdout = completed.stdout.strip()
         if not stdout:
@@ -64,42 +54,44 @@ class LlmfitBridge:
 
         if completed.returncode != 0:
             err = payload.get("error", {})
-            kind = err.get("kind", "error")
-            message = err.get("message", stdout)
-            raise LlmfitError(f"llmfit {kind}: {message}")
+            raise LlmfitError(f"llmfit {err.get('kind', 'error')}: {err.get('message', stdout)}")
 
         return payload
 
     def hardware_profile(self) -> HardwareProfile:
-        payload = self._run_json("system")
-        return _parse_hardware(payload.get("system", payload))
+        payload = self.run_json("system")
+        return parse_hardware(payload.get("system", payload))
 
     def model_fit(self, model_id: str) -> tuple[HardwareProfile, ModelSnapshot]:
-        payload = self._run_json("info", model_id)
-        system = payload.get("system", {})
+        payload = self.run_json("info", model_id)
         models = payload.get("models", [])
         if not models:
             raise LlmfitError(f"llmfit not_found: no catalog entry for {model_id!r}")
+        return parse_hardware(payload.get("system", {})), parse_snapshot(models[0], model_id)
 
-        fit = models[0]
-        hardware = _parse_hardware(system)
-        snapshot = ModelSnapshot(
-            model_id=str(fit.get("name", model_id)),
-            provider=str(fit.get("provider", "")),
-            parameter_count=str(fit.get("parameter_count", "")),
-            params_b=float(fit.get("params_b", 0)),
-            context_length=_optional_int(fit.get("context_length")),
-            use_case=str(fit.get("use_case", fit.get("category", "General"))),
-            is_moe=bool(fit.get("is_moe", False)),
-            llmfit_best_quant=str(fit.get("best_quant") or fit.get("quantization") or "Q4_K_M"),
-            feasibility=_parse_feasibility(fit),
-            catalog_source="llmfit",
-            raw=fit,
-        )
-        return hardware, snapshot
+    def recommend(self, limit: int, use_case: str | None = None) -> list[ModelSnapshot]:
+        args = ["recommend", "-n", str(limit)]
+        if use_case:
+            args += ["--use-case", use_case]
+        payload = self.run_json(*args)
+        return [parse_snapshot(fit, str(fit.get("name", ""))) for fit in payload.get("models", [])]
 
 
-def _parse_hardware(system: dict[str, Any]) -> HardwareProfile:
+def find_llmfit() -> str:
+    exe = "llmfit.exe" if os.name == "nt" else "llmfit"
+    beside_python = Path(sys.executable).parent / exe
+    if beside_python.exists():
+        return str(beside_python)
+    found = shutil.which("llmfit")
+    if found:
+        return found
+    raise LlmfitError(
+        "llmfit not found. Install: uv tool install llmfit\n"
+        "Or set OCQ_LLMFIT_BIN / pass --llmfit-bin."
+    )
+
+
+def parse_hardware(system: dict[str, Any]) -> HardwareProfile:
     gpus = tuple(
         GpuProfile(
             name=g.get("name", "unknown"),
@@ -119,12 +111,30 @@ def _parse_hardware(system: dict[str, Any]) -> HardwareProfile:
         backend=str(system.get("backend", "unknown")),
         unified_memory=bool(system.get("unified_memory", False)),
         gpus=gpus,
+        os_name=platform.system(),
+        source="llmfit",
         raw=system,
     )
     return UniversalHardwareResolver.resolve_profile(raw_profile)
 
 
-def _optional_int(value: Any) -> int | None:
+def parse_snapshot(fit: dict[str, Any], model_id: str) -> ModelSnapshot:
+    return ModelSnapshot(
+        model_id=str(fit.get("name", model_id)),
+        provider=str(fit.get("provider", "")),
+        parameter_count=str(fit.get("parameter_count", "")),
+        params_b=float(fit.get("params_b", 0)),
+        context_length=optional_int(fit.get("context_length")),
+        use_case=str(fit.get("use_case", fit.get("category", "General"))),
+        is_moe=bool(fit.get("is_moe", False)),
+        llmfit_best_quant=str(fit.get("best_quant") or fit.get("quantization") or "Q4_K_M"),
+        feasibility=parse_feasibility(fit),
+        catalog_source="llmfit",
+        raw=fit,
+    )
+
+
+def optional_int(value: Any) -> int | None:
     if value is None:
         return None
     try:
@@ -133,7 +143,7 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def _parse_feasibility(fit: dict[str, Any]) -> FeasibilityEstimate:
+def parse_feasibility(fit: dict[str, Any]) -> FeasibilityEstimate:
     fit_level_raw = str(fit.get("fit_level") or fit.get("fit_label") or "unknown")
     run_mode_raw = str(fit.get("run_mode") or fit.get("run_mode_label") or "unknown")
 
@@ -143,7 +153,7 @@ def _parse_feasibility(fit: dict[str, Any]) -> FeasibilityEstimate:
         fit_level = fit_level_raw
 
     try:
-        run_mode = RunMode(run_mode_raw)
+        run_mode = RunMode(run_mode_raw.lower())
     except ValueError:
         run_mode = run_mode_raw
 
@@ -160,6 +170,6 @@ def _parse_feasibility(fit: dict[str, Any]) -> FeasibilityEstimate:
         estimate_confidence=str(
             fit.get("estimate_confidence") or fit.get("estimate_confidence_label") or "estimated"
         ),
-        usable_context=_optional_int(fit.get("usable_context")),
+        usable_context=optional_int(fit.get("usable_context")),
         raw=fit,
     )
