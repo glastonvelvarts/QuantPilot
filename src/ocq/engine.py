@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ocq.model_size import group_size_that_fits
 from ocq.types import (
     HardwareProfile,
     ModelSnapshot,
@@ -78,10 +79,14 @@ def decide_quant_config(
     if algorithm == QuantAlgorithm.GGUF and not gguf_type:
         gguf_type = DEFAULT_GGUF_TYPE[bits]
 
+    group_size = choices.group_size or default_group_size(algorithm, bits)
+    if group_size and model.tensors:
+        group_size = group_size_that_fits(list(model.tensors), group_size)
+
     return QuantConfig(
         algorithm=algorithm,
         bits=bits,
-        group_size=choices.group_size or default_group_size(algorithm, bits),
+        group_size=group_size,
         calibration_samples=choices.calibration_samples or calibration_samples(model.params_b),
         calibration_seq_len=choices.calibration_seq_len or 512,
         target_quant_label=model.llmfit_best_quant,

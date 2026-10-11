@@ -2,239 +2,275 @@
   <img src="assets/banner.png" alt="QuantPilot — One-Click Quantizer" width="100%" />
 </p>
 
-# QuantPilot — One-Click Quantizer (OCQ)
-Terminal LLM optimizer: **inspect the PC -> see which models it can run -> pick a quantization -> get a quantized, validated, benchmarked artifact**.
+# QuantPilot (OCQ)
 
-QuantPilot combines [llmfit](https://github.com/AlexsJones/llmfit) with a **universal hardware resolver**, live memory micro-probing, and four working quantization backends (GGUF, AWQ, GPTQ, bitsandbytes). Every run ends by loading the artifact, generating text with it, and measuring real tokens/sec and time to first token.
+**One command line tool to answer:** *Will this model run on my PC? How should I quantize it? Did the quant job actually work?*
 
----
+You give QuantPilot either:
 
-## Key Features
+- a **Hugging Face model id** (`Qwen/Qwen2.5-7B-Instruct`), or  
+- a **folder on disk** with your own fine-tuned weights (Unsloth, Axolotl, PyTorch Trainer, TRL, etc.)
 
-- **Works on any PC**: hardware comes from llmfit when it is available and from a built-in probe (psutil, `nvidia-smi`, OS queries) when it is not. Nothing hard-fails because a tool is missing.
-- **Tells you what can and cannot run**: `feasibility` lists the model **as stored** (F32, BF16, or F16 from HuggingFace safetensors metadata) and each **GGUF quant level** from Q8_0 down to Q2_K, with exact weight + context memory, fit, run mode, and speed.
-- **No invented numbers**: sizes are computed from the model's real tensor shapes with llama.cpp's own rules, hardware figures are read or measured on the machine, and speed is either a physical limit or a fit to benchmarks this PC has already run. See [How the numbers are calculated](#how-the-numbers-are-calculated).
-- **Quantization control**: choose the backend, bit width, exact GGUF type, group size and calibration size, or leave any of them on auto.
-- **Dynamic Hardware & Interconnect Resolution**:
-  - **Live DRAM Micro-Probe**: Sub-5ms stream copy benchmark (`ctypes.memmove`) measuring actual RAM bandwidth on any CPU with zero `sudo` or dependencies.
-  - **Live VRAM Probe**: the same copy test inside GPU memory (needs PyTorch with CUDA), measured once per GPU and remembered.
-  - **Real memory module telemetry**: peak RAM bandwidth from the configured speed and channel count of the installed modules.
-  - **Unified Memory Architecture (UMA)**: Native awareness for Apple Silicon (Metal) and integrated APUs.
-  - **PCIe Offload Telemetry**: Checks PCIe generation and lane width to model host-to-device offloading.
-- **Checks the quantization job too**: the plan warns when the PC lacks the disk, RAM or VRAM to *produce* the quantized model, which is a different question from running it.
+It inspects **your hardware**, estimates **memory and speed** from the model’s real **`config.json` + safetensors shapes**, picks or accepts a **quantization backend**, runs the job, **validates** the output, and **benchmarks** it.
+
+Install the CLI as **`ocq`**.
 
 ---
 
-## Backends
+## What you get in one run
 
-| Backend | Bits | Needs | Output runs with |
-|---------|------|-------|------------------|
-| `gguf` | 2, 3, 4, 5, 6, 8 | Any CPU. GPU optional. | llama.cpp, Ollama, LM Studio |
-| `awq` | 4 | NVIDIA GPU | vLLM, transformers |
-| `gptq` | 4, 8 | NVIDIA GPU, or CPU (slow) | vLLM, transformers |
-| `bnb` | 4, 8 | NVIDIA GPU | transformers |
+```
+Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate  →  benchmark
+```
 
-- **GGUF** uses llama.cpp. The official llama.cpp release for your OS is downloaded on first use into `~/.cache/ocq/llama.cpp` (CUDA build on NVIDIA PCs), so no compiler or manual build is needed.
-  The model is first converted at the precision it is stored in (`f32`, `bf16` or `f16`) and quantized from that, so no weight is rounded before quantization. Going through 16-bit for a 32-bit model changes the result: on a real 32-bit model, 9 of 12 quantized tensors came out different.
-- **AWQ and GPTQ** use [llm-compressor](https://github.com/vllm-project/llm-compressor) and save in the compressed-tensors format that vLLM loads directly.
-- When no backend is chosen, OCQ picks AWQ/GPTQ on a **Linux** NVIDIA machine when the model fits in VRAM and calibration fits in RAM; **GGUF** everywhere else (including **Windows with NVIDIA**).
+| Step | Command | What it does |
+|------|---------|----------------|
+| 1 | `ocq profile` | CPU, RAM, GPU, bandwidth, free disk |
+| 2 | `ocq backends` | Which backends are installed on this machine |
+| 3 | `ocq feasibility <model>` | Table: original weights + GGUF + AWQ + GPTQ + BNB — fit and speed |
+| 4 | `ocq plan <model>` | What would run (dry run, no download) |
+| 5 | `ocq optimize <model> --execute` | Quantize, check artifact, measure tok/s and time-to-first-token |
 
----
-
-## Precisions (what is and is not supported)
-
-| Layer | Supported | Notes |
-|-------|-----------|--------|
-| **Feasibility / sizing** | **F32**, **BF16**, **F16** (shown as stored dtype), **Q8_0 … Q2_K** | Weights sized from real tensor shapes + llama.cpp quant rules; `original_gb` uses HF per-dtype byte counts when available. |
-| **GGUF convert (intermediate)** | **f32**, **bf16**, **f16** | Chosen from the model’s stored precision (`--outtype` matches the checkpoint, not always f16). |
-| **GGUF output (`optimize`)** | **Q2_K … Q8_0** (all `--gguf-type` values) | Always quantizes; there is no “export full BF16/F32 GGUF only” mode yet. |
-| **AWQ** | **4-bit** | NVIDIA GPU, Linux for auto-pick; [llm-compressor](https://github.com/vllm-project/llm-compressor). |
-| **GPTQ** | **4-bit**, **8-bit** | GPU or slow CPU calibration. |
-| **BNB** | **4-bit** (NF4), **8-bit** | NVIDIA GPU. |
-| **Not supported** | FP8, MXFP4, MLX export, “quantize to FP16 file” | — |
-
-KV cache in fit math is modeled as **16-bit** keys/values (standard for llama.cpp-style serving).
+`optimize` defaults to **dry run**. Add **`--execute`** to really quantize.
 
 ---
 
-## Setup
+## Install
+
+You need [uv](https://docs.astral.sh/uv/) and Python 3.10+.
 
 ```sh
 cd quantPilot
-uv sync --group dev                 # CLI only: profile, recommend, feasibility, plan
-uv sync --group dev --all-extras    # plus every quantization backend
+uv sync --group dev
 ```
 
-Or install only the backends you want:
+| What you want | Install |
+|---------------|---------|
+| Look up fit / plan only (no quant) | `uv sync --group dev` |
+| Quantize to **GGUF** (llama.cpp / Ollama) | `uv sync --group dev --extra gguf` |
+| Quantize to **AWQ** | `uv sync --group dev --extra awq` |
+| Quantize to **GPTQ** | `uv sync --group dev --extra gptq` |
+| Quantize to **bitsandbytes** | `uv sync --group dev --extra bnb` |
+| Everything | `uv sync --group dev --all-extras` |
+
+Extras pull in **PyTorch** (large download). On **Windows**, CUDA PyTorch is used when you have an NVIDIA GPU.
+
+**Tips**
+
+- Project on OneDrive? Put the venv elsewhere:  
+  ` $env:UV_PROJECT_ENVIRONMENT = "$HOME\.venvs\quantpilot" ` (PowerShell)
+- **Linux + GGUF:** `sudo apt install libgomp1` if llama.cpp complains about OpenMP.
+
+**2-minute smoke test (Hub model, GGUF):**
 
 ```sh
 uv sync --group dev --extra gguf
-uv sync --group dev --extra awq --extra gptq
-uv sync --group dev --extra bnb
-```
-
-The backends pull in PyTorch (several GB). On Windows the CUDA build of PyTorch is installed so an NVIDIA card is used when present. If the project lives in a synced folder such as OneDrive, keep the environment outside it:
-
-```powershell
-$env:UV_PROJECT_ENVIRONMENT = "$HOME\.venvs\quantpilot"
-```
-
-Linux needs the OpenMP runtime for llama.cpp: `sudo apt install libgomp1` (already there if `gcc` is installed).
-
-**Quick end-to-end demo** (~2 min, needs `--extra gguf`):
-
-```sh
-uv sync --group dev --extra gguf
-uv run ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct --backend gguf --gguf-type Q4_K_M --execute
+uv run ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct -b gguf --gguf-type Q4_K_M --execute
 ```
 
 ---
 
-## Commands
+## Path A — Hugging Face model
 
 ```sh
-# 1. What does this PC have?
-uv run ocq profile
-
-# 2. Which backends can run here?
-uv run ocq backends
-
-# 3. Which models suit this PC?
-uv run ocq recommend --limit 10 --use-case coding
-
-# 4. Can this model run here, and at which quantization?
+# Will it fit? (downloads metadata only, not full weights)
 uv run ocq feasibility Qwen/Qwen2.5-7B-Instruct
 
-# 5. Show the plan without doing anything
-uv run ocq plan Qwen/Qwen2.5-7B-Instruct --goal speed
-
-# 6. Quantize, validate and benchmark
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct --execute
-```
-
-| Command | Description |
-|---------|-------------|
-| `profile` | CPU, RAM, GPU, memory bandwidth, PCIe rate, free disk. |
-| `backends` | Which quantization backends are installed and usable on this PC, and why not. |
-| `recommend` | Models that suit this PC (llmfit catalog, or a built-in list of open models). |
-| `feasibility` | Stored precision row + Q8_0…Q2_K table: fit, run mode (`gpu`, `gpu_offload`, `cpu`, `unfit`), tokens/sec. |
-| `plan` | The quantization that would run, with warnings about disk, RAM and VRAM. |
-| `optimize` | Full pipeline: analyze -> plan -> quantize -> validate -> benchmark. Dry run unless `--execute`. |
-
-### Quantization control
-
-`plan` and `optimize` take the same options. Anything left out is decided automatically.
-
-| Option | Meaning |
-|--------|---------|
-| `--goal`, `-g` | `balanced` (default), `speed`, `quality`, `memory` |
-| `--backend`, `-b` | `gguf`, `awq`, `gptq`, `bnb` |
-| `--bits` | Bit width. Rejected with a clear message if the backend does not support it. |
-| `--gguf-type` | Exact GGUF type: `Q2_K`, `Q3_K_S`, `Q3_K_M`, `Q3_K_L`, `Q4_0`, `Q4_K_S`, `Q4_K_M`, `Q5_0`, `Q5_K_S`, `Q5_K_M`, `Q6_K`, `Q8_0` |
-| `--group-size` | AWQ/GPTQ: how many weights share one scale (default 128). Lowered automatically if it does not divide the model's layers. |
-| `--samples` | AWQ/GPTQ: number of calibration samples (wikitext-2) |
-| `--seq-len` | AWQ/GPTQ: tokens per calibration sample (default 512) |
-| `--context`, `-c` | Context size in tokens the model will run with (default 4096). It decides how much memory the key/value cache needs, and the GGUF benchmark runs with it. |
-| `--output`, `-o` | Output folder (default `./ocq-output/<model>`) |
-
-```sh
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct --gguf-type Q5_K_M --execute
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b awq --samples 128 --execute
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b gptq --bits 8 --group-size 64 --execute
+# Pick backend yourself
+uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b gguf --gguf-type Q4_K_M --execute
+uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b awq --execute
+uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b gptq --bits 4 --execute
 uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b bnb --bits 4 --execute
 ```
 
-### What `optimize --execute` produces
+Gated models (Llama, Gemma, …): set **`HF_TOKEN`** or **`HUGGING_FACE_HUB_TOKEN`**.
 
-```
-<output>/artifact/    the quantized model (.gguf file, or a folder for awq/gptq/bnb)
-<output>/workspace/   logs of the convert, quantize and benchmark steps (gguf)
-<output>/error.log    full traceback, only when something failed
-```
-
-It then prints the size on disk next to the predicted size, the validation checks (artifact exists, is smaller than the original, loads, writes readable text), the measured tokens/sec and time to first token, and a sample of the generated text. The exit code is non-zero when validation fails.
-
-GGUF artifacts are benchmarked with llama.cpp: speed is the average of 3 runs of 128 tokens from `llama-bench`. AWQ, GPTQ and bitsandbytes artifacts are benchmarked with transformers, which is slower than a serving runtime such as vLLM, so read those numbers as "it works" rather than as deployment speed.
+Optional: `ocq recommend` suggests models from the [llmfit](https://github.com/AlexsJones/llmfit) catalog when available.
 
 ---
 
-## How the numbers are calculated
+## Path B — Your own model (fine-tune on disk)
 
-**Memory needed = weights + context.**
+Use this when you trained or merged a model locally and **did not** upload it to the Hub.
 
-- **Weights** come from the name and shape of every tensor in the model, read from the safetensors file headers on HuggingFace (the weights themselves are not downloaded). The first feasibility row uses the **stored dtype** (F32/BF16/F16). For GGUF quants, each tensor gets the type llama-quantize would give it, including mixed types inside `Q4_K_M` and fallbacks for odd widths. For AWQ, GPTQ and bitsandbytes the packed size is computed from the same tensor list.
-- **Context** is the key/value cache (`2 x layers x context x kv_heads x head_dim x 2 bytes`, from the model's `config.json`) plus llama.cpp's output buffer (`vocab x 512 x 4 bytes`). The cache matches llama.cpp's load log to the megabyte. A few tens of MB of scratch buffers are not counted.
-- **Fit** compares that with the VRAM and RAM that are free at this moment, not the totals.
+### 1. Export a full checkpoint folder
 
-If a repo has no readable safetensors headers or `config.json`, sizes fall back to parameter count x average bits and the output says "estimated".
+OCQ needs a standard **Hugging Face `save_pretrained` layout**, not LoRA adapters alone.
 
-**Hardware.**
+| You trained with | Save like this |
+|------------------|----------------|
+| **Unsloth** | `model.save_pretrained_merged("my-model", tokenizer, save_method="safetensors")` |
+| **Axolotl** | Merged weights in `output_dir`, or `model.save_pretrained(path, safe_serialization=True)` |
+| **PyTorch / HF Trainer / TRL** | `model.save_pretrained("./my-model", safe_serialization=True)` + save tokenizer |
 
-| Value | Where it comes from |
-|-------|---------------------|
-| RAM and VRAM, total and free | The OS and `nvidia-smi`, at the time of the command |
-| RAM peak bandwidth | Windows: configured speed x channels of the installed modules. Linux: `dmidecode` when readable. Otherwise a table by CPU generation. |
-| RAM live bandwidth | Measured copy test |
-| GPU bandwidth, live | Measured copy test in VRAM (PyTorch with CUDA) |
-| GPU bandwidth, spec | A table by GPU model. The driver does not expose it. |
+**Folder must contain:**
 
-**Speed.** There is no formula that gives exact tokens/sec from hardware specs, so OCQ does not pretend to have one:
+| File | Why |
+|------|-----|
+| `config.json` | Layers, heads, context — used for KV cache size |
+| `*.safetensors` | Weight shapes and dtypes (headers only for sizing; full files for quant) |
+| Tokenizer files | Required for conversion and benchmarks |
 
-- `<= N` is a limit: every token reads all the weights once, so speed cannot exceed bandwidth / model size. On the test machine a 7B model reached 98% of this limit on the GPU; small models and CPU runs stay well below it.
-- `~ N` is the expected speed, fitted to GGUF benchmarks already run on this PC (`seconds per token = fixed + per GB x size`). It appears once two models of different sizes have been benchmarked on the same device, and every `optimize --execute` adds a data point. On the test machine the fit reproduces its own measurements within 6% on CPU, and within about 20% on GPU for models under 1 GB and 1% at 7B.
+**Not supported:** adapter-only LoRA folders, `.bin`-only weights (re-save with `safe_serialization=True`).
 
-The fit assumes models of ordinary depth, like the ones it was measured on. A 1-layer test model ran 7x faster than the fit expected, because the fixed cost per token depends on the number of layers.
-
-Time to first token is always measured, never predicted.
-
-Remembered between runs, all under `~/.cache/ocq/`: `measurements.json` (benchmark results), `gpu_bandwidth.json` (VRAM probe), `models/` (tensor shapes per model revision), `llama.cpp/` (downloaded tools). Delete any of them to start fresh.
-
----
-
-## Project Layout
-
-```
-src/ocq/
-  cli.py                  Terminal commands
-  hardware.py             Hardware detection: llmfit first, built-in probe as fallback
-  hardware_resolver.py    Memory and interconnect bandwidth: live micro-probe, bus telemetry, UMA
-  llmfit_bridge.py        llmfit CLI JSON wrapper
-  model_analyzer.py       Model metadata and fit per quantization level
-  model_size.py           Exact sizes: per-tensor GGUF types, packed sizes, key/value cache
-  measurements.py         Speed: bandwidth limit, and the fit to this PC's own benchmark runs
-  engine.py               Picks backend, bit width and calibration settings
-  plan.py                 Builds the plan and its warnings
-  pipeline.py             End-to-end orchestration
-  validator.py            Post-quantization checks
-  types.py                Shared data types
-  quantizers/
-    protocol.py           The steps every backend follows
-    base.py               Shared code for the transformers based backends
-    oneshot.py            Calibrated quantization with llm-compressor
-    awq.py, gptq.py       The AWQ and GPTQ recipes
-    bnb.py                bitsandbytes
-    gguf.py               GGUF conversion, quantization and benchmark
-    llama_cpp.py          Finds or downloads the llama.cpp tools
-tests/tests/              Unit tests, plus test_quantize_real.py (real quantization, marked slow)
-```
-
----
-
-## Development & Testing
+### 2. Run the same commands as Hub — but pass the folder
 
 ```sh
-uv run pytest             # unit tests, a few seconds
-uv run pytest -m slow     # downloads a 135M model and quantizes it with every backend
+# Path as argument
+uv run ocq feasibility ./my-model
+uv run ocq plan ./my-model -b gguf --gguf-type Q4_K_M
+
+# Or explicit flag (easier on Windows)
+uv run ocq feasibility -m C:\Users\you\models\my-model
+uv run ocq optimize -m C:\Users\you\models\my-model -b gguf --gguf-type Q4_K_M --execute
+```
+
+**Any backend works** on a local folder — same as Hub:
+
+```sh
+uv run ocq optimize ./my-model -b awq --execute
+uv run ocq optimize ./my-model -b gptq --bits 4 --execute
+uv run ocq optimize ./my-model -b bnb --bits 4 --execute
+uv run ocq optimize ./my-model -b gguf --gguf-type Q4_K_M --execute
+```
+
+Nothing is uploaded. **`feasibility`** reads **your** safetensors + config and shows one row per format (original, each GGUF level, AWQ, GPTQ, BNB).
+
+---
+
+## Choosing a backend
+
+| Backend | `-b` | Bits | Best for | Runs with |
+|---------|------|------|----------|-----------|
+| **GGUF** | `gguf` | 2–8 (`--gguf-type`) | CPU, Windows, Ollama, llama.cpp | Ollama, LM Studio, llama.cpp |
+| **AWQ** | `awq` | 4 | NVIDIA GPU serving | vLLM, transformers |
+| **GPTQ** | `gptq` | 4, 8 | NVIDIA GPU (CPU calib = slow) | vLLM, transformers |
+| **BNB** | `bnb` | 4, 8 | Quick 4/8-bit HF load | transformers |
+
+**Auto-pick** (when you omit `-b`):
+
+- **Linux + NVIDIA + enough RAM** for calibration → AWQ or GPTQ  
+- **Everything else** (including **Windows + NVIDIA**) → GGUF  
+
+GGUF downloads **llama.cpp** automatically on first use (`~/.cache/ocq/llama.cpp`). Conversion uses the checkpoint’s real dtype (**f32 / bf16 / f16**), then quantizes.
+
+---
+
+## Reading `feasibility`
+
+The table has one row per **format**, not just GGUF:
+
+1. **Original** — model as saved (F32 / BF16 / F16 from safetensors)  
+2. **GGUF** — Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q3_K_M, Q2_K  
+3. **AWQ / GPTQ / BNB** — packed size from the same tensor list  
+
+Columns: weight GB, context GB (from `--context`, default 4096), total need, **fit**, **runs on** (`gpu`, `gpu+ram`, `cpu`, `unfit`), **tok/s**.
+
+**Speed symbols**
+
+| Symbol | Meaning |
+|--------|---------|
+| `~ N` | Expected speed from **past GGUF benchmarks on this PC** |
+| `<= N` | Theoretical max from memory bandwidth (common for AWQ/GPTQ/BNB rows) |
+
+After **`optimize --execute`**, you get **measured** tok/s and time-to-first-token in the terminal.
+
+**Exact vs estimated:** If OCQ can read safetensors headers and `config.json`, sizes are **exact**. Otherwise it falls back to parameter count and labels the output **estimated**.
+
+---
+
+## Useful options (`plan` and `optimize`)
+
+| Option | Purpose |
+|--------|---------|
+| `-g`, `--goal` | `balanced` (default), `speed`, `quality`, `memory` |
+| `-b`, `--backend` | `gguf`, `awq`, `gptq`, `bnb` |
+| `--bits` | 4 or 8 where the backend allows |
+| `--gguf-type` | e.g. `Q4_K_M`, `Q5_K_M`, `Q8_0` (full list in `ocq plan --help`) |
+| `-m`, `--model-path` | Local folder instead of Hub id |
+| `-c`, `--context` | Context length for KV cache math and GGUF bench (default 4096) |
+| `-o`, `--output` | Output dir (default `./ocq-output/<model>`) |
+| `--samples`, `--seq-len` | AWQ/GPTQ calibration size |
+| `--dry-run` / `--execute` | Plan only vs run quant (default: dry run) |
+
+---
+
+## After `optimize --execute`
+
+```
+ocq-output/<model>/
+  artifact/          ← your quantized model (.gguf or HF folder)
+  workspace/         ← logs (convert, quantize, benchmark)
+  error.log          ← only if something failed
+```
+
+Validation checks: file exists, smaller than original, loads, generates readable text. Exit code **non-zero** if validation fails.
+
+- **GGUF** speed: **llama-bench** (3 × 128 tokens).  
+- **AWQ/GPTQ/BNB** speed: **transformers** generate (sanity check, not vLLM deployment speed).
+
+---
+
+## How sizing works (short version)
+
+**Memory needed ≈ weights + context**
+
+- **Weights:** tensor names/shapes from safetensors (Hub metadata or local files). GGUF uses llama.cpp’s per-tensor rules; AWQ/GPTQ/BNB use packed linear-layer math.  
+- **Context:** KV cache from `config.json` (layers, KV heads, head dim) × `--context`, plus a small output buffer.  
+- **Fit:** compared to **free VRAM and RAM right now**, not total installed memory.
+
+**Quantizing needs extra disk/RAM** beyond “running” the model (e.g. full weights on disk for GGUF convert, full model in RAM for AWQ/GPTQ calibration). `plan` warns about this.
+
+Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` and `measurements.py`. Cache data lives under `~/.cache/ocq/`.
+
+---
+
+## All commands
+
+| Command | Description |
+|---------|-------------|
+| `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
+| `backends` | Installed quant backends and what’s missing |
+| `recommend` | Suggested Hub models for this PC |
+| `feasibility` | Full format table for one model |
+| `plan` | Quant plan + warnings (no heavy work) |
+| `optimize` | Full pipeline; use `--execute` to quantize |
+
+---
+
+## Development
+
+```sh
+uv run pytest              # fast unit tests
+uv run pytest -m slow      # real quant on a tiny model, each installed backend
 uv run ruff check .
 ```
 
-The slow tests skip any backend that is not usable on the machine and say why.
+---
+
+## Environment variables
+
+| Variable | Use |
+|----------|-----|
+| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Gated Hub models |
+| `OCQ_LLMFIT_BIN` | Custom llmfit binary path |
+| `OCQ_LLAMA_CPP_BIN` | Your own `llama-quantize` / `llama-completion` folder |
+| `OCQ_LLAMA_CPP` | Your own llama.cpp source with `convert_hf_to_gguf.py` |
 
 ---
 
-## Environment Variables
+## Project layout (for contributors)
 
-- `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`: HuggingFace token for gated models (e.g. Llama, Gemma).
-- `OCQ_LLMFIT_BIN`: Path to the `llmfit` binary if it is not installed with the project.
-- `OCQ_LLAMA_CPP_BIN`: Folder with your own llama.cpp build (`llama-quantize`, `llama-completion`) to use instead of the downloaded release.
-- `OCQ_LLAMA_CPP`: llama.cpp source folder whose `convert_hf_to_gguf.py` should be used.
+```
+src/ocq/
+  cli.py              Commands
+  hardware.py         PC detection (llmfit or built-in probe)
+  local_model.py      Local save_pretrained folders
+  model_analyzer.py   Feasibility tables, Hub + local resolve
+  model_size.py       Weight and KV cache byte math
+  engine.py / plan.py Backend and bit-width decisions
+  pipeline.py         optimize orchestration
+  quantizers/         gguf, awq, gptq, bnb implementations
+```
+
+MIT license. CLI entry point: **`ocq`**.

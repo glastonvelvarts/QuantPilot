@@ -10,8 +10,9 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
+from ocq.local_model import NO_TOKENIZER, has_tokenizer, slug_local
 from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, Quantizer
-from ocq.types import BenchmarkResult, OptimizationPlan
+from ocq.types import BenchmarkResult, OcqError, OptimizationPlan
 
 CALIBRATION_DATASET = ("Salesforce/wikitext", "wikitext-2-raw-v1")
 
@@ -37,7 +38,16 @@ if not any(shutil.which(compiler) for compiler in ("cc", "gcc", "clang")):
 
 
 def model_slug(model_id: str) -> str:
-    return model_id.replace("/", "--")
+    return slug_local(model_id)
+
+
+def model_weights_dir(plan: OptimizationPlan) -> Path:
+    if plan.model.weights_dir is not None:
+        if not has_tokenizer(plan.model.weights_dir):
+            raise OcqError(NO_TOKENIZER.format(folder=plan.model.weights_dir))
+        print(f"Using local weights at {plan.model.weights_dir} ...", flush=True)
+        return plan.model.weights_dir
+    return download_model(plan.model_id)
 
 
 def download_model(model_id: str) -> Path:
@@ -71,7 +81,7 @@ class TransformersQuantizer(Quantizer):
         return all(importlib.util.find_spec(module) for module in cls.needs)
 
     def prepare(self, plan: OptimizationPlan) -> None:
-        self.model_dir = download_model(plan.model_id)
+        self.model_dir = model_weights_dir(plan)
         config = plan.quant_config
         name = f"{model_slug(plan.model_id)}-{config.algorithm.value}-{config.bits}bit"
         self.artifact_dir = plan.output_dir / "artifact" / name

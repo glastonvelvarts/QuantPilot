@@ -46,7 +46,7 @@ def run_optimize(
     hardware = detect_hardware(llmfit_bin)
     context = (choices.context if choices else None) or DEFAULT_CONTEXT
     snapshot = resolve_model(model_id, hardware, llmfit_bin, context)
-    plan = generate_plan(model_id, hardware, snapshot, goal, output_dir, choices)
+    plan = generate_plan(snapshot.model_id, hardware, snapshot, goal, output_dir, choices)
 
     if dry_run:
         return OptimizeResult(plan=plan, dry_run=True)
