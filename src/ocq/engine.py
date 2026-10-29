@@ -62,6 +62,12 @@ def decide_quant_config(
         algorithm = QuantAlgorithm.GGUF
         asked_bits = GGUF_TYPES[gguf_type]
 
+    double_quant = choices.double_quant
+    if double_quant is not None:
+        algorithm = algorithm or QuantAlgorithm.BNB
+        check_double_quant(algorithm, asked_bits)
+        asked_bits = asked_bits or 4
+
     bits = asked_bits or bits_for_goal(model, goal)
     if algorithm is None:
         algorithm = pick_algorithm(hardware, model, bits)
@@ -79,6 +85,12 @@ def decide_quant_config(
     if algorithm == QuantAlgorithm.GGUF and not gguf_type:
         gguf_type = DEFAULT_GGUF_TYPE[bits]
 
+    if algorithm == QuantAlgorithm.BNB and bits == 4:
+        if double_quant is None:
+            double_quant = goal != OptimizationGoal.SPEED
+    else:
+        double_quant = False
+
     group_size = choices.group_size or default_group_size(algorithm, bits)
     if group_size and model.tensors:
         group_size = group_size_that_fits(list(model.tensors), group_size)
@@ -92,7 +104,28 @@ def decide_quant_config(
         target_quant_label=model.llmfit_best_quant,
         gguf_type=gguf_type if algorithm == QuantAlgorithm.GGUF else "",
         context=choices.context or 4096,
+        double_quant=double_quant,
     )
+
+
+def check_double_quant(algorithm: QuantAlgorithm, bits: int | None) -> None:
+    """--double-quant and --single-quant only mean something for bitsandbytes 4-bit."""
+    flag = "--double-quant/--single-quant only applies to bitsandbytes 4-bit (-b bnb --bits 4)."
+    if algorithm == QuantAlgorithm.GGUF:
+        raise OcqError(
+            f"{flag} GGUF K-quants (Q2_K to Q6_K) already double quantize their scales, "
+            "Q4_0, Q5_0 and Q8_0 do not. Pick one with --gguf-type."
+        )
+    if algorithm in (QuantAlgorithm.AWQ, QuantAlgorithm.GPTQ):
+        raise OcqError(
+            f"{flag} {algorithm.value.upper()} keeps one 16-bit scale per group of weights. "
+            "A larger --group-size spends less memory on scales."
+        )
+    if bits is not None and bits != 4:
+        raise OcqError(
+            f"{flag} bitsandbytes {bits}-bit keeps one 32-bit scale per row, "
+            "which already costs almost nothing."
+        )
 
 
 def build_rationale(
@@ -111,6 +144,16 @@ def build_rationale(
     ]
     if config.algorithm == QuantAlgorithm.GGUF:
         lines.append("GGUF runs on CPU, NVIDIA, AMD and Apple GPUs through llama.cpp or Ollama.")
+        if "_K" in config.gguf_type:
+            lines.append(
+                f"{config.gguf_type} double quantizes: each block of 256 weights has one 16-bit "
+                "scale, and the scales of its sub-blocks are stored in 4 to 8 bits."
+            )
+        elif config.gguf_type in ("Q4_0", "Q5_0", "Q8_0"):
+            lines.append(
+                f"{config.gguf_type} uses one 16-bit scale per 32 weights (single quantization). "
+                "K-quants spend fewer bits on scales."
+            )
     elif config.algorithm == QuantAlgorithm.AWQ:
         lines.append("AWQ keeps the weights that matter most accurate. Serve it with vLLM.")
     elif config.algorithm == QuantAlgorithm.GPTQ:

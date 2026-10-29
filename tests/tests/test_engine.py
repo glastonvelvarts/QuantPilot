@@ -147,8 +147,53 @@ def test_chosen_backend_gets_a_bit_width_it_supports():
         QuantChoices(gguf_type="Q9_X"),
         QuantChoices(algorithm=QuantAlgorithm.AWQ, gguf_type="Q4_K_M"),
         QuantChoices(gguf_type="Q4_K_M", bits=8),
+        QuantChoices(algorithm=QuantAlgorithm.AWQ, double_quant=True),
+        QuantChoices(algorithm=QuantAlgorithm.GPTQ, double_quant=False),
+        QuantChoices(gguf_type="Q4_K_M", double_quant=True),
+        QuantChoices(algorithm=QuantAlgorithm.BNB, bits=8, double_quant=True),
     ],
 )
 def test_impossible_choices_are_rejected(choices):
     with pytest.raises(OcqError):
         decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.BALANCED, choices)
+
+
+def test_bnb_4bit_double_quantizes_by_default():
+    choices = QuantChoices(algorithm=QuantAlgorithm.BNB, bits=4)
+    config = decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.BALANCED, choices)
+    assert config.double_quant
+    assert config.summary() == "BNB 4-bit NF4, double quantization"
+
+
+def test_speed_goal_skips_double_quant():
+    choices = QuantChoices(algorithm=QuantAlgorithm.BNB, bits=4)
+    config = decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.SPEED, choices)
+    assert not config.double_quant
+    assert config.summary() == "BNB 4-bit NF4, single quantization"
+
+
+def test_single_quant_can_be_asked_for():
+    choices = QuantChoices(algorithm=QuantAlgorithm.BNB, bits=4, double_quant=False)
+    config = decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.MEMORY, choices)
+    assert not config.double_quant
+
+
+@pytest.mark.parametrize("double_quant", [True, False])
+def test_double_quant_flag_implies_bnb_4bit(double_quant):
+    choices = QuantChoices(double_quant=double_quant)
+    config = decide_quant_config(cpu_hardware(), make_model(), OptimizationGoal.QUALITY, choices)
+    assert config.algorithm == QuantAlgorithm.BNB
+    assert config.bits == 4
+    assert config.double_quant == double_quant
+
+
+def test_double_quant_is_off_where_it_does_not_apply():
+    for choices in (
+        QuantChoices(algorithm=QuantAlgorithm.BNB, bits=8),
+        QuantChoices(algorithm=QuantAlgorithm.AWQ),
+        QuantChoices(gguf_type="Q4_K_M"),
+    ):
+        config = decide_quant_config(
+            cuda_hardware(), make_model(), OptimizationGoal.BALANCED, choices
+        )
+        assert not config.double_quant

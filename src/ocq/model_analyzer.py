@@ -17,6 +17,8 @@ from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
 from ocq.local_model import fetch_local_model_files, local_hf_meta, parse_model_ref
 from ocq.model_size import (
     Tensor,
+    bnb_scale_bits,
+    bnb_weights_bytes,
     gguf_weights_bytes,
     group_size_that_fits,
     kv_cache_bytes,
@@ -44,12 +46,14 @@ UNQUANTIZED = ("F32", "BF16", "F16", "FP16")
 QUANTIZED_LEVELS = ("Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K")
 
 # Rows shown after GGUF levels — packed size from tensor shapes + default group sizes.
+# (backend, bits, double quantization)
 HF_QUANT_ROWS = (
-    (QuantAlgorithm.AWQ, 4),
-    (QuantAlgorithm.GPTQ, 4),
-    (QuantAlgorithm.GPTQ, 8),
-    (QuantAlgorithm.BNB, 4),
-    (QuantAlgorithm.BNB, 8),
+    (QuantAlgorithm.AWQ, 4, False),
+    (QuantAlgorithm.GPTQ, 4, False),
+    (QuantAlgorithm.GPTQ, 8, False),
+    (QuantAlgorithm.BNB, 4, False),
+    (QuantAlgorithm.BNB, 4, True),
+    (QuantAlgorithm.BNB, 8, False),
 )
 
 # Only used when a repo has no readable tensor shapes. Computed with model_size.py on
@@ -323,8 +327,8 @@ def quant_options(
                 row_kind="gguf",
             )
         )
-    for algorithm, bits in HF_QUANT_ROWS:
-        options.append(hf_quant_option(model, hardware, context, algorithm, bits))
+    for algorithm, bits, double_quant in HF_QUANT_ROWS:
+        options.append(hf_quant_option(model, hardware, context, algorithm, bits, double_quant))
     return options
 
 
@@ -334,18 +338,14 @@ def hf_quant_option(
     context: int,
     algorithm: QuantAlgorithm,
     bits: int,
+    double_quant: bool = False,
 ) -> QuantOption:
     group_size = default_group_size(algorithm, bits)
-    if model.tensors:
-        if group_size:
-            group_size = group_size_that_fits(list(model.tensors), group_size)
-        weights_gb = packed_weights_bytes(list(model.tensors), bits, group_size) / GB
-    else:
-        weights_gb = model.params_b * 1e9 * (bits + 0.5) / 8 / GB
-    label = f"{algorithm.value.upper()} {bits}-bit"
+    if model.tensors and group_size:
+        group_size = group_size_that_fits(list(model.tensors), group_size)
     return fit_at(
-        label,
-        weights_gb,
+        hf_label(algorithm, bits, double_quant),
+        hf_weights_gb(model, algorithm, bits, group_size, double_quant),
         model,
         hardware,
         context,
@@ -361,12 +361,10 @@ def predict_for_config(
         label = config.gguf_type
         weights_gb = gguf_weights_gb(model, label)
     else:
-        label = f"{config.algorithm.value.upper()} {config.bits}-bit"
-        if model.tensors:
-            packed = packed_weights_bytes(list(model.tensors), config.bits, config.group_size)
-            weights_gb = packed / GB
-        else:
-            weights_gb = model.params_b * 1e9 * (config.bits + 0.5) / 8 / GB
+        label = hf_label(config.algorithm, config.bits, config.double_quant)
+        weights_gb = hf_weights_gb(
+            model, config.algorithm, config.bits, config.group_size, config.double_quant
+        )
     return fit_at(
         label,
         weights_gb,
@@ -376,6 +374,32 @@ def predict_for_config(
         use_measurements=config.algorithm == QuantAlgorithm.GGUF,
         row_kind=("gguf" if config.algorithm == QuantAlgorithm.GGUF else config.algorithm.value),
     )
+
+
+def hf_label(algorithm: QuantAlgorithm, bits: int, double_quant: bool = False) -> str:
+    label = f"{algorithm.value.upper()} {bits}-bit"
+    if algorithm == QuantAlgorithm.BNB and bits == 4:
+        label += " double" if double_quant else " single"
+    return label
+
+
+def hf_weights_gb(
+    model: ModelSnapshot,
+    algorithm: QuantAlgorithm,
+    bits: int,
+    group_size: int,
+    double_quant: bool = False,
+) -> float:
+    """Weights of an AWQ, GPTQ or bitsandbytes artifact, scales included."""
+    if algorithm == QuantAlgorithm.BNB:
+        if model.tensors:
+            return bnb_weights_bytes(list(model.tensors), bits, double_quant) / GB
+        scale_bits = bnb_scale_bits(bits, double_quant)
+    else:
+        if model.tensors:
+            return packed_weights_bytes(list(model.tensors), bits, group_size) / GB
+        scale_bits = 0.5
+    return model.params_b * 1e9 * (bits + scale_bits) / 8 / GB
 
 
 def gguf_weights_gb(model: ModelSnapshot, gguf_type: str) -> float:
