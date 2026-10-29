@@ -48,34 +48,50 @@ def probe_hardware() -> HardwareProfile:
 def nvidia_gpus() -> list[GpuProfile]:
     if not shutil.which("nvidia-smi"):
         return []
+    # Drivers older than 510 do not know compute_cap and reject the whole query.
+    output = query_nvidia_smi("name,memory.total,memory.free,compute_cap")
+    if output is None:
+        output = query_nvidia_smi("name,memory.total,memory.free")
+    return parse_nvidia_smi(output or "")
+
+
+def query_nvidia_smi(fields: str) -> str | None:
     try:
-        output = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.total,memory.free",
-                "--format=csv,noheader,nounits",
-            ],
+        return subprocess.check_output(
+            ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=15,
         )
     except (subprocess.SubprocessError, OSError):
-        return []
+        return None
 
+
+def parse_nvidia_smi(output: str) -> list[GpuProfile]:
+    """Rows of name, total MiB, free MiB and, from newer drivers, compute capability."""
     gpus = []
     for line in output.strip().splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        capability = None
+        if len(parts) >= 4:
+            try:
+                capability = float(parts[-1])
+                parts = parts[:-1]
+            except ValueError:
+                pass
         try:
-            name, total_mib, free_mib = (part.strip() for part in line.rsplit(",", 2))
-            gpus.append(
-                GpuProfile(
-                    name=name,
-                    vram_gb=round(float(total_mib) / 1024, 2),
-                    backend="CUDA",
-                    free_vram_gb=round(float(free_mib) / 1024, 2),
-                )
-            )
-        except ValueError:
+            total_mib, free_mib = float(parts[-2]), float(parts[-1])
+        except (ValueError, IndexError):
             continue
+        gpus.append(
+            GpuProfile(
+                name=", ".join(parts[:-2]),
+                vram_gb=round(total_mib / 1024, 2),
+                backend="CUDA",
+                free_vram_gb=round(free_mib / 1024, 2),
+                compute_capability=capability,
+            )
+        )
     return gpus
 
 
@@ -106,6 +122,7 @@ def with_live_gpu_readings(profile: HardwareProfile) -> HardwareProfile:
                 gpu,
                 vram_gb=reading.vram_gb if reading else gpu.vram_gb,
                 free_vram_gb=reading.free_vram_gb if reading else gpu.free_vram_gb,
+                compute_capability=reading.compute_capability if reading else None,
                 measured_bandwidth_gbs=measured_gpu_bandwidth(gpu.name),
             )
         )

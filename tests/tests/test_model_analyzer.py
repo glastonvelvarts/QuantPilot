@@ -162,3 +162,13 @@ def test_bnb_estimate_without_tensor_shapes_counts_scales():
     options = options_by_label(snap, hardware)
     assert options["BNB 4-bit single"].bits == pytest.approx(4.5)
     assert options["BNB 4-bit double"].bits == pytest.approx(4.127, abs=0.001)
+
+
+def test_nvfp4_row_only_with_an_nvidia_gpu(qwen_tensors):
+    cpu_only = make_hardware()
+    assert "NVFP4 4-bit" not in options_by_label(qwen_snapshot(qwen_tensors, cpu_only), cpu_only)
+
+    nvidia = make_hardware(vram_gb=8)
+    nvfp4 = options_by_label(qwen_snapshot(qwen_tensors, nvidia), nvidia)["NVFP4 4-bit"]
+    assert nvfp4.row_kind == "nvfp4"
+    assert nvfp4.exact

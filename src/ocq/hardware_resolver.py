@@ -225,6 +225,7 @@ class UniversalHardwareResolver:
                     unified_memory=g.unified_memory or hardware.unified_memory,
                     free_vram_gb=g.free_vram_gb,
                     measured_bandwidth_gbs=g.measured_bandwidth_gbs,
+                    compute_capability=g.compute_capability,
                 )
             )
 
