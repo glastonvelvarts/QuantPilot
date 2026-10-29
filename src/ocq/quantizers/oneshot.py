@@ -1,8 +1,7 @@
-"""Calibration based quantization with llm-compressor. AWQ and GPTQ only differ in the recipe."""
+"""Quantization with llm-compressor. AWQ, GPTQ and NVFP4 only differ in the recipe."""
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from dataclasses import replace
 
 from ocq.quantizers.base import CALIBRATION_DATASET, TransformersQuantizer, free_memory
@@ -17,9 +16,9 @@ class OneShotQuantizer(TransformersQuantizer):
         super().__init__()
         self.calibration = None
 
-    @abstractmethod
     def recipe(self, scheme) -> list:
-        """The llm-compressor modifiers that apply this algorithm."""
+        """The llm-compressor modifiers that apply this algorithm to an integer scheme."""
+        raise NotImplementedError
 
     def calibrate(self, plan: OptimizationPlan) -> None:
         from datasets import Dataset, load_dataset
@@ -44,12 +43,35 @@ class OneShotQuantizer(TransformersQuantizer):
         )
 
     def quantize(self, plan: OptimizationPlan) -> None:
-        from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
         from llmcompressor import oneshot
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        config = plan.quant_config
         model = AutoModelForCausalLM.from_pretrained(self.model_dir, dtype="auto")
+        recipe = self.build_recipe(model, plan)
+        config = plan.quant_config
+
+        calibration = {}
+        if self.calibration is not None:
+            calibration = dict(
+                dataset=self.calibration,
+                max_seq_length=config.calibration_seq_len,
+                num_calibration_samples=len(self.calibration),
+            )
+
+        print(f"Quantizing with {config.summary()} (this can take a while) ...", flush=True)
+        oneshot(model=model, recipe=recipe, **calibration)
+
+        model.save_pretrained(self.artifact_dir, save_compressed=True)
+        AutoTokenizer.from_pretrained(self.model_dir).save_pretrained(self.artifact_dir)
+
+        del model
+        free_memory()
+
+    def build_recipe(self, model, plan: OptimizationPlan) -> list:
+        """AWQ and GPTQ: integer weights with one scale per group."""
+        from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
+
+        config = plan.quant_config
         group_size = group_size_that_fits(model, config.group_size)
         if group_size != config.group_size:
             print(
@@ -70,21 +92,7 @@ class OneShotQuantizer(TransformersQuantizer):
                 group_size=group_size,
             ),
         )
-
-        print(f"Quantizing with {config.summary()} (this can take a while) ...", flush=True)
-        oneshot(
-            model=model,
-            dataset=self.calibration,
-            recipe=self.recipe(scheme),
-            max_seq_length=config.calibration_seq_len,
-            num_calibration_samples=len(self.calibration),
-        )
-
-        model.save_pretrained(self.artifact_dir, save_compressed=True)
-        AutoTokenizer.from_pretrained(self.model_dir).save_pretrained(self.artifact_dir)
-
-        del model
-        free_memory()
+        return self.recipe(scheme)
 
     def benchmark(self, plan: OptimizationPlan, artifact_path: str) -> BenchmarkResult:
         result = super().benchmark(plan, artifact_path)

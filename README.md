@@ -27,7 +27,7 @@ Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate
 |------|---------|----------------|
 | 1 | `ocq profile` | CPU, RAM, GPU, bandwidth, free disk |
 | 2 | `ocq backends` | Which backends are installed on this machine |
-| 3 | `ocq feasibility <model>` | Table: original weights + GGUF + AWQ + GPTQ + BNB — fit and speed |
+| 3 | `ocq feasibility <model>` | Table: original weights + GGUF + AWQ + GPTQ + BNB (+ NVFP4 on NVIDIA) — fit and speed |
 | 4 | `ocq plan <model>` | What would run (dry run, no download) |
 | 5 | `ocq optimize <model> --execute` | Quantize, check artifact, measure tok/s and time-to-first-token |
 
@@ -51,6 +51,7 @@ uv sync --group dev
 | Quantize to **AWQ** | `uv sync --group dev --extra awq` |
 | Quantize to **GPTQ** | `uv sync --group dev --extra gptq` |
 | Quantize to **bitsandbytes** | `uv sync --group dev --extra bnb` |
+| Quantize to **NVFP4** | `uv sync --group dev --extra nvfp4` |
 | Everything | `uv sync --group dev --all-extras` |
 
 Extras pull in **PyTorch** (large download). On **Windows**, CUDA PyTorch is used when you have an NVIDIA GPU.
@@ -145,11 +146,13 @@ Nothing is uploaded. **`feasibility`** reads **your** safetensors + config and s
 | **GGUF** | `gguf` | 2–8 (`--gguf-type`) | CPU, Windows, Ollama, llama.cpp | Ollama, LM Studio, llama.cpp |
 | **AWQ** | `awq` | 4 | NVIDIA GPU serving | vLLM, transformers |
 | **GPTQ** | `gptq` | 4, 8 | NVIDIA GPU (CPU calib = slow) | vLLM, transformers |
-| **BNB** | `bnb` | 4, 8 | Quick 4/8-bit HF load | transformers |
+| **BNB** | `bnb` | 4 (default), 8 | Quick 4/8-bit HF load | transformers |
+| **NVFP4** | `nvfp4` | 4 | NVIDIA Blackwell GPUs (RTX 50xx, B200, GB10…) | vLLM |
 
 **Auto-pick** (when you omit `-b`):
 
-- **Linux + NVIDIA + enough RAM** for calibration → AWQ or GPTQ  
+- **Linux + NVIDIA Blackwell + enough RAM** for calibration → NVFP4 (4-bit)  
+- **Linux + other NVIDIA + enough RAM** for calibration → AWQ or GPTQ  
 - **Everything else** (including **Windows + NVIDIA**) → GGUF  
 
 GGUF downloads **llama.cpp** automatically on first use (`~/.cache/ocq/llama.cpp`). Conversion uses the checkpoint’s real dtype (**f32 / bf16 / f16**), then quantizes.
@@ -163,6 +166,7 @@ The table has one row per **format**, not just GGUF:
 1. **Original** — model as saved (F32 / BF16 / F16 from safetensors)  
 2. **GGUF** — Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q3_K_M, Q2_K  
 3. **AWQ / GPTQ / BNB** — packed size from the same tensor list, scales included. BNB 4-bit gets two rows, **single** and **double** quantization (see below)  
+4. **NVFP4** — only shown when the PC has an NVIDIA GPU  
 
 Columns: weight GB, context GB (from `--context`, default 4096), total need, **fit**, **runs on** (`gpu`, `gpu+ram`, `cpu`, `unfit`), **tok/s**.
 
@@ -184,7 +188,7 @@ After **`optimize --execute`**, you get **measured** tok/s and time-to-first-tok
 | Option | Purpose |
 |--------|---------|
 | `-g`, `--goal` | `balanced` (default), `speed`, `quality`, `memory` |
-| `-b`, `--backend` | `gguf`, `awq`, `gptq`, `bnb` |
+| `-b`, `--backend` | `gguf`, `awq`, `gptq`, `bnb`, `nvfp4` |
 | `--bits` | 4 or 8 where the backend allows |
 | `--gguf-type` | e.g. `Q4_K_M`, `Q5_K_M`, `Q8_0` (full list in `ocq plan --help`) |
 | `-m`, `--model-path` | Local folder instead of Hub id |
@@ -192,6 +196,7 @@ After **`optimize --execute`**, you get **measured** tok/s and time-to-first-tok
 | `-o`, `--output` | Output dir (default `./ocq-output/<model>`) |
 | `--samples`, `--seq-len` | AWQ/GPTQ calibration size |
 | `--double-quant` / `--single-quant` | BNB 4-bit: quantize the scales too, or not (default: double, single for `--goal speed`). Implies `-b bnb --bits 4` |
+| `--fp4-activations` / `--fp4-weights-only` | NVFP4: FP4 activations too, or weights only (default: activations on Blackwell). Implies `-b nvfp4` |
 | `--dry-run` / `--execute` | Plan only vs run quant (default: dry run) |
 
 ---
@@ -206,6 +211,7 @@ Quantized weights need **scales** to turn the small integers back into real numb
 | **BNB 4-bit double** | 8-bit scale per 64 weights, one 32-bit scale per 256 of those | ~0.127 |
 | **GGUF K-quants** (Q2_K–Q6_K) | built in: 16-bit scale per 256 weights, sub-block scales in 4–8 bits | always on |
 | **GGUF Q4_0 / Q5_0 / Q8_0** | one 16-bit scale per 32 weights | 0.5 |
+| **NVFP4** | 8-bit (FP8) scale per 16 weights, one 32-bit scale per tensor | always on (~0.5) |
 | **AWQ / GPTQ** | one 16-bit scale (+ zero point) per group, 128 by default | not available |
 | **BNB 8-bit** | one 32-bit scale per row | not available (already ~0) |
 
@@ -217,6 +223,20 @@ uv run ocq optimize ./my-model --single-quant --execute    # single
 ```
 
 `plan` tells you how much it saves on your model. Sizes are checked against real bitsandbytes 0.50 artifacts.
+
+---
+
+## NVFP4 and your GPU
+
+NVFP4 stores weights as 4-bit floats with two levels of scales. QuantPilot reads your GPU's compute capability from `nvidia-smi` (or its name, on old drivers) and adapts:
+
+| Your GPU | What you get |
+|----------|--------------|
+| **Blackwell** (compute capability 10+: RTX 50xx, RTX PRO Blackwell, B200, GB10…) | Picked automatically for 4-bit on Linux. Weights **and activations** in FP4, so the FP4 tensor cores do the math. Calibrated. |
+| **Other NVIDIA** (H100, RTX 40xx, …) | Available with `-b nvfp4`, weights only. vLLM runs it through its Marlin kernel at about AWQ speed, so AWQ stays the default. |
+| **No NVIDIA GPU** (Mac, CPU) | Row hidden in `feasibility`. `-b nvfp4` still quantizes (on the CPU, also on Apple Silicon), to serve on another machine. |
+
+Quantizing here to serve on a Blackwell server? Add `--fp4-activations`.
 
 ---
 
@@ -232,7 +252,7 @@ ocq-output/<model>/
 Validation checks: file exists, smaller than original, loads, generates readable text. Exit code **non-zero** if validation fails.
 
 - **GGUF** speed: **llama-bench** (3 × 128 tokens).  
-- **AWQ/GPTQ/BNB** speed: **transformers** generate (sanity check, not vLLM deployment speed).
+- **AWQ/GPTQ/BNB/NVFP4** speed: **transformers** generate (sanity check, not vLLM deployment speed).
 
 ---
 
@@ -295,7 +315,7 @@ src/ocq/
   model_size.py       Weight and KV cache byte math
   engine.py / plan.py Backend and bit-width decisions
   pipeline.py         optimize orchestration
-  quantizers/         gguf, awq, gptq, bnb implementations
+  quantizers/         gguf, awq, gptq, bnb, nvfp4 implementations
 ```
 
 MIT license. CLI entry point: **`ocq`**.

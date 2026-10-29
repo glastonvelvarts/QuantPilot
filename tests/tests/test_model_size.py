@@ -11,6 +11,7 @@ from ocq.model_size import (
     bnb_weights_bytes,
     gguf_weights_bytes,
     kv_cache_bytes,
+    nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
 )
@@ -108,3 +109,16 @@ def test_double_quant_saves_about_0_37_bits_per_weight(qwen_tensors):
         if len(shape) == 2 and "embed" not in name
     )
     assert (single - double) * 8 / quantized == pytest.approx(0.373, abs=0.005)
+
+
+# Artifacts written by llm-compressor 0.14.0 for SmolLM2-135M-Instruct (save_compressed=True).
+SMOLLM_NVFP4 = {
+    False: 116_492_240,  # NVFP4A16, weights only
+    True: 116_515_496,  # NVFP4, weights and activations
+}
+
+
+@pytest.mark.parametrize("fp4_activations", SMOLLM_NVFP4)
+def test_nvfp4_size_matches_real_artifact(smollm_tensors, fp4_activations):
+    ours = nvfp4_weights_bytes(smollm_tensors, fp4_activations)
+    assert ours == pytest.approx(SMOLLM_NVFP4[fp4_activations], rel=0.002)

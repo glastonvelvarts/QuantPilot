@@ -141,7 +141,10 @@ def quantization_warnings(
             f"Quantizing needs {disk_needed:.1f} GB of disk, only {disk_free:.1f} GB free."
         )
 
-    if config.algorithm in (QuantAlgorithm.AWQ, QuantAlgorithm.GPTQ):
+    if config.algorithm == QuantAlgorithm.NVFP4:
+        warnings += nvfp4_warnings(hardware, config)
+
+    if config.algorithm in (QuantAlgorithm.AWQ, QuantAlgorithm.GPTQ, QuantAlgorithm.NVFP4):
         if not calibration_fits_in_ram(hardware, model):
             warnings.append(
                 f"{config.algorithm.value.upper()} loads the full original model first: "
@@ -160,6 +163,27 @@ def quantization_warnings(
             )
 
     return warnings
+
+
+def nvfp4_warnings(hardware: HardwareProfile, config: QuantConfig) -> list[str]:
+    """NVFP4 runs best on Blackwell. Say what happens on the GPU this PC has."""
+    gpu = hardware.primary_gpu
+    if not hardware.has_cuda or gpu is None:
+        return [
+            "No NVIDIA GPU on this PC. NVFP4 is served by vLLM on NVIDIA GPUs, so serve it on "
+            "another machine. Quantizing and the benchmark run on the CPU here, slowly."
+        ]
+    if gpu.fp4_tensor_cores:
+        return []
+    if config.fp4_activations:
+        return [
+            f"{gpu.name} has no FP4 tensor cores (Blackwell has them). FP4 activations only "
+            "run fast on a Blackwell GPU: quantize here, serve there."
+        ]
+    return [
+        f"{gpu.name} has no FP4 tensor cores (Blackwell has them). vLLM runs NVFP4 weights "
+        "through its Marlin kernel, about as fast as AWQ, which is better supported on this GPU."
+    ]
 
 
 def free_disk_gb(path: Path) -> float:
