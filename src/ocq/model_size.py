@@ -222,6 +222,29 @@ def bnb_weights_bytes(tensors: list[Tensor], bits: int, double_quant: bool = Fal
     return total
 
 
+# NVFP4: every 16 weights share one 8-bit (FP8 E4M3) scale, and every tensor has one 32-bit
+# scale on top of those. Two levels of scales, built in.
+NVFP4_BLOCK = 16
+
+
+def nvfp4_weights_bytes(tensors: list[Tensor], fp4_activations: bool = False) -> int:
+    """llm-compressor's NVFP4 format. Embeddings, lm_head and norms stay at 16-bit.
+
+    Each linear layer stores its 4-bit weights packed two per byte, one FP8 scale per 16 weights
+    and a 32-bit global scale. FP4 activations add a 32-bit input scale per layer.
+    """
+    total = 0
+    for name, shape in tensors:
+        count = math.prod(shape)
+        if len(shape) < 2 or tensor_role(name) in ("token_embd", "output"):
+            total += count * 2
+            continue
+        total += -(-count // 2) + -(-count // NVFP4_BLOCK) + 4
+        if fp4_activations:
+            total += 4
+    return total
+
+
 def group_size_that_fits(tensors: list[Tensor], wanted: int) -> int:
     """AWQ and GPTQ need the group size to divide the width of every layer they quantize."""
     widths = {

@@ -80,3 +80,28 @@ def test_bnb_plan_explains_double_quant_saving():
     # 8B parameters, 0.373 bits each
     assert any("saving 356 MB" in line for line in double.rationale)
     assert any("--double-quant would save 356 MB" in line for line in single.rationale)
+
+
+def test_nvfp4_plan_warns_when_this_pc_cannot_run_it_fast():
+    from dataclasses import replace
+
+    from ocq.types import GpuProfile
+
+    def warnings_on(hardware):
+        choices = QuantChoices(algorithm=QuantAlgorithm.NVFP4)
+        plan = generate_plan(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            hardware,
+            make_model(),
+            OptimizationGoal.BALANCED,
+            Path("/tmp/out"),
+            choices,
+        )
+        return " ".join(plan.warnings)
+
+    def with_gpu(name):
+        return replace(make_hardware(), gpus=(GpuProfile(name=name, vram_gb=24, backend="CUDA"),))
+
+    assert "No NVIDIA GPU" in warnings_on(replace(make_hardware(), has_gpu=False, backend="CPU"))
+    assert "Marlin" in warnings_on(with_gpu("NVIDIA GeForce RTX 4090"))
+    assert "FP4 tensor cores" not in warnings_on(with_gpu("NVIDIA GeForce RTX 5090"))

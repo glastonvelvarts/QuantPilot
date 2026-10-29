@@ -23,6 +23,10 @@ def get_quantizer(algorithm: QuantAlgorithm) -> Quantizer:
         from ocq.quantizers.gguf import GGUFQuantizer
 
         return GGUFQuantizer()
+    if algorithm == QuantAlgorithm.NVFP4:
+        from ocq.quantizers.nvfp4 import NvFp4Quantizer
+
+        return NvFp4Quantizer()
     raise ValueError(f"Unknown quantizer: {algorithm}")
 
 

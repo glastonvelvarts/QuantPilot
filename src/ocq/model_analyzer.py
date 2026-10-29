@@ -22,6 +22,7 @@ from ocq.model_size import (
     gguf_weights_bytes,
     group_size_that_fits,
     kv_cache_bytes,
+    nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
 )
@@ -329,6 +330,25 @@ def quant_options(
         )
     for algorithm, bits, double_quant in HF_QUANT_ROWS:
         options.append(hf_quant_option(model, hardware, context, algorithm, bits, double_quant))
+    # NVFP4 is only served on NVIDIA GPUs, so other PCs do not see the row.
+    if hardware.has_cuda:
+        options.append(
+            fit_at(
+                hf_label(QuantAlgorithm.NVFP4, 4),
+                hf_weights_gb(
+                    model,
+                    QuantAlgorithm.NVFP4,
+                    4,
+                    default_group_size(QuantAlgorithm.NVFP4, 4),
+                    fp4_activations=hardware.has_fp4_tensor_cores,
+                ),
+                model,
+                hardware,
+                context,
+                use_measurements=False,
+                row_kind=QuantAlgorithm.NVFP4.value,
+            )
+        )
     return options
 
 
@@ -363,7 +383,12 @@ def predict_for_config(
     else:
         label = hf_label(config.algorithm, config.bits, config.double_quant)
         weights_gb = hf_weights_gb(
-            model, config.algorithm, config.bits, config.group_size, config.double_quant
+            model,
+            config.algorithm,
+            config.bits,
+            config.group_size,
+            config.double_quant,
+            config.fp4_activations,
         )
     return fit_at(
         label,
@@ -389,12 +414,17 @@ def hf_weights_gb(
     bits: int,
     group_size: int,
     double_quant: bool = False,
+    fp4_activations: bool = False,
 ) -> float:
-    """Weights of an AWQ, GPTQ or bitsandbytes artifact, scales included."""
+    """Weights of an AWQ, GPTQ, bitsandbytes or NVFP4 artifact, scales included."""
     if algorithm == QuantAlgorithm.BNB:
         if model.tensors:
             return bnb_weights_bytes(list(model.tensors), bits, double_quant) / GB
         scale_bits = bnb_scale_bits(bits, double_quant)
+    elif algorithm == QuantAlgorithm.NVFP4:
+        if model.tensors:
+            return nvfp4_weights_bytes(list(model.tensors), fp4_activations) / GB
+        scale_bits = 8 / group_size
     else:
         if model.tensors:
             return packed_weights_bytes(list(model.tensors), bits, group_size) / GB

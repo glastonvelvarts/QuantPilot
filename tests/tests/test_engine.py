@@ -58,6 +58,11 @@ def cuda_hardware(os_name: str = "Linux") -> HardwareProfile:
     )
 
 
+def blackwell_hardware(name: str = "NVIDIA GeForce RTX 5090", capability=None) -> HardwareProfile:
+    gpu = GpuProfile(name=name, vram_gb=32, backend="CUDA", compute_capability=capability)
+    return replace(cuda_hardware(), gpus=(gpu,))
+
+
 def cpu_hardware() -> HardwareProfile:
     return HardwareProfile(
         total_ram_gb=16,
@@ -151,6 +156,11 @@ def test_chosen_backend_gets_a_bit_width_it_supports():
         QuantChoices(algorithm=QuantAlgorithm.GPTQ, double_quant=False),
         QuantChoices(gguf_type="Q4_K_M", double_quant=True),
         QuantChoices(algorithm=QuantAlgorithm.BNB, bits=8, double_quant=True),
+        QuantChoices(algorithm=QuantAlgorithm.NVFP4, bits=8),
+        QuantChoices(algorithm=QuantAlgorithm.NVFP4, group_size=32),
+        QuantChoices(algorithm=QuantAlgorithm.NVFP4, double_quant=True),
+        QuantChoices(algorithm=QuantAlgorithm.AWQ, fp4_activations=True),
+        QuantChoices(gguf_type="Q4_K_M", fp4_activations=False),
     ],
 )
 def test_impossible_choices_are_rejected(choices):
@@ -197,3 +207,50 @@ def test_double_quant_is_off_where_it_does_not_apply():
             cuda_hardware(), make_model(), OptimizationGoal.BALANCED, choices
         )
         assert not config.double_quant
+
+
+@pytest.mark.parametrize("goal", [OptimizationGoal.BALANCED, OptimizationGoal.MEMORY])
+def test_bnb_defaults_to_4bit(goal):
+    model = make_model(llmfit_best_quant="Q8_0")
+    choices = QuantChoices(algorithm=QuantAlgorithm.BNB)
+    config = decide_quant_config(cuda_hardware(), model, goal, choices)
+    assert config.bits == 4
+    assert config.double_quant
+
+
+def test_bnb_quality_goal_keeps_8bit():
+    choices = QuantChoices(algorithm=QuantAlgorithm.BNB)
+    config = decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.QUALITY, choices)
+    assert config.bits == 8
+
+
+def test_engine_picks_nvfp4_on_blackwell():
+    config = decide_quant_config(blackwell_hardware(), make_model(), OptimizationGoal.BALANCED)
+    assert config.algorithm == QuantAlgorithm.NVFP4
+    assert config.fp4_activations
+    assert config.group_size == 16
+    assert config.summary() == "NVFP4 4-bit (weights and activations)"
+
+
+def test_compute_capability_beats_the_gpu_name():
+    blackwell = blackwell_hardware(name="Some Datacenter GPU", capability=10.0)
+    hopper = blackwell_hardware(name="Some Datacenter GPU", capability=9.0)
+    pick = lambda hw: decide_quant_config(hw, make_model(), OptimizationGoal.BALANCED).algorithm  # noqa: E731
+    assert pick(blackwell) == QuantAlgorithm.NVFP4
+    assert pick(hopper) == QuantAlgorithm.AWQ
+
+
+def test_nvfp4_is_weights_only_without_fp4_tensor_cores():
+    choices = QuantChoices(algorithm=QuantAlgorithm.NVFP4)
+    config = decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.BALANCED, choices)
+    assert not config.fp4_activations
+    assert config.summary() == "NVFP4 4-bit (weights only)"
+
+
+@pytest.mark.parametrize("fp4_activations", [True, False])
+def test_fp4_flag_implies_nvfp4_and_wins(fp4_activations):
+    choices = QuantChoices(fp4_activations=fp4_activations)
+    config = decide_quant_config(cpu_hardware(), make_model(), OptimizationGoal.QUALITY, choices)
+    assert config.algorithm == QuantAlgorithm.NVFP4
+    assert config.bits == 4
+    assert config.fp4_activations == fp4_activations
