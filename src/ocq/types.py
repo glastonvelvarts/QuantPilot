@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -11,6 +12,10 @@ DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I8"
 
 
 FLOAT_TYPES = ("F32", "BF16", "F16")
+
+# Blackwell names, for when nvidia-smi cannot report the compute capability.
+# "RTX 5000 Ada" is not Blackwell, the GeForce RTX 5050 to 5090 are.
+BLACKWELL_NAMES = re.compile(r"blackwell|rtx 50[5-9]0|\bg?b(100|200|300)\b|\bgb10\b|\bthor\b")
 
 
 class OcqError(RuntimeError):
@@ -29,6 +34,7 @@ class QuantAlgorithm(str, Enum):
     GPTQ = "gptq"
     BNB = "bnb"
     GGUF = "gguf"
+    NVFP4 = "nvfp4"
 
 
 class RunMode(str, Enum):
@@ -63,10 +69,21 @@ class GpuProfile:
     unified_memory: bool = False
     free_vram_gb: float | None = None
     measured_bandwidth_gbs: float = 0.0
+    # CUDA compute capability, 12.0 for an RTX 5090. None when unknown.
+    compute_capability: float | None = None
 
     @property
     def vram_bytes(self) -> int:
         return int(self.vram_gb * (1024**3)) if self.vram_gb is not None else 0
+
+    @property
+    def fp4_tensor_cores(self) -> bool:
+        """Blackwell (compute capability 10 and up) computes in FP4 natively."""
+        if "cuda" not in self.backend.lower():
+            return False
+        if self.compute_capability is not None:
+            return self.compute_capability >= 10.0
+        return bool(BLACKWELL_NAMES.search(self.name.lower()))
 
 
 @dataclass(frozen=True)
@@ -124,6 +141,11 @@ class HardwareProfile:
     def primary_gpu(self) -> GpuProfile | None:
         with_vram = [g for g in self.gpus if g.vram_gb is not None]
         return max(with_vram, key=lambda g: g.vram_gb) if with_vram else None
+
+    @property
+    def has_fp4_tensor_cores(self) -> bool:
+        gpu = self.primary_gpu
+        return self.has_cuda and gpu is not None and gpu.fp4_tensor_cores
 
     @property
     def free_vram_gb(self) -> float:
@@ -289,6 +311,7 @@ class QuantChoices:
     calibration_seq_len: int | None = None
     context: int | None = None
     double_quant: bool | None = None
+    fp4_activations: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -303,6 +326,8 @@ class QuantConfig:
     context: int = 4096
     # bitsandbytes 4-bit only: also quantize the per-block scales.
     double_quant: bool = False
+    # NVFP4 only: activations in FP4 too (Blackwell), or weights only.
+    fp4_activations: bool = False
 
     def summary(self) -> str:
         if self.algorithm == QuantAlgorithm.GGUF:
@@ -310,6 +335,9 @@ class QuantConfig:
         if self.algorithm == QuantAlgorithm.BNB and self.bits == 4:
             quant = "double" if self.double_quant else "single"
             return f"BNB 4-bit NF4, {quant} quantization"
+        if self.algorithm == QuantAlgorithm.NVFP4:
+            what = "weights and activations" if self.fp4_activations else "weights only"
+            return f"NVFP4 4-bit ({what})"
         gs = f", gs={self.group_size}" if self.group_size else ""
         return f"{self.algorithm.value.upper()} {self.bits}-bit{gs}"
 

@@ -18,7 +18,11 @@ SUPPORTED_BITS = {
     QuantAlgorithm.AWQ: (4,),
     QuantAlgorithm.GPTQ: (4, 8),
     QuantAlgorithm.BNB: (4, 8),
+    QuantAlgorithm.NVFP4: (4,),
 }
+
+# NVFP4 always gives every 16 weights their own scale.
+NVFP4_GROUP_SIZE = 16
 
 GGUF_TYPES = {
     "Q2_K": 2,
@@ -38,7 +42,14 @@ GGUF_TYPES = {
 DEFAULT_GGUF_TYPE = {2: "Q2_K", 3: "Q3_K_M", 4: "Q4_K_M", 5: "Q5_K_M", 6: "Q6_K", 8: "Q8_0"}
 
 # Bit width implied by the quantization label llmfit recommends.
-LABEL_BITS = {**GGUF_TYPES, "AWQ-4bit": 4, "GPTQ-Int4": 4, "mlx-4bit": 4, "mlx-8bit": 8}
+LABEL_BITS = {
+    **GGUF_TYPES,
+    "AWQ-4bit": 4,
+    "GPTQ-Int4": 4,
+    "NVFP4": 4,
+    "mlx-4bit": 4,
+    "mlx-8bit": 8,
+}
 
 
 def decide_quant_config(
@@ -68,7 +79,13 @@ def decide_quant_config(
         check_double_quant(algorithm, asked_bits)
         asked_bits = asked_bits or 4
 
-    bits = asked_bits or bits_for_goal(model, goal)
+    fp4_activations = choices.fp4_activations
+    if fp4_activations is not None:
+        algorithm = algorithm or QuantAlgorithm.NVFP4
+        if algorithm != QuantAlgorithm.NVFP4:
+            raise OcqError("--fp4-activations/--fp4-weights-only only applies to NVFP4 (-b nvfp4).")
+
+    bits = asked_bits or default_bits(algorithm, model, goal)
     if algorithm is None:
         algorithm = pick_algorithm(hardware, model, bits)
 
@@ -91,8 +108,17 @@ def decide_quant_config(
     else:
         double_quant = False
 
+    if algorithm == QuantAlgorithm.NVFP4:
+        if fp4_activations is None:
+            fp4_activations = hardware.has_fp4_tensor_cores
+    else:
+        fp4_activations = False
+
     group_size = choices.group_size or default_group_size(algorithm, bits)
-    if group_size and model.tensors:
+    if algorithm == QuantAlgorithm.NVFP4:
+        if group_size != NVFP4_GROUP_SIZE:
+            raise OcqError(f"NVFP4 always uses groups of {NVFP4_GROUP_SIZE} weights.")
+    elif group_size and model.tensors:
         group_size = group_size_that_fits(list(model.tensors), group_size)
 
     return QuantConfig(
@@ -105,6 +131,7 @@ def decide_quant_config(
         gguf_type=gguf_type if algorithm == QuantAlgorithm.GGUF else "",
         context=choices.context or 4096,
         double_quant=double_quant,
+        fp4_activations=fp4_activations,
     )
 
 
@@ -115,6 +142,11 @@ def check_double_quant(algorithm: QuantAlgorithm, bits: int | None) -> None:
         raise OcqError(
             f"{flag} GGUF K-quants (Q2_K to Q6_K) already double quantize their scales, "
             "Q4_0, Q5_0 and Q8_0 do not. Pick one with --gguf-type."
+        )
+    if algorithm == QuantAlgorithm.NVFP4:
+        raise OcqError(
+            f"{flag} NVFP4 already has two levels of scales built in: "
+            "an 8-bit scale per 16 weights and one 32-bit scale per tensor."
         )
     if algorithm in (QuantAlgorithm.AWQ, QuantAlgorithm.GPTQ):
         raise OcqError(
@@ -160,9 +192,30 @@ def build_rationale(
         lines.append("GPTQ corrects quantization error layer by layer. Serve it with vLLM.")
     elif config.algorithm == QuantAlgorithm.BNB:
         lines.append("bitsandbytes needs no calibration and loads straight into transformers.")
+    elif config.algorithm == QuantAlgorithm.NVFP4:
+        lines.append(
+            "NVFP4 stores 4-bit floats with an 8-bit scale per 16 weights and one 32-bit scale "
+            "per tensor: two levels of scales, like double quantization. Serve it with vLLM."
+        )
+        if config.fp4_activations:
+            lines.append(
+                "Activations are quantized to FP4 too, so Blackwell's FP4 tensor cores do the "
+                "math. This needs calibration data."
+            )
+        else:
+            lines.append("Weights only: activations stay 16-bit, no calibration data needed.")
     if not fit.runnable:
         lines.append("This model is Too Tight for this PC even after quantization.")
     return lines
+
+
+def default_bits(
+    algorithm: QuantAlgorithm | None, model: ModelSnapshot, goal: OptimizationGoal
+) -> int:
+    """bitsandbytes is chosen for a quick 4-bit load, 8-bit only when quality comes first."""
+    if algorithm == QuantAlgorithm.BNB:
+        return 8 if goal == OptimizationGoal.QUALITY else 4
+    return bits_for_goal(model, goal)
 
 
 def bits_for_goal(model: ModelSnapshot, goal: OptimizationGoal) -> int:
@@ -182,7 +235,7 @@ def label_bits(label: str) -> int:
 
 
 def pick_algorithm(hardware: HardwareProfile, model: ModelSnapshot, bits: int) -> QuantAlgorithm:
-    """AWQ/GPTQ for a Linux GPU box that can serve with vLLM, GGUF for everything else."""
+    """NVFP4/AWQ/GPTQ for a Linux GPU box that can serve with vLLM, GGUF for everything else."""
     gpu_server = (
         hardware.has_cuda
         and hardware.os_name != "Windows"
@@ -193,17 +246,21 @@ def pick_algorithm(hardware: HardwareProfile, model: ModelSnapshot, bits: int) -
 
     if "gptq" in model.llmfit_best_quant.lower() or bits >= 8:
         return QuantAlgorithm.GPTQ
+    if hardware.has_fp4_tensor_cores:
+        return QuantAlgorithm.NVFP4
     return QuantAlgorithm.AWQ
 
 
 def calibration_fits_in_ram(hardware: HardwareProfile, model: ModelSnapshot) -> bool:
-    """AWQ and GPTQ load the whole original model into RAM before they start."""
+    """AWQ, GPTQ and NVFP4 load the whole original model into RAM before they start."""
     return model.original_gb <= hardware.available_ram_gb
 
 
 def default_group_size(algorithm: QuantAlgorithm, bits: int) -> int:
     if algorithm in (QuantAlgorithm.BNB, QuantAlgorithm.GGUF):
         return 0
+    if algorithm == QuantAlgorithm.NVFP4:
+        return NVFP4_GROUP_SIZE
     return 128 if bits <= 4 else 64
 
 

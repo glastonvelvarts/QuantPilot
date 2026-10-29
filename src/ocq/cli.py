@@ -53,7 +53,8 @@ ModelPath = Annotated[
 LlmfitBin = Annotated[str | None, typer.Option("--llmfit-bin", help="Path to the llmfit binary")]
 Goal = Annotated[str, typer.Option("--goal", "-g", help="balanced, speed, quality or memory")]
 Backend = Annotated[
-    str | None, typer.Option("--backend", "-b", help="gguf, awq, gptq or bnb (default: auto)")
+    str | None,
+    typer.Option("--backend", "-b", help="gguf, awq, gptq, bnb or nvfp4 (default: auto)"),
 ]
 Bits = Annotated[int | None, typer.Option("--bits", help="Bit width, for example 4 or 8")]
 GgufType = Annotated[
@@ -74,6 +75,15 @@ DoubleQuant = Annotated[
         "--double-quant/--single-quant",
         help="bitsandbytes 4-bit: also quantize the per-block scales, saving about 0.37 bits "
         "per weight (default: on, off for --goal speed). Implies -b bnb --bits 4.",
+    ),
+]
+Fp4Activations = Annotated[
+    bool | None,
+    typer.Option(
+        "--fp4-activations/--fp4-weights-only",
+        help="NVFP4: quantize activations to FP4 too (fast on Blackwell GPUs, needs calibration) "
+        "or weights only (default: activations on Blackwell, weights only elsewhere). "
+        "Implies -b nvfp4.",
     ),
 ]
 Output = Annotated[Path | None, typer.Option("--output", "-o", help="Where to write the result")]
@@ -104,6 +114,7 @@ def read_choices(
     seq_len: int | None,
     context: int,
     double_quant: bool | None = None,
+    fp4_activations: bool | None = None,
 ) -> QuantChoices:
     algorithm = None
     if backend:
@@ -121,6 +132,7 @@ def read_choices(
         calibration_seq_len=seq_len,
         context=context,
         double_quant=double_quant,
+        fp4_activations=fp4_activations,
     )
 
 
@@ -271,7 +283,8 @@ def cmd_feasibility(
     )
 
     table = Table(
-        title="By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB — same tensor math)"
+        title="By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same "
+        "tensor math)"
     )
     table.add_column("Level", no_wrap=True)
     table.add_column("Backend", no_wrap=True)
@@ -301,6 +314,16 @@ def cmd_feasibility(
             "[dim]BNB single/double: double quantization also stores the 4-bit scales in 8 bits "
             "instead of 32 (--double-quant / --single-quant).[/dim]"
         )
+    if any(option.row_kind == "nvfp4" for option in options):
+        if hw.has_fp4_tensor_cores:
+            console.print(
+                "[dim]NVFP4: this GPU computes in FP4 natively (Blackwell). -b nvfp4[/dim]"
+            )
+        else:
+            console.print(
+                "[dim]NVFP4: no FP4 tensor cores on this GPU (Blackwell has them), vLLM runs it "
+                "weights only at about AWQ speed.[/dim]"
+            )
     if measurements.UPPER_BOUND in bases:
         console.print(
             "[dim]<= limit set by memory bandwidth. The real speed is lower and gets learned "
@@ -342,6 +365,7 @@ def cmd_plan(
     samples: Samples = None,
     seq_len: SeqLen = None,
     double_quant: DoubleQuant = None,
+    fp4_activations: Fp4Activations = None,
     context: Context = DEFAULT_CONTEXT,
     output: Output = None,
     llmfit_bin: LlmfitBin = None,
@@ -349,7 +373,15 @@ def cmd_plan(
     """Show the quantization plan without running it."""
     ref = model_ref(model, model_path)
     choices = read_choices(
-        backend, bits, gguf_type, group_size, samples, seq_len, context, double_quant
+        backend,
+        bits,
+        gguf_type,
+        group_size,
+        samples,
+        seq_len,
+        context,
+        double_quant,
+        fp4_activations,
     )
     try:
         hw = detect_hardware(llmfit_bin)
@@ -380,6 +412,7 @@ def cmd_optimize(
     samples: Samples = None,
     seq_len: SeqLen = None,
     double_quant: DoubleQuant = None,
+    fp4_activations: Fp4Activations = None,
     context: Context = DEFAULT_CONTEXT,
     output: Output = None,
     dry_run: Annotated[
@@ -391,7 +424,15 @@ def cmd_optimize(
     """One click: analyze -> plan -> quantize -> validate -> benchmark."""
     ref = model_ref(model, model_path)
     choices = read_choices(
-        backend, bits, gguf_type, group_size, samples, seq_len, context, double_quant
+        backend,
+        bits,
+        gguf_type,
+        group_size,
+        samples,
+        seq_len,
+        context,
+        double_quant,
+        fp4_activations,
     )
     try:
         result = run_optimize(
