@@ -12,7 +12,7 @@ from typing import ClassVar
 
 from ocq.local_model import NO_TOKENIZER, has_tokenizer, slug_local
 from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, Quantizer
-from ocq.types import BenchmarkResult, OcqError, OptimizationPlan
+from ocq.types import BenchmarkResult, OcqError, OptimizationPlan, QuantConfig
 
 CALIBRATION_DATASET = ("Salesforce/wikitext", "wikitext-2-raw-v1")
 
@@ -82,10 +82,12 @@ class TransformersQuantizer(Quantizer):
 
     def prepare(self, plan: OptimizationPlan) -> None:
         self.model_dir = model_weights_dir(plan)
-        config = plan.quant_config
-        name = f"{model_slug(plan.model_id)}-{config.algorithm.value}-{config.bits}bit"
+        name = f"{model_slug(plan.model_id)}-{self.artifact_name(plan.quant_config)}"
         self.artifact_dir = plan.output_dir / "artifact" / name
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    def artifact_name(self, config: QuantConfig) -> str:
+        return f"{config.algorithm.value}-{config.bits}bit"
 
     def calibrate(self, plan: OptimizationPlan) -> None:
         return

@@ -68,6 +68,14 @@ Samples = Annotated[
 SeqLen = Annotated[
     int | None, typer.Option("--seq-len", help="AWQ/GPTQ: tokens per calibration sample")
 ]
+DoubleQuant = Annotated[
+    bool | None,
+    typer.Option(
+        "--double-quant/--single-quant",
+        help="bitsandbytes 4-bit: also quantize the per-block scales, saving about 0.37 bits "
+        "per weight (default: on, off for --goal speed). Implies -b bnb --bits 4.",
+    ),
+]
 Output = Annotated[Path | None, typer.Option("--output", "-o", help="Where to write the result")]
 Context = Annotated[
     int, typer.Option("--context", "-c", help="Context size in tokens the model will run with")
@@ -95,6 +103,7 @@ def read_choices(
     samples: int | None,
     seq_len: int | None,
     context: int,
+    double_quant: bool | None = None,
 ) -> QuantChoices:
     algorithm = None
     if backend:
@@ -111,6 +120,7 @@ def read_choices(
         calibration_samples=samples,
         calibration_seq_len=seq_len,
         context=context,
+        double_quant=double_quant,
     )
 
 
@@ -286,6 +296,11 @@ def cmd_feasibility(
     bases = {option.speed_basis for option in options if option.runnable}
     if measurements.MEASURED in bases:
         console.print("[dim]~  expected speed, fitted to benchmark runs on this PC.[/dim]")
+    if any(option.row_kind == "bnb" for option in options):
+        console.print(
+            "[dim]BNB single/double: double quantization also stores the 4-bit scales in 8 bits "
+            "instead of 32 (--double-quant / --single-quant).[/dim]"
+        )
     if measurements.UPPER_BOUND in bases:
         console.print(
             "[dim]<= limit set by memory bandwidth. The real speed is lower and gets learned "
@@ -326,13 +341,16 @@ def cmd_plan(
     group_size: GroupSize = None,
     samples: Samples = None,
     seq_len: SeqLen = None,
+    double_quant: DoubleQuant = None,
     context: Context = DEFAULT_CONTEXT,
     output: Output = None,
     llmfit_bin: LlmfitBin = None,
 ) -> None:
     """Show the quantization plan without running it."""
     ref = model_ref(model, model_path)
-    choices = read_choices(backend, bits, gguf_type, group_size, samples, seq_len, context)
+    choices = read_choices(
+        backend, bits, gguf_type, group_size, samples, seq_len, context, double_quant
+    )
     try:
         hw = detect_hardware(llmfit_bin)
         snapshot = resolve_model(ref, hw, llmfit_bin, context)
@@ -361,6 +379,7 @@ def cmd_optimize(
     group_size: GroupSize = None,
     samples: Samples = None,
     seq_len: SeqLen = None,
+    double_quant: DoubleQuant = None,
     context: Context = DEFAULT_CONTEXT,
     output: Output = None,
     dry_run: Annotated[
@@ -371,7 +390,9 @@ def cmd_optimize(
 ) -> None:
     """One click: analyze -> plan -> quantize -> validate -> benchmark."""
     ref = model_ref(model, model_path)
-    choices = read_choices(backend, bits, gguf_type, group_size, samples, seq_len, context)
+    choices = read_choices(
+        backend, bits, gguf_type, group_size, samples, seq_len, context, double_quant
+    )
     try:
         result = run_optimize(
             ref,

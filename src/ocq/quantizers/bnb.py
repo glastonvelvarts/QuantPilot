@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ocq.quantizers.base import TransformersQuantizer, free_memory
-from ocq.types import OptimizationPlan, QuantAlgorithm
+from ocq.types import OptimizationPlan, QuantAlgorithm, QuantConfig
 
 
 class BnbQuantizer(TransformersQuantizer):
@@ -13,6 +13,12 @@ class BnbQuantizer(TransformersQuantizer):
     needs = ("bitsandbytes", "transformers", "accelerate")
     needs_cuda = True
 
+    def artifact_name(self, config: QuantConfig) -> str:
+        name = super().artifact_name(config)
+        if config.bits == 4:
+            name += "-nf4-dq" if config.double_quant else "-nf4"
+        return name
+
     def quantize(self, plan: OptimizationPlan) -> None:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -21,7 +27,7 @@ class BnbQuantizer(TransformersQuantizer):
             config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
+                bnb_4bit_use_double_quant=plan.quant_config.double_quant,
                 bnb_4bit_compute_dtype=torch.float16,
             )
         else:

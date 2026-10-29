@@ -162,7 +162,7 @@ The table has one row per **format**, not just GGUF:
 
 1. **Original** — model as saved (F32 / BF16 / F16 from safetensors)  
 2. **GGUF** — Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q3_K_M, Q2_K  
-3. **AWQ / GPTQ / BNB** — packed size from the same tensor list  
+3. **AWQ / GPTQ / BNB** — packed size from the same tensor list, scales included. BNB 4-bit gets two rows, **single** and **double** quantization (see below)  
 
 Columns: weight GB, context GB (from `--context`, default 4096), total need, **fit**, **runs on** (`gpu`, `gpu+ram`, `cpu`, `unfit`), **tok/s**.
 
@@ -191,7 +191,32 @@ After **`optimize --execute`**, you get **measured** tok/s and time-to-first-tok
 | `-c`, `--context` | Context length for KV cache math and GGUF bench (default 4096) |
 | `-o`, `--output` | Output dir (default `./ocq-output/<model>`) |
 | `--samples`, `--seq-len` | AWQ/GPTQ calibration size |
+| `--double-quant` / `--single-quant` | BNB 4-bit: quantize the scales too, or not (default: double, single for `--goal speed`). Implies `-b bnb --bits 4` |
 | `--dry-run` / `--execute` | Plan only vs run quant (default: dry run) |
+
+---
+
+## Double quantization
+
+Quantized weights need **scales** to turn the small integers back into real numbers, and those scales take memory too. *Double quantization* quantizes the scales themselves.
+
+| Format | Scales | Extra bits per weight |
+|--------|--------|-----------------------|
+| **BNB 4-bit single** | one 32-bit scale per 64 weights | 0.5 |
+| **BNB 4-bit double** | 8-bit scale per 64 weights, one 32-bit scale per 256 of those | ~0.127 |
+| **GGUF K-quants** (Q2_K–Q6_K) | built in: 16-bit scale per 256 weights, sub-block scales in 4–8 bits | always on |
+| **GGUF Q4_0 / Q5_0 / Q8_0** | one 16-bit scale per 32 weights | 0.5 |
+| **AWQ / GPTQ** | one 16-bit scale (+ zero point) per group, 128 by default | not available |
+| **BNB 8-bit** | one 32-bit scale per row | not available (already ~0) |
+
+Double quantization saves about **0.37 bits per weight**: roughly 300 MB on a 7B model, about 3 GB on a 70B model, with almost no quality loss. The cost is a slightly slower unpack. Only **bitsandbytes 4-bit** makes it a choice:
+
+```sh
+uv run ocq optimize ./my-model -b bnb --bits 4 --execute   # double (default)
+uv run ocq optimize ./my-model --single-quant --execute    # single
+```
+
+`plan` tells you how much it saves on your model. Sizes are checked against real bitsandbytes 0.50 artifacts.
 
 ---
 
@@ -215,7 +240,7 @@ Validation checks: file exists, smaller than original, loads, generates readable
 
 **Memory needed ≈ weights + context**
 
-- **Weights:** tensor names/shapes from safetensors (Hub metadata or local files). GGUF uses llama.cpp’s per-tensor rules; AWQ/GPTQ/BNB use packed linear-layer math.  
+- **Weights:** tensor names/shapes from safetensors (Hub metadata or local files). GGUF uses llama.cpp’s per-tensor rules; AWQ/GPTQ/BNB use packed linear-layer math plus their scales (single or double quantized for BNB 4-bit).  
 - **Context:** KV cache from `config.json` (layers, KV heads, head dim) × `--context`, plus a small output buffer.  
 - **Fit:** compared to **free VRAM and RAM right now**, not total installed memory.
 

@@ -7,6 +7,8 @@ and by llama.cpp's load log for the real models.
 import pytest
 
 from ocq.model_size import (
+    bnb_scale_bits,
+    bnb_weights_bytes,
     gguf_weights_bytes,
     kv_cache_bytes,
     output_buffer_bytes,
@@ -76,3 +78,33 @@ def test_packed_size_matches_real_awq_artifact(smollm_tensors):
     # The AWQ 4-bit, group size 64 artifact produced for SmolLM2-135M was 114,029,456 bytes.
     ours = packed_weights_bytes(smollm_tensors, bits=4, group_size=64)
     assert ours == pytest.approx(114_029_456, rel=0.01)
+
+
+# Artifacts written by transformers 5.16.1 + bitsandbytes 0.50.2 for SmolLM2-135M-Instruct
+# (save_pretrained, total bytes of the .safetensors files).
+SMOLLM_BNB = {
+    (4, False): 116_548_186,
+    (4, True): 111_879_761,
+    (8, False): 163_557_634,
+}
+
+
+@pytest.mark.parametrize("bits, double_quant", SMOLLM_BNB)
+def test_bnb_size_matches_real_artifact(smollm_tensors, bits, double_quant):
+    ours = bnb_weights_bytes(smollm_tensors, bits, double_quant)
+    assert ours == pytest.approx(SMOLLM_BNB[bits, double_quant], rel=0.003)
+
+
+def test_double_quant_saves_about_0_37_bits_per_weight(qwen_tensors):
+    assert bnb_scale_bits(4, double_quant=False) == 0.5
+    assert bnb_scale_bits(4, double_quant=True) == pytest.approx(0.127, abs=0.001)
+    assert bnb_scale_bits(8, double_quant=True) == 0.0
+
+    single = bnb_weights_bytes(qwen_tensors, 4, double_quant=False)
+    double = bnb_weights_bytes(qwen_tensors, 4, double_quant=True)
+    quantized = sum(
+        shape[0] * shape[1]
+        for name, shape in qwen_tensors
+        if len(shape) == 2 and "embed" not in name
+    )
+    assert (single - double) * 8 / quantized == pytest.approx(0.373, abs=0.005)

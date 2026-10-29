@@ -8,11 +8,13 @@ from ocq.types import (
     HardwareProfile,
     ModelSnapshot,
     OptimizationGoal,
+    QuantAlgorithm,
+    QuantChoices,
 )
 
 
-def test_generate_plan_has_rationale():
-    hw = HardwareProfile(
+def make_hardware() -> HardwareProfile:
+    return HardwareProfile(
         total_ram_gb=32,
         available_ram_gb=24,
         cpu_cores=8,
@@ -21,7 +23,10 @@ def test_generate_plan_has_rationale():
         backend="CUDA",
         unified_memory=False,
     )
-    model = ModelSnapshot(
+
+
+def make_model() -> ModelSnapshot:
+    return ModelSnapshot(
         model_id="meta-llama/Llama-3.1-8B-Instruct",
         provider="Meta",
         parameter_count="8B",
@@ -43,13 +48,35 @@ def test_generate_plan_has_rationale():
             estimate_confidence="estimated",
         ),
     )
+
+
+def test_generate_plan_has_rationale():
     plan = generate_plan(
         "meta-llama/Llama-3.1-8B-Instruct",
-        hw,
-        model,
+        make_hardware(),
+        make_model(),
         OptimizationGoal.SPEED,
         Path("/tmp/out"),
     )
     assert plan.quant_config.bits == 4
     assert plan.llmfit_hypothesis_tps == 50.0
     assert any("tok/s" in line for line in plan.rationale)
+
+
+def test_bnb_plan_explains_double_quant_saving():
+    def plan_for(double_quant):
+        choices = QuantChoices(algorithm=QuantAlgorithm.BNB, bits=4, double_quant=double_quant)
+        return generate_plan(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            make_hardware(),
+            make_model(),
+            OptimizationGoal.BALANCED,
+            Path("/tmp/out"),
+            choices,
+        )
+
+    double, single = plan_for(True), plan_for(False)
+    assert double.predicted.weights_gb < single.predicted.weights_gb
+    # 8B parameters, 0.373 bits each
+    assert any("saving 356 MB" in line for line in double.rationale)
+    assert any("--double-quant would save 356 MB" in line for line in single.rationale)
