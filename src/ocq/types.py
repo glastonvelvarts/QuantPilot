@@ -288,6 +288,7 @@ class QuantChoices:
     calibration_samples: int | None = None
     calibration_seq_len: int | None = None
     context: int | None = None
+    double_quant: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -300,10 +301,15 @@ class QuantConfig:
     target_quant_label: str = "Q4_K_M"
     gguf_type: str = ""
     context: int = 4096
+    # bitsandbytes 4-bit only: also quantize the per-block scales.
+    double_quant: bool = False
 
     def summary(self) -> str:
         if self.algorithm == QuantAlgorithm.GGUF:
             return f"GGUF {self.gguf_type} ({self.bits}-bit)"
+        if self.algorithm == QuantAlgorithm.BNB and self.bits == 4:
+            quant = "double" if self.double_quant else "single"
+            return f"BNB 4-bit NF4, {quant} quantization"
         gs = f", gs={self.group_size}" if self.group_size else ""
         return f"{self.algorithm.value.upper()} {self.bits}-bit{gs}"
 
