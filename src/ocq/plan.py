@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 from ocq import measurements
@@ -43,6 +44,8 @@ def generate_plan(
         f"{config.context} token context ({predicted.fit_level}, {predicted.run_mode})"
     )
     rationale.append(f"Speed: {describe_speed(predicted, config)}")
+    if config.algorithm == QuantAlgorithm.BNB and config.bits == 4:
+        rationale.append(double_quant_note(model, hardware, config, predicted))
     warnings: list[str] = []
 
     if not predicted.exact:
@@ -74,6 +77,33 @@ def generate_plan(
         warnings=warnings,
         predicted=predicted,
     )
+
+
+def double_quant_note(
+    model: ModelSnapshot,
+    hardware: HardwareProfile,
+    config: QuantConfig,
+    predicted: QuantOption,
+) -> str:
+    """How much memory double quantization saves on this model, or would save."""
+    other = predict_for_config(
+        model, hardware, replace(config, double_quant=not config.double_quant)
+    )
+    saved = format_size(abs(other.weights_gb - predicted.weights_gb))
+    if config.double_quant:
+        return (
+            "Double quantization: the 32-bit scale of every 64 weights is stored in 8 bits, "
+            f"saving {saved} (about 0.37 bits per weight) for a slightly slower unpack. "
+            "--single-quant turns it off."
+        )
+    return (
+        "Single quantization: every 64 weights keep a 32-bit scale. "
+        f"--double-quant would save {saved}."
+    )
+
+
+def format_size(gb: float) -> str:
+    return f"{gb:.2f} GB" if gb >= 1 else f"{gb * 1024:.0f} MB"
 
 
 def describe_speed(option: QuantOption, config: QuantConfig) -> str:

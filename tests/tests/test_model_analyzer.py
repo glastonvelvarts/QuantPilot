@@ -143,3 +143,22 @@ def test_recommend_works_without_llmfit():
     fits = {model.model_id: model.feasibility.runnable for model in models}
     assert fits["Qwen/Qwen2.5-0.5B-Instruct"] is True
     assert fits["Qwen/Qwen2.5-72B-Instruct"] is False
+
+
+def test_feasibility_shows_bnb_single_and_double(qwen_tensors):
+    hardware = make_hardware(vram_gb=8)
+    options = options_by_label(qwen_snapshot(qwen_tensors, hardware), hardware)
+    single, double = options["BNB 4-bit single"], options["BNB 4-bit double"]
+    assert double.weights_gb < single.weights_gb
+    # 0.373 bits per quantized weight, averaged with the 16-bit embeddings (15% of Qwen 1.5B)
+    assert single.bits - double.bits == pytest.approx(0.316, abs=0.005)
+    assert "BNB 8-bit" in options
+
+
+def test_bnb_estimate_without_tensor_shapes_counts_scales():
+    meta = {"safetensors": {"total": 7_000_000_000}}
+    hardware = make_hardware()
+    snap = build_snapshot("some-org/Some-Model-7B", meta, {}, [], hardware)
+    options = options_by_label(snap, hardware)
+    assert options["BNB 4-bit single"].bits == pytest.approx(4.5)
+    assert options["BNB 4-bit double"].bits == pytest.approx(4.127, abs=0.001)

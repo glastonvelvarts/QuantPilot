@@ -180,6 +180,48 @@ def packed_weights_bytes(tensors: list[Tensor], bits: int, group_size: int) -> i
     return int(total)
 
 
+# bitsandbytes 4-bit: every 64 weights share one scale (absmax).
+BNB_BLOCK = 64
+# Double quantization: those scales are stored in 8 bits, and every 256 of them share one
+# 32-bit scale. Without it, each scale is a plain 32-bit float.
+BNB_NESTED_BLOCK = 256
+# Lookup tables saved once per tensor: the 16 NF4 values, plus 256 values for the 8-bit scales.
+BNB_CODE_BYTES = 16 * 4
+BNB_NESTED_CODE_BYTES = 256 * 4
+
+
+def bnb_scale_bits(bits: int, double_quant: bool) -> float:
+    """Extra bits per weight that bitsandbytes spends on scales. 0.5 single, about 0.127 double."""
+    if bits != 4:
+        return 0.0
+    if double_quant:
+        return 8 / BNB_BLOCK + 32 / (BNB_BLOCK * BNB_NESTED_BLOCK)
+    return 32 / BNB_BLOCK
+
+
+def bnb_weights_bytes(tensors: list[Tensor], bits: int, double_quant: bool = False) -> int:
+    """bitsandbytes quantizes the linear layers and leaves embeddings, lm_head and norms at 16-bit.
+
+    4-bit packs two weights per byte and adds the scales described above.
+    8-bit stores one byte per weight plus one 32-bit scale per output row.
+    """
+    total = 0
+    for name, shape in tensors:
+        count = math.prod(shape)
+        if len(shape) < 2 or tensor_role(name) in ("token_embd", "output"):
+            total += count * 2
+        elif bits == 8:
+            total += count + shape[0] * 4 + 1
+        else:
+            blocks = -(-count // BNB_BLOCK)
+            total += -(-count // 2) + BNB_CODE_BYTES
+            if double_quant:
+                total += blocks + -(-blocks // BNB_NESTED_BLOCK) * 4 + BNB_NESTED_CODE_BYTES
+            else:
+                total += blocks * 4
+    return total
+
+
 def group_size_that_fits(tensors: list[Tensor], wanted: int) -> int:
     """AWQ and GPTQ need the group size to divide the width of every layer they quantize."""
     widths = {
