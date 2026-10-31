@@ -1,11 +1,12 @@
 """The GGUF conversion must start from the precision the model is really stored in."""
 
 import pytest
+from conftest import QWEN3_FP8, QWEN_GPTQ, real_model
 
 from ocq.model_analyzer import build_snapshot, quant_options
 from ocq.model_size import gguf_weights_bytes
 from ocq.quantizers.gguf import intermediate_precision
-from ocq.types import HardwareProfile
+from ocq.types import FactKind, HardwareProfile
 
 
 def make_hardware() -> HardwareProfile:
@@ -61,3 +62,40 @@ def test_quantized_size_does_not_depend_on_the_stored_precision(smollm_tensors):
     # llama-quantize produced byte-identical Q4_K_M files from f16, bf16 and f32 copies of
     # SmolLM2-135M, so the predicted size must not change either.
     assert gguf_weights_bytes(smollm_tensors, "Q4_K_M", 3) == 103_668_480
+
+
+# Bug 3: FP8 was sized at 2 bytes per weight, and any unknown type was guessed as 2 bytes.
+
+
+def test_fp8_model_is_sized_at_one_byte_per_weight():
+    meta, config, tensors, dtypes = real_model(QWEN3_FP8)
+    snap = build_snapshot(QWEN3_FP8, meta, config, tensors, None, dtypes=dtypes)
+    assert snap.facts.precision.value == "F8_E4M3"
+    assert snap.facts.precision.kind == FactKind.CROSS_CHECKED
+    assert snap.facts.quantization.value == "FP8 e4m3"
+    # 1.41B FP8 weights at 1 byte + 622M BF16 at 2 bytes. 2 bytes for all would be 3.78 GB.
+    assert snap.original_gb == pytest.approx(2.47, abs=0.005)
+    assert snap.stored_precision == ""  # not a float type llama.cpp converts from
+
+
+def test_fp8_size_from_the_hub_counts_alone_is_an_estimate():
+    # The HuggingFace API leaves out the FP8 scales (86,016 BF16 values), so this is a bit short.
+    meta, config, _, _ = real_model(QWEN3_FP8)
+    snap = build_snapshot(QWEN3_FP8, meta, config, [], None)
+    assert snap.facts.stored_bytes.value == 622_453_760 * 2 + 1_409_286_144
+    assert snap.facts.stored_bytes.kind == FactKind.ESTIMATE
+
+
+def test_unknown_type_makes_the_size_unknown_not_guessed():
+    snap = snapshot_stored_as({"BF16": 1_000_000, "F3_NEW": 1_000})
+    assert snap.original_gb is None
+    assert not snap.facts.stored_bytes.known
+    assert "F3_NEW" in snap.facts.stored_bytes.note
+
+
+def test_packed_counts_from_the_hub_are_not_turned_into_bytes():
+    # The HF API counts GPTQ weights unpacked under I32: 4 bytes each would claim 5.32 GB.
+    meta, config, _, _ = real_model(QWEN_GPTQ)
+    snap = build_snapshot(QWEN_GPTQ, meta, config, [], None)
+    assert snap.original_gb is None
+    assert snap.facts.precision.value == "packed 4-bit"

@@ -252,8 +252,11 @@ def pick_algorithm(hardware: HardwareProfile, model: ModelSnapshot, bits: int) -
 
 
 def calibration_fits_in_ram(hardware: HardwareProfile, model: ModelSnapshot) -> bool:
-    """AWQ, GPTQ and NVFP4 load the whole original model into RAM before they start."""
-    return model.original_gb <= hardware.available_ram_gb
+    """AWQ, GPTQ and NVFP4 load the whole original model into RAM before they start.
+
+    True when the original size is unknown: the plan warns about that instead of guessing.
+    """
+    return model.original_gb is None or model.original_gb <= hardware.available_ram_gb
 
 
 def default_group_size(algorithm: QuantAlgorithm, bits: int) -> int:
