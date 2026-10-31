@@ -55,6 +55,13 @@ EVAL_BATCH = 512
 
 
 def gguf_weights_bytes(tensors: list[Tensor], gguf_type: str, heads_per_kv_head: int = 1) -> int:
+    return sum(gguf_tensor_bytes(tensors, gguf_type, heads_per_kv_head).values())
+
+
+def gguf_tensor_bytes(
+    tensors: list[Tensor], gguf_type: str, heads_per_kv_head: int = 1
+) -> dict[str, int]:
+    """Bytes of each tensor in the GGUF file, by its name in the original checkpoint."""
     base = BASE_TYPE[gguf_type]
     tied_embeddings = not any(tensor_role(name) == "output" for name, _ in tensors)
     layers = 1 + max((layer_index(name) for name, _ in tensors), default=0)
@@ -63,10 +70,11 @@ def gguf_weights_bytes(tensors: list[Tensor], gguf_type: str, heads_per_kv_head:
     )
     value_order = {name: position for position, (_, name) in enumerate(value_tensors)}
 
-    total = 0
+    sizes = {}
     for name, shape in tensors:
         count = math.prod(shape)
-        if len(shape) < 2:
+        if len(shape) < 2 or tensor_role(name) == "router":
+            # llama.cpp keeps norms and MoE routers (ffn_gate_inp) at 32 bits.
             tensor_type = "F32"
         elif base in ("F16", "F32"):
             tensor_type = base
@@ -85,8 +93,8 @@ def gguf_weights_bytes(tensors: list[Tensor], gguf_type: str, heads_per_kv_head:
             )
         block_bytes, block_weights = BLOCKS[tensor_type]
         size = count // block_weights * block_bytes
-        total += -(-size // 32) * 32
-    return total
+        sizes[name] = -(-size // 32) * 32
+    return sizes
 
 
 def quantized_type(
@@ -150,6 +158,10 @@ def more_bits(index: int, count: int) -> bool:
 
 
 def tensor_role(name: str) -> str:
+    # The MoE router: mlp.gate (Qwen, OLMoE, DeepSeek), block_sparse_moe.gate (Mixtral),
+    # router (Granite, gpt-oss). Not mlp.gate_proj, the dense feed-forward.
+    if name.endswith(".gate.weight") or ".router." in name:
+        return "router"
     if "lm_head" in name:
         return "output"
     if "embed_tokens" in name or name.endswith("wte.weight"):
@@ -158,7 +170,8 @@ def tensor_role(name: str) -> str:
         return "attn_v"
     if "o_proj" in name:
         return "attn_output"
-    if "down_proj" in name:
+    # Granite's output_linear (experts and shared expert) becomes ffn_down_exps/_shexp in GGUF.
+    if "down_proj" in name or "output_linear" in name:
         return "ffn_down"
     return "other"
 
@@ -344,8 +357,24 @@ def experts_in_names(tensors: list[Tensor]) -> int:
     indexed = {match.group(1) for name, _ in tensors if (match := EXPERT_INDEX.search(name))}
     if indexed:
         return len(indexed)
-    fused = {shape[0] for name, shape in tensors if ".experts." in name and len(shape) >= 2}
+    fused = {shape[0] for name, shape in tensors if fused_experts(name, shape)}
     return fused.pop() if len(fused) == 1 else 0
+
+
+def fused_experts(name: str, shape: tuple[int, ...]) -> bool:
+    """All experts of a layer in one tensor, the expert count first: under mlp.experts
+    (gpt-oss, Llama 4), or a 3-D tensor of an MoE block (Granite: block_sparse_moe.input_linear,
+    [32, 1024, 1024]). The router ([32, 1024]) is 2-D and not an expert."""
+    if ".experts." in name:
+        return len(shape) >= 2
+    return len(shape) == 3 and ("moe" in name or "expert" in name)
+
+
+def routed_expert(name: str, shape: tuple[int, ...], experts: int) -> bool:
+    """A tensor of the routed experts, of which only some run for each token."""
+    if EXPERT_INDEX.search(name):
+        return True
+    return bool(experts) and fused_experts(name, shape) and shape[0] == experts
 
 
 def weights_per_token(
@@ -369,8 +398,7 @@ def weights_per_token(
         if held is None:
             return None
         weights = held[1]
-        routed = EXPERT_INDEX.search(name) or (".experts." in name and shape[0] == experts)
-        if experts and experts_per_token and routed:
+        if experts and experts_per_token and routed_expert(name, shape, experts):
             read += weights * experts_per_token / experts
         elif separate_output and name.endswith(EMBEDDING) and "vision" not in name:
             embedding += weights
