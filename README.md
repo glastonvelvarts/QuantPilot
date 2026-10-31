@@ -362,6 +362,25 @@ Validation checks: file exists, smaller than original, loads, generates readable
 
 ---
 
+## Check QuantPilot on your PC: `ocq verify`
+
+`verify` loads a local GGUF in llama.cpp once, reads llama.cpp's own memory numbers from its log, and puts them next to QuantPilot's prediction. It exits with an error when they differ beyond llama.cpp's rounding:
+
+```sh
+uv run ocq verify ./Qwen3-30B-A3B-Q4_K_M.gguf -c 16384 --kv-cache q8_0
+```
+
+```
+Memory                       QuantPilot   llama.cpp   Difference
+context cache (KV)               544.00      544.00        +0.00   ok
+weights on the GPU             2,410.10    2,410.10        +0.00   ok
+weights on the CPU (file range) 1,342.57   1,342.57        +0.00   ok
+```
+
+By default it runs llama.cpp with QuantPilot's own plan for this PC (for a mixture of experts too big for the VRAM, the `--n-cpu-moe` it predicts), so that plan is what gets checked. On an Apple Silicon Mac it matched exactly for dense, sliding-window, mixture-of-experts, Mamba and convolution hybrids; running it on an NVIDIA PC checks the CUDA side.
+
+---
+
 ## How sizing works (short version)
 
 **Memory needed ≈ weights + context**
@@ -384,6 +403,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 | `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
 | `backends` | Installed quant backends and what’s missing |
 | `inspect` | Every fact about a model, its source and how sure it is |
+| `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
 | `recommend` | Suggested Hub models for this PC |
 | `feasibility` | Full format table for one model |
 | `plan` | Quant plan + warnings (no heavy work) |
