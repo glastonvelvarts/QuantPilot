@@ -19,6 +19,8 @@ MEASURED = "from runs on this PC"
 
 
 def record(device: str, weights_gb: float, tokens_per_second: float) -> None:
+    """weights_gb is what one token reads: the whole file for a dense model, less for a
+    mixture of experts (see ModelSnapshot.read_fraction)."""
     runs = load()
     runs.append({"device": device, "weights_gb": weights_gb, "tps": tokens_per_second})
     STORE.parent.mkdir(parents=True, exist_ok=True)
@@ -39,15 +41,17 @@ def predict_speed(
     hardware: HardwareProfile,
     use_measurements: bool = True,
     gpu_read_speed: float | None = None,
+    read_fraction: float = 1.0,
 ) -> tuple[float, str]:
     """Returns tokens per second and where the number comes from.
 
-    The stored runs are llama.cpp benchmarks, so they only apply to GGUF models.
+    read_fraction is the share of the weights each token reads (below 1 for a mixture of
+    experts). The stored runs are llama.cpp benchmarks, so they only apply to GGUF models.
     """
     if run_mode == RunMode.UNFIT or weights_gb <= 0:
         return 0.0, UPPER_BOUND
 
-    limit = bandwidth_limit(weights_gb, run_mode, vram_gb, hardware, gpu_read_speed)
+    limit = bandwidth_limit(weights_gb, run_mode, vram_gb, hardware, gpu_read_speed, read_fraction)
     device = {RunMode.GPU: "gpu", RunMode.CPU: "cpu"}.get(run_mode)
     runs = [run for run in load() if run["device"] == device] if use_measurements else []
     fitted = fit_runs(runs)
@@ -55,7 +59,7 @@ def predict_speed(
         return round(limit, 1), UPPER_BOUND
 
     fixed_seconds, seconds_per_gb = fitted
-    measured = 1 / (fixed_seconds + seconds_per_gb * weights_gb)
+    measured = 1 / (fixed_seconds + seconds_per_gb * weights_gb * read_fraction)
     return round(min(measured, limit), 1), MEASURED
 
 
@@ -65,8 +69,9 @@ def bandwidth_limit(
     vram_gb: float,
     hardware: HardwareProfile,
     gpu_read_speed: float | None = None,
+    read_fraction: float = 1.0,
 ) -> float:
-    """Each new token reads every weight once, so memory bandwidth caps the speed.
+    """Each new token reads every weight it uses once, so memory bandwidth caps the speed.
 
     gpu_read_speed is how fast the GPUs in use read the weights together (see GpuPool);
     without it, the largest GPU's speed.
@@ -77,13 +82,15 @@ def bandwidth_limit(
         gpu_speed = gpu.read_speed
     cpu_speed = (hardware.ram_bandwidth_gbs or hardware.measured_ram_bandwidth_gbs) * 1e9 / GB
 
+    read_gb = weights_gb * read_fraction
     if run_mode == RunMode.GPU and gpu_speed:
-        return gpu_speed / weights_gb
+        return gpu_speed / read_gb
     if run_mode == RunMode.GPU_OFFLOAD and gpu_speed and cpu_speed:
-        on_gpu = min(vram_gb, weights_gb)
-        return 1 / (on_gpu / gpu_speed + (weights_gb - on_gpu) / cpu_speed)
+        # The part that did not fit in VRAM is read from RAM.
+        on_gpu = min(vram_gb, weights_gb) / weights_gb
+        return 1 / (read_gb * on_gpu / gpu_speed + read_gb * (1 - on_gpu) / cpu_speed)
     if cpu_speed:
-        return cpu_speed / weights_gb
+        return cpu_speed / read_gb
     return 0.0
 
 
