@@ -2,6 +2,7 @@
 
 import pytest
 from conftest import (
+    OCQ_NVFP4,
     QWEN,
     QWEN3_8B_NVFP4,
     QWEN_AWQ,
@@ -343,3 +344,65 @@ def test_layer_count_that_disagrees_with_the_tensor_names_is_an_estimate(qwen_te
     snap = build_snapshot("org/model", {}, QWEN_CONFIG, missing_last_layer, None)
     assert snap.facts.architecture.kind == FactKind.ESTIMATE
     assert "tensor names show 27 layers" in snap.facts.architecture.note
+
+
+# Context memory: config.json and the K and V projection shapes are two sources.
+
+ODD_CONFIG = {"model_type": "odd", "architectures": ["OddForCausalLM"]}
+
+
+def fused_attention(tensors):
+    """The same model with q, k and v in one tensor, as Phi-3 and GPT-NeoX store them."""
+    fused = []
+    for name, shape in tensors:
+        if ".k_proj." in name or ".v_proj." in name:
+            continue
+        fused.append((name.replace(".q_proj.", ".qkv_proj."), shape))
+    return fused
+
+
+@pytest.mark.parametrize("repo", [QWEN, QWEN3_8B_NVFP4, QWEN_W8A8, SMOLVLM, OCQ_NVFP4])
+def test_context_memory_from_config_matches_the_tensor_shapes(repo):
+    meta, config, tensors, dtypes = real_model(repo)
+    kv = build_snapshot(repo, meta, config, tensors, None, dtypes=dtypes).facts.kv_cache
+    assert kv.kind == FactKind.CROSS_CHECKED
+    # And without config.json, the shapes alone give the same number.
+    alone = build_snapshot(repo, meta, {}, tensors, None, dtypes=dtypes).facts.kv_cache
+    assert alone.value == kv.value
+    assert alone.source == "tensor shapes"
+
+
+def test_tensor_shapes_give_the_context_memory_when_config_has_no_counts(qwen_tensors):
+    hardware = make_hardware(vram_gb=8)
+    snap = build_snapshot("org/odd", {}, ODD_CONFIG, qwen_tensors, hardware)
+    assert snap.facts.kv_cache.value == 28 * 2 * 256 * 2  # layers x (K + V widths) x 2 bytes
+    assert snap.facts.kv_cache.kind == FactKind.ESTIMATE
+    q4 = options_by_label(snap, hardware)["Q4_K_M"]
+    # Same as with Qwen's config: 112 MiB of keys and values + 296.75 MiB of output scores.
+    assert q4.context_known
+    assert q4.context_gb * 1024 == pytest.approx(112 + 296.75, abs=0.01)
+    assert q4.fit_level == FitLevel.PERFECT
+
+
+def test_config_and_shapes_that_disagree_make_an_estimate(qwen_tensors):
+    wrong_kv_heads = QWEN_CONFIG | {"num_key_value_heads": 4}  # the shapes show 2
+    kv = build_snapshot("org/model", {}, wrong_kv_heads, qwen_tensors, None).facts.kv_cache
+    assert kv.kind == FactKind.ESTIMATE
+    assert "tensor shapes give 28,672 bytes per token" in kv.note
+
+
+def test_unknown_attention_leaves_context_memory_unknown(qwen_tensors):
+    hardware = make_hardware(vram_gb=8)
+    snap = build_snapshot("org/odd", {}, ODD_CONFIG, fused_attention(qwen_tensors), hardware)
+    options = quant_options(snap, hardware)
+    assert not snap.facts.kv_cache.known
+    assert not any(option.context_known for option in options)
+    # Without the context, the headroom of Perfect or Good cannot be promised.
+    assert {option.fit_level for option in options} == {FitLevel.MARGINAL}
+
+
+def test_known_architecture_keeps_its_context_memory(qwen_tensors):
+    hardware = make_hardware(vram_gb=8)
+    option = options_by_label(qwen_snapshot(qwen_tensors, hardware), hardware)["Q4_K_M"]
+    assert option.context_known
+    assert option.fit_level == FitLevel.PERFECT

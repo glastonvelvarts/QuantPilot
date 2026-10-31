@@ -41,20 +41,33 @@ def generate_plan(
     config = decide_quant_config(hardware, model, goal, choices)
     predicted = predict_for_config(model, hardware, config)
     rationale = build_rationale(hardware, model, config, goal)
-    rationale.append(
-        f"{predicted.label} needs {predicted.memory_required_gb:.2f} GB: "
-        f"{predicted.weights_gb:.2f} GB weights + {predicted.context_gb:.2f} GB for a "
-        f"{config.context} token context ({predicted.fit_level}, {predicted.run_mode})"
-    )
+    if predicted.context_known:
+        rationale.append(
+            f"{predicted.label} needs {predicted.memory_required_gb:.2f} GB: "
+            f"{predicted.weights_gb:.2f} GB weights + {predicted.context_gb:.2f} GB for a "
+            f"{config.context} token context ({predicted.fit_level}, {predicted.run_mode})"
+        )
+    else:
+        rationale.append(
+            f"{predicted.label} needs {predicted.weights_gb:.2f} GB for the weights, plus an "
+            f"unknown amount for a {config.context} token context "
+            f"({predicted.fit_level}, {predicted.run_mode})"
+        )
     rationale.append(f"Speed: {describe_speed(predicted, config)}")
     if config.algorithm == QuantAlgorithm.BNB and config.bits == 4:
         rationale.append(double_quant_note(model, hardware, config, predicted))
     warnings: list[str] = []
 
-    if not predicted.exact:
+    if not model.tensors:
         warnings.append(
-            "This repo's tensor shapes or config could not be read, so sizes are estimated "
+            "This repo's tensor shapes could not be read, so sizes are estimated "
             "from the parameter count."
+        )
+    if not predicted.context_known:
+        warnings.append(
+            "config.json has no layer or head counts and the tensor names show no separate "
+            "k_proj/v_proj, so the memory for the context is unknown and the fit counts the "
+            "weights only."
         )
     if not model.feasibility.runnable:
         warnings.append("Model is Too Tight on this PC. It may not load after quantization.")

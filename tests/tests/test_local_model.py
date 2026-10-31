@@ -179,7 +179,8 @@ def test_inspect_prints_every_fact(tmp_path):
     result = CliRunner().invoke(app, ["inspect", str(folder)], terminal_width=200)
     assert result.exit_code == 0, result.output
     assert "GPTQ 4-bit, 1.54B params (estimate), 1.07 GB of weights" in result.output
-    for line in ("Parameters", "Precision", "Stored bytes", "Architecture", "Context length"):
+    facts = ("Parameters", "Precision", "Stored bytes", "Architecture", "Context length", "KV")
+    for line in facts:
         assert line in result.output
     assert "1,543,714,304" in result.output
     assert "32,768" in result.output
