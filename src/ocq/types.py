@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -327,23 +328,32 @@ class HardwareProfile:
         return gpu.free_vram_gb if gpu.free_vram_gb is not None else gpu.vram_gb
 
     def gpu_pool(
-        self, split: str = LAYER_SPLIT, attention_heads: int | None = None
+        self,
+        split: str = LAYER_SPLIT,
+        attention_heads: int | None = None,
+        budget: Callable[[GpuProfile, float], float] | None = None,
     ) -> GpuPool | None:
         """The GPUs a runtime would use, with their free VRAM and read speed together.
 
         Tensor parallel needs the card count to divide the attention heads (vLLM checks it), so
-        without the head count only one card is assumed.
+        without the head count only one card is assumed. budget(card, free GB) is the GB the
+        runtime works with on a card, when that is not simply what is free (vLLM).
         """
-        cards = sorted(self.cards, key=self.card_free_gb, reverse=True)
+
+        def usable(card: GpuProfile) -> float:
+            free = self.card_free_gb(card)
+            return budget(card, free) if budget else free
+
+        cards = sorted(self.cards, key=usable, reverse=True)
         if not self.has_gpu or not cards:
             return None
         if self.unified_memory or len(cards) == 1 or split == ONE_GPU:
             best = cards[0]
-            return GpuPool((best,), self.card_free_gb(best), best.read_speed, ONE_GPU)
+            return GpuPool((best,), usable(best), best.read_speed, ONE_GPU)
 
         if split == LAYER_SPLIT:
             # llama.cpp splits by free memory: each card holds and reads its share in turn.
-            free = [self.card_free_gb(card) for card in cards]
+            free = [usable(card) for card in cards]
             total = sum(free)
             seconds_per_gib = 0.0
             for card, share in zip(cards, free, strict=True):
@@ -359,7 +369,7 @@ class HardwareProfile:
             if count > 1 and (not attention_heads or attention_heads % count):
                 continue
             used = cards[:count]
-            free = count * min(self.card_free_gb(card) for card in used)
+            free = count * min(usable(card) for card in used)
             speed = count * min(card.read_speed for card in used)
             if best is None or free > best.free_gb:
                 kind = TENSOR_PARALLEL if count > 1 else ONE_GPU
@@ -433,6 +443,8 @@ class QuantOption:
     gpu_split: str = ""
     # GPU_EXPERTS_RAM: the experts of this many layers (the first ones) are kept in RAM.
     experts_in_ram: int = 0
+    # Why the runtime cannot run this row here, when that is not just the memory it needs.
+    note: str = ""
 
     @property
     def runnable(self) -> bool:

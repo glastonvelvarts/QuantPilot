@@ -574,6 +574,8 @@ def cmd_feasibility(
             "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "
             "whole layers instead.[/dim]"
         )
+    for note in dict.fromkeys(option.note for option in options if option.note):
+        console.print(f"[yellow]{escape(note)}[/yellow]")
     if snapshot.is_mlx and not hw.apple_silicon:
         console.print(
             "[yellow]MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio), not on this PC: "
