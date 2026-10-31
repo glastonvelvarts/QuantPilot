@@ -326,7 +326,13 @@ def tensor_weights(
 # One tensor per expert (Qwen3-MoE, DeepSeek, Mixtral: mlp.experts.7.up_proj.weight), or all
 # experts in one tensor whose first dimension is the expert count (gpt-oss: mlp.experts.*).
 EXPERT_INDEX = re.compile(r"\.experts\.(\d+)\.")
-EMBEDDING = ("embed_tokens.weight", "wte.weight", "word_embeddings.weight")
+# Input embedding tables: Llama/Qwen, GPT-2, BLOOM, Nemotron-H (backbone.embeddings.weight).
+EMBEDDING = (
+    "embed_tokens.weight",
+    "wte.weight",
+    "word_embeddings.weight",
+    "backbone.embeddings.weight",
+)
 OUTPUT = ("lm_head.weight", "output.weight")
 
 
