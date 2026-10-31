@@ -259,3 +259,17 @@ def test_fp4_flag_implies_nvfp4_and_wins(fp4_activations):
     assert config.algorithm == QuantAlgorithm.NVFP4
     assert config.bits == 4
     assert config.fp4_activations == fp4_activations
+
+
+def test_kv_cache_type_is_checked_and_carried_into_the_plan():
+    asked = QuantChoices(kv_cache="Q8_0")
+    config = decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.BALANCED, asked)
+    assert config.kv_cache == "q8_0"
+    assert (
+        decide_quant_config(cuda_hardware(), make_model(), OptimizationGoal.BALANCED).kv_cache
+        == "f16"
+    )
+    with pytest.raises(OcqError, match="--kv-cache"):
+        decide_quant_config(
+            cuda_hardware(), make_model(), OptimizationGoal.BALANCED, QuantChoices(kv_cache="q3")
+        )

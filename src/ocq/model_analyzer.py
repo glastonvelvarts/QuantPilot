@@ -24,6 +24,7 @@ from ocq.model_size import (
     experts_in_names,
     gguf_weights_bytes,
     group_size_that_fits,
+    kv_value_bytes,
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
@@ -37,10 +38,12 @@ from ocq.types import (
     INTEGER_TYPES,
     KV_BYTES_PER_VALUE,
     LAYER_SPLIT,
+    LLAMA_CPP,
     ONE_GPU,
     SLIDING_WINDOW_UBATCH,
     TENSOR_PARALLEL,
     TRANSFORMERS,
+    VLLM,
     Fact,
     FactKind,
     FeasibilityEstimate,
@@ -120,13 +123,16 @@ def resolve_model(
     hardware: HardwareProfile | None,
     llmfit_bin: str | None = None,
     context: int = DEFAULT_CONTEXT,
+    kv_cache: str = "f16",
 ) -> ModelSnapshot:
     """Read a model's facts from its files. Without hardware, the fit is not computed."""
     display_id, local_dir = parse_model_ref(model_ref)
     if local_dir is not None:
         config, tensors, dtypes = fetch_local_model_files(local_dir)
         meta = {"pipeline_tag": "local"}
-        snapshot = build_snapshot(display_id, meta, config, tensors, hardware, context, dtypes)
+        snapshot = build_snapshot(
+            display_id, meta, config, tensors, hardware, context, dtypes, kv_cache
+        )
         return replace(
             snapshot,
             provider="local",
@@ -147,7 +153,7 @@ def resolve_model(
     config, tensors, dtypes = fetch_model_files(model_id, meta.get("sha", ""))
     if quantization_config(config):
         meta = meta | {"base_model_parameters": base_model_parameters(meta)}
-    snapshot = build_snapshot(model_id, meta, config, tensors, hardware, context, dtypes)
+    snapshot = build_snapshot(model_id, meta, config, tensors, hardware, context, dtypes, kv_cache)
     if catalog:
         snapshot = replace(
             snapshot,
@@ -280,6 +286,7 @@ def build_snapshot(
     hardware: HardwareProfile | None,
     context: int = DEFAULT_CONTEXT,
     dtypes: dict[str, str] | None = None,
+    kv_cache: str = "f16",
 ) -> ModelSnapshot:
     facts = model_facts(model_id, meta, config, tensors, dtypes or {})
     parameters = facts.parameters.value or 0
@@ -313,7 +320,7 @@ def build_snapshot(
     if hardware is None:
         return snapshot
 
-    best = best_option(quant_options(snapshot, hardware, context))
+    best = best_option(quant_options(snapshot, hardware, context, kv_cache))
     return replace(
         snapshot,
         llmfit_best_quant=best.label,
@@ -922,16 +929,31 @@ def context_fact(config: dict, meta: dict) -> Fact:
 
 
 def quant_options(
-    model: ModelSnapshot, hardware: HardwareProfile, context: int = DEFAULT_CONTEXT
+    model: ModelSnapshot,
+    hardware: HardwareProfile,
+    context: int = DEFAULT_CONTEXT,
+    kv_cache: str = "f16",
 ) -> list[QuantOption]:
-    """Stored checkpoint, GGUF levels, then AWQ/GPTQ/BNB packed sizes from the same tensors."""
+    """Stored checkpoint, GGUF levels, then AWQ/GPTQ/BNB packed sizes from the same tensors.
+
+    kv_cache is the cache type asked for (--kv-cache); each row uses its runtime's version.
+    """
     if model.is_quantized:
         # Already quantized: only the files as they are. Re-quantizing would stack the errors.
         if model.original_gb is None:
             raise OcqError(f"Could not read how big the files of {model.model_id} are.")
         label = f"{model.facts.quantization.value} (as stored)"
         return [
-            fit_at(label, model.original_gb, model, hardware, context, False, row_kind="stored")
+            fit_at(
+                label,
+                model.original_gb,
+                model,
+                hardware,
+                context,
+                False,
+                row_kind="stored",
+                kv_cache=kv_cache,
+            )
         ]
     stored = model.stored_precision or "FP16"
     options: list[QuantOption] = [
@@ -943,6 +965,7 @@ def quant_options(
             context,
             use_measurements=False,
             row_kind="stored",
+            kv_cache=kv_cache,
         )
     ]
     for label in QUANTIZED_LEVELS:
@@ -955,10 +978,13 @@ def quant_options(
                 context,
                 use_measurements=True,
                 row_kind="gguf",
+                kv_cache=kv_cache,
             )
         )
     for algorithm, bits, double_quant in HF_QUANT_ROWS:
-        options.append(hf_quant_option(model, hardware, context, algorithm, bits, double_quant))
+        options.append(
+            hf_quant_option(model, hardware, context, algorithm, bits, double_quant, kv_cache)
+        )
     # NVFP4 is only served on NVIDIA GPUs, so other PCs do not see the row.
     if hardware.has_cuda:
         options.append(
@@ -976,6 +1002,7 @@ def quant_options(
                 context,
                 use_measurements=False,
                 row_kind=QuantAlgorithm.NVFP4.value,
+                kv_cache=kv_cache,
             )
         )
     return options
@@ -988,6 +1015,7 @@ def hf_quant_option(
     algorithm: QuantAlgorithm,
     bits: int,
     double_quant: bool = False,
+    kv_cache: str = "f16",
 ) -> QuantOption:
     group_size = default_group_size(algorithm, bits)
     if model.tensors and group_size:
@@ -1000,6 +1028,7 @@ def hf_quant_option(
         context,
         use_measurements=False,
         row_kind=algorithm.value,
+        kv_cache=kv_cache,
     )
 
 
@@ -1027,6 +1056,7 @@ def predict_for_config(
         config.context,
         use_measurements=config.algorithm == QuantAlgorithm.GGUF,
         row_kind=("gguf" if config.algorithm == QuantAlgorithm.GGUF else config.algorithm.value),
+        kv_cache=config.kv_cache,
     )
 
 
@@ -1079,6 +1109,16 @@ def best_option(options: list[QuantOption]) -> QuantOption:
     return quantized[-1]
 
 
+def runtime_of(row_kind: str) -> str:
+    """The runtime that serves a row: llama.cpp for GGUF, vLLM for AWQ, GPTQ and NVFP4,
+    transformers for the original weights and bitsandbytes."""
+    if row_kind == "gguf":
+        return LLAMA_CPP
+    if row_kind in VLLM_ROWS:
+        return VLLM
+    return TRANSFORMERS
+
+
 def fit_at(
     label: str,
     weights_gb: float,
@@ -1087,6 +1127,7 @@ def fit_at(
     context: int,
     use_measurements: bool = True,
     row_kind: str = "gguf",
+    kv_cache: str = "f16",
 ) -> QuantOption:
     if model.params_b <= 0:
         hint = model.facts.parameters.note
@@ -1095,9 +1136,11 @@ def fit_at(
             f"headers and no count from HuggingFace{f' ({hint})' if hint else ''}. "
             "Its memory needs cannot be computed."
         )
-    # transformers expands MLA's compressed cache; llama.cpp and vLLM keep it compressed.
-    runtime = TRANSFORMERS if row_kind in ("stored", QuantAlgorithm.BNB.value) else ""
-    kv_bytes = model.kv_cache_bytes(context, runtime)
+    # transformers expands MLA's compressed cache and keeps 16 bits; llama.cpp and vLLM keep it
+    # compressed, and store the cache type asked for in their own format.
+    runtime = runtime_of(row_kind)
+    value_bytes = kv_value_bytes(kv_cache, runtime)
+    kv_bytes = model.kv_cache_bytes(context, runtime, value_bytes=value_bytes)
     context_gb = 0.0
     if kv_bytes is not None:
         context_gb = (kv_bytes + output_buffer_bytes(model.vocab_size)) / GB
