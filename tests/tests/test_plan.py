@@ -157,6 +157,45 @@ def test_plan_gives_the_cache_flags_of_the_runtime():
         return next(line for line in plan.rationale if line.startswith("Context cache"))
 
     assert "-ctk q8_0 -ctv q8_0" in cache_line(algorithm=QuantAlgorithm.GGUF, kv_cache="q8_0")
+    # This test PC's GPU has no known compute capability, so vLLM's fp8 cache is not promised.
     awq = cache_line(algorithm=QuantAlgorithm.AWQ, kv_cache="q4_0")
-    assert "--kv-cache-dtype fp8" in awq
-    assert "no 4-bit cache" in awq
+    assert "stays at 16 bits" in awq
+    assert "8.9 or newer" in awq
+
+
+def test_windows_explains_gguf_and_warns_about_vllm_formats():
+    from dataclasses import replace
+
+    windows = replace(make_hardware(), os_name="Windows")
+    model = make_model()
+
+    def plan_on(hardware, **choices):
+        return generate_plan(
+            model.model_id,
+            hardware,
+            model,
+            OptimizationGoal.BALANCED,
+            Path("/tmp"),
+            QuantChoices(**choices),
+        )
+
+    picked = plan_on(windows)
+    assert picked.quant_config.algorithm == QuantAlgorithm.GGUF
+    assert any(line.startswith("Windows: GGUF") for line in picked.rationale)
+    forced = plan_on(windows, algorithm=QuantAlgorithm.AWQ)
+    assert any("does not run natively on Windows" in warning for warning in forced.warnings)
+    linux = plan_on(make_hardware(), algorithm=QuantAlgorithm.AWQ)
+    assert not any("Windows" in warning for warning in linux.warnings)
+
+
+def test_plan_promises_vllm_fp8_cache_only_on_a_capable_gpu():
+    from conftest import RTX_4090, nvidia_pc
+
+    model, ada = make_model(), nvidia_pc(RTX_4090)
+    choices = QuantChoices(algorithm=QuantAlgorithm.AWQ, kv_cache="q4_0")
+    plan = generate_plan(
+        model.model_id, ada, model, OptimizationGoal.BALANCED, Path("/tmp"), choices
+    )
+    line = next(line for line in plan.rationale if line.startswith("Context cache"))
+    assert "--kv-cache-dtype fp8" in line
+    assert "no 4-bit cache" in line
