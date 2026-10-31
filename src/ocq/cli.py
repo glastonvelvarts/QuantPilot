@@ -373,7 +373,8 @@ def cmd_feasibility(
             f"Context: {context} tokens\n"
             f"Free right now: {hw.free_vram_gb:.2f} GB VRAM{gpu_note(hw)}, "
             f"{hw.available_ram_gb:.2f} GB RAM\n"
-            f"Best fit: {colored_fit(fit.fit_level)} ({fit.run_mode}) @ {fit.quant_label}, "
+            f"Best fit: {colored_fit(fit.fit_level)} ({mode_label(fit.run_mode)}) "
+            f"@ {fit.quant_label}, "
             f"{fit.memory_required_gb:.2f} of {fit.memory_available_gb:.2f} GB "
             f"({fit.utilization_pct:.0f}%)",
             title="Feasibility",
@@ -409,6 +410,12 @@ def cmd_feasibility(
             "[dim]?  context memory unknown: config.json has no layer or head counts and the "
             "tensor names show no separate k_proj/v_proj. Fit and Needs count the weights only, "
             "so no row is rated better than Marginal.[/dim]"
+        )
+    if any(option.experts_in_ram for option in options):
+        console.print(
+            "[dim]gpu+ram (experts): llama.cpp only (--n-cpu-moe, see ocq plan). The AWQ, GPTQ, "
+            "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "
+            "whole layers instead.[/dim]"
         )
     bases = {option.speed_basis for option in options if option.runnable}
     if measurements.MEASURED in bases:
@@ -455,10 +462,14 @@ def backend_cell(option, hardware) -> str:
     return name if ready else f"{name} [dim](install --extra {name})[/dim]"
 
 
+def mode_label(run_mode) -> str:
+    where = str(run_mode).replace("gpu_offload", "gpu+ram")
+    return where.replace("gpu_experts_ram", "gpu+ram (experts)")
+
+
 def runs_on(option) -> str:
     """gpu, gpu+ram or cpu, with the number of GPUs when it uses more than one."""
-    where = str(option.run_mode).replace("gpu_offload", "gpu+ram")
-    where = where.replace("gpu_experts_ram", "gpu+ram (experts)")
+    where = mode_label(option.run_mode)
     if option.gpu_count > 1:
         where = where.replace("gpu", f"{option.gpu_count} gpus")
     return where

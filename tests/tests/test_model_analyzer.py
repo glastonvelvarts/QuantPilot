@@ -32,6 +32,7 @@ from conftest import (
     RTX_3060,
     RTX_3090,
     RTX_3090_BUSY,
+    RTX_4090,
     SMOLVLM,
     nvidia_pc,
     real_model,
@@ -639,14 +640,15 @@ def test_only_attention_layers_of_a_hybrid_keep_a_cache(
     assert kv.value == attention_layers * bytes_per_layer
     assert kv.value < was  # every layer used to be counted
     assert kv.kind == FactKind.CROSS_CHECKED
-    stateful = layers - attention_layers
-    assert f"{stateful} of {layers} layers keep a fixed-size state" in kv.note
+    assert "attention layers from" in kv.note
 
 
 def test_qwen3_next_has_attention_every_fourth_layer():
     kv = real_snapshot(QWEN3_NEXT).facts.kv_cache
     assert kv.value == 12 * 2 * 2 * 256 * 2  # 12 layers x keys and values x 2 heads x 256 x 2 B
-    assert "as full_attention_interval says" in kv.note
+    assert "attention layers from full_attention_interval" in kv.note
+    # Its linear-attention state is a kind QuantPilot does not size yet, and says so.
+    assert "36 of 48 layers keep a fixed-size state of unknown size" in kv.note
 
 
 def test_a_hybrid_with_attention_in_every_layer_keeps_it_all():
@@ -690,19 +692,27 @@ def test_quantized_cache_matches_llama_cpp(repo, context, cache, llama_cpp_mib):
     assert size == llama_cpp_mib * MIB
 
 
-def test_each_row_uses_the_cache_of_its_runtime():
-    hardware = nvidia_pc(RTX_3090)
+def cache_saving(card, label):
+    hardware = nvidia_pc(card)
     snap = real_snapshot(QWEN, hardware)
-    f16 = options_by_label(snap, hardware, context=32768)
-    q8 = {o.label: o for o in quant_options(snap, hardware, 32768, kv_cache="q8_0")}
+    f16 = options_by_label(snap, hardware, context=32768)[label]
+    q8 = {o.label: o for o in quant_options(snap, hardware, 32768, kv_cache="q8_0")}[label]
+    return (f16.context_gb - q8.context_gb) * 1024**3
+
+
+def test_each_row_uses_the_cache_of_its_runtime():
     full = 28 * 1024 * 32768  # Qwen2.5-1.5B at 16-bit
+    assert cache_saving(RTX_4090, "Q4_K_M") == pytest.approx(full * (1 - 34 / 64))  # q8_0
+    assert cache_saving(RTX_4090, "AWQ 4-bit") == pytest.approx(full / 2)  # vLLM fp8
+    assert cache_saving(RTX_4090, "BNB 4-bit double") == 0  # transformers keeps 16 bits
 
-    def saved(label):
-        return (f16[label].context_gb - q8[label].context_gb) * 1024**3
 
-    assert saved("Q4_K_M") == pytest.approx(full * (1 - 34 / 64))  # llama.cpp q8_0
-    assert saved("AWQ 4-bit") == pytest.approx(full / 2)  # vLLM fp8
-    assert saved("BNB 4-bit double") == 0  # transformers keeps 16 bits
+def test_vllm_fp8_cache_needs_compute_capability_8_9():
+    # vLLM rejects --kv-cache-dtype fp8 on an RTX 3090 (8.6); llama.cpp's q8_0 still works.
+    assert cache_saving(RTX_3090, "AWQ 4-bit") == 0
+    assert cache_saving(RTX_3090, "Q4_K_M") > 0
+    assert nvidia_pc(RTX_4090).vllm_fp8_kv_cache
+    assert not nvidia_pc(RTX_4090, RTX_3090).vllm_fp8_kv_cache  # every card must have it
 
 
 def test_granite_fused_experts_are_counted_per_token():
@@ -797,3 +807,45 @@ def test_plan_gives_the_n_cpu_moe_flag():
         snap.model_id, hardware, snap, OptimizationGoal.BALANCED, Path("/tmp"), choices
     )
     assert any("--n-cpu-moe 19" in line for line in plan.rationale)
+
+
+# The fixed-size state of Mamba and convolution layers. Expected: llama.cpp's log at -c 4096 for
+# one conversation, "llama_kv_cache: size = ..." + "llama_memory_recurrent: size = ...".
+
+
+@pytest.mark.parametrize(
+    ("repo", "cache_mib", "state_mib", "kind"),
+    [
+        ("LiquidAI/LFM2-350M", 48.00, 0.078125, "convolution"),  # "0.08 MiB"
+        ("ibm-granite/granite-4.0-h-350m", 16.00, 21.57421875, "Mamba-2"),  # "21.57 MiB"
+        (FALCON_H1, 72.00, 27.73828125, "Mamba-2"),  # "27.74 MiB", Mamba in every layer
+        (JAMBA, 4.00, 9.6484375, "Mamba-1"),  # "9.65 MiB"
+    ],
+)
+def test_hybrid_state_matches_llama_cpp(repo, cache_mib, state_mib, kind):
+    snap = real_snapshot(repo)
+    assert snap.kv_cache_bytes(4096, conversations=1) == pytest.approx(
+        (cache_mib + state_mib) * MIB, abs=1
+    )
+    assert f"{kind} state" in snap.facts.kv_cache.note
+
+
+def test_state_is_kept_once_per_conversation():
+    snap = real_snapshot(JAMBA)
+    one, four = (snap.kv_cache_bytes(4096, conversations=n) for n in (1, 4))
+    state = 9.6484375 * MIB
+    # Its 2 attention layers share one cache; each conversation has its own state.
+    assert four - one == pytest.approx(3 * state, abs=4)
+
+
+def test_nemotron_mlp_layers_keep_nothing():
+    # hybrid_override_pattern: 4 "*" attention, 27 "M" Mamba, 25 "-" plain MLP layers.
+    note = real_snapshot(NEMOTRON_H).facts.kv_cache.note
+    assert "27 of 56 layers keep a Mamba-2 state" in note
+
+
+def test_phi3_window_is_counted_in_full_as_llama_cpp_keeps_it():
+    # sliding_window 2047 on every layer, but llama.cpp disables it for Phi-3 (swa_type NONE).
+    snap = real_snapshot("microsoft/Phi-3-mini-4k-instruct")
+    assert snap.kv_cache_bytes(4096) == 32 * 2 * 32 * 96 * 2 * 4096
+    assert "on every layer, counted in full" in snap.facts.kv_cache.note
