@@ -110,3 +110,17 @@ def test_nvfp4_plan_warns_when_this_pc_cannot_run_it_fast():
     assert "No NVIDIA GPU" in warnings_on(replace(make_hardware(), has_gpu=False, backend="CPU"))
     assert "Marlin" in warnings_on(with_gpu("NVIDIA GeForce RTX 4090"))
     assert "FP4 tensor cores" not in warnings_on(with_gpu("NVIDIA GeForce RTX 5090"))
+
+
+def test_plan_says_the_context_memory_is_unknown(tmp_path, qwen_tensors):
+    from test_model_analyzer import ODD_CONFIG, fused_attention
+
+    from ocq.model_analyzer import build_snapshot
+
+    hardware = make_hardware()
+    tensors = fused_attention(qwen_tensors)
+    model = build_snapshot("org/odd", {}, ODD_CONFIG, tensors, hardware)
+    plan = generate_plan(model.model_id, hardware, model, OptimizationGoal.BALANCED, tmp_path)
+    assert any("unknown amount for a 4096 token context" in line for line in plan.rationale)
+    assert any("memory for the context is unknown" in warning for warning in plan.warnings)
+    assert not any("tensor shapes could not be read" in warning for warning in plan.warnings)

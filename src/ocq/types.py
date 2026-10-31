@@ -74,6 +74,7 @@ class ModelFacts:
     stored_bytes: Fact = Fact()  # int: bytes of every tensor in the weight files
     architecture: Fact = Fact()  # str: model_type
     context_length: Fact = Fact()  # int: tokens
+    kv_cache: Fact = Fact()  # int: bytes of keys and values (16-bit) per token of context
     quantization: Fact = Fact()  # str: "none", or a label such as "GPTQ 4-bit"
 
 
@@ -264,6 +265,9 @@ class QuantOption:
     speed_basis: str = ""
     # stored = checkpoint as saved; gguf = llama.cpp quant; awq/gptq/bnb = HF serving formats
     row_kind: str = "gguf"
+    # False when config.json has no layer or head counts: context_gb is then 0, not measured,
+    # and the fit counts the weights only.
+    context_known: bool = True
 
     @property
     def runnable(self) -> bool:
@@ -346,6 +350,15 @@ class ModelSnapshot:
     def is_quantized(self) -> bool:
         quantization = self.facts.quantization
         return quantization.known and quantization.value != "none"
+
+    @property
+    def kv_bytes_per_token(self) -> int | None:
+        """Keys and values one token of context needs. None when it could not be worked out."""
+        if self.facts.kv_cache.known:
+            return self.facts.kv_cache.value
+        if self.architecture_known:
+            return 2 * self.num_layers * self.num_kv_heads * self.head_dim * 2
+        return None
 
     @property
     def head_dim(self) -> int:
