@@ -1,7 +1,17 @@
 """Tests for model snapshots and fit."""
 
 import pytest
-from conftest import QWEN, QWEN_AWQ, QWEN_CONFIG, QWEN_GPTQ, SMOLVLM, real_model
+from conftest import (
+    QWEN,
+    QWEN3_8B_NVFP4,
+    QWEN_AWQ,
+    QWEN_BNB,
+    QWEN_CONFIG,
+    QWEN_GPTQ,
+    QWEN_W8A8,
+    SMOLVLM,
+    real_model,
+)
 
 from ocq import measurements
 from ocq.model_analyzer import (
@@ -245,7 +255,7 @@ def test_vision_model_reads_its_language_model_from_text_config():
     assert (snap.num_layers, snap.num_attention_heads, snap.num_kv_heads) == (30, 9, 3)
     assert snap.head_dim == 64
     assert snap.context_length == 8192  # only in text_config, None at the top level
-    assert snap.facts.architecture.source == "config.json text_config"
+    assert snap.facts.architecture.source.startswith("config.json text_config")
     assert options_by_label(snap, hardware)["Q4_K_M"].context_gb > 0
 
 
@@ -281,3 +291,55 @@ def test_without_hardware_only_the_facts_are_read():
     snap = real_snapshot(QWEN)
     assert snap.facts.parameters.value == 1_543_714_304
     assert snap.feasibility.quant_label == "unknown"
+
+
+# Where the HF API count is wrong, the base model's count is the second source.
+
+
+def test_bnb_repo_count_is_checked_against_its_base_model():
+    facts = real_snapshot(QWEN_BNB).facts
+    assert facts.quantization.value == "BNB 4-bit"
+    assert facts.parameters.value == 1_543_714_304
+    assert facts.parameters.kind == FactKind.CROSS_CHECKED
+    assert facts.parameters.source == "safetensors headers + base model"
+    assert "HF API says 1,584,858,476" in facts.parameters.note
+    assert facts.precision.value == "4-bit in U8"
+
+
+def test_nvidia_nvfp4_repo_is_unpacked_and_checked_against_its_base_model():
+    snap = real_snapshot(QWEN3_8B_NVFP4)
+    assert snap.facts.quantization.value == "ModelOpt NVFP4"
+    assert snap.facts.parameters.value == 8_190_735_360
+    assert snap.facts.parameters.kind == FactKind.CROSS_CHECKED
+    assert "matches base model Qwen/Qwen3-8B" in snap.facts.parameters.note
+    assert snap.original_gb == pytest.approx(5.96, abs=0.005)
+
+
+def test_without_a_base_model_a_disagreeing_count_stays_an_estimate():
+    facts = real_snapshot(QWEN_W8A8).facts
+    assert facts.quantization.value == "compressed-tensors int-quantized 8-bit"
+    assert facts.parameters.value == 1_777_088_000
+    assert facts.parameters.kind == FactKind.ESTIMATE
+    assert "HF API says 1,777,733,120" in facts.parameters.note
+
+
+def test_a_stored_lm_head_copy_is_allowed_for_when_comparing_with_the_base_model():
+    facts = real_snapshot(
+        QWEN_W8A8, base_model_parameters=("Qwen/Qwen2.5-1.5B-Instruct", 1_543_714_304)
+    ).facts
+    assert facts.parameters.kind == FactKind.CROSS_CHECKED
+    assert "plus a stored lm_head copy of 233,373,696" in facts.parameters.note
+
+
+def test_layer_count_is_checked_against_the_tensor_names():
+    # SmolVLM's vision encoder has 12 layers of its own; only the 30 language layers count.
+    facts = real_snapshot(SMOLVLM).facts
+    assert facts.architecture.kind == FactKind.CROSS_CHECKED
+    assert facts.architecture.source == "config.json text_config + tensor names"
+
+
+def test_layer_count_that_disagrees_with_the_tensor_names_is_an_estimate(qwen_tensors):
+    missing_last_layer = [t for t in qwen_tensors if ".layers.27." not in t[0]]
+    snap = build_snapshot("org/model", {}, QWEN_CONFIG, missing_last_layer, None)
+    assert snap.facts.architecture.kind == FactKind.ESTIMATE
+    assert "tensor names show 27 layers" in snap.facts.architecture.note

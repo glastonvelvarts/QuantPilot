@@ -271,9 +271,10 @@ def output_buffer_bytes(vocab_size: int) -> int:
 
 # Tensors a quantized checkpoint stores next to its weights: scales, zero points, group
 # indexes, packed shapes. They are not weights of the model, so they are not counted as such.
+# weight_scale_2 is NVIDIA ModelOpt's per-tensor NVFP4 scale.
 QUANT_METADATA = re.compile(
     r"\.(qzeros|scales|g_idx|SCB|absmax|quant_map|nested_absmax|nested_quant_map|weight_scale"
-    r"|weight_scale_inv|weight_zero_point|weight_global_scale|weight_shape|input_scale"
+    r"|weight_scale_2|weight_scale_inv|weight_zero_point|weight_global_scale|weight_shape|input_scale"
     r"|input_global_scale|input_zero_point|k_scale|v_scale)$|quant_state"
 )
 
@@ -286,7 +287,8 @@ def parameters_by_type(
     quantized_bits is None for a model that is not quantized: every element is one weight.
     For a quantized model, scales and zero points are left out and integers holding several
     weights are unpacked: an int32 holds 8 weights at 4 bits (GPTQ, AWQ), a uint8 holds 2
-    (bitsandbytes 4-bit, NVFP4). Those are counted under "packed N-bit".
+    (bitsandbytes 4-bit, NVFP4), an int8 holds 1 (W8A8). Those are counted under
+    "N-bit in <container>", for example "4-bit in I32".
     None when a packed tensor cannot be unpacked because its type or bit width is unknown.
     """
     counts: dict[str, int] = {}
@@ -298,8 +300,8 @@ def parameters_by_type(
         if quantized_bits is not None and (not dtype or dtype in INTEGER_TYPES):
             if not (dtype and quantized_bits):
                 return None
-            dtype = f"packed {quantized_bits}-bit"
-            elements = elements * DTYPE_BITS[dtypes[name]] // quantized_bits
+            elements = elements * DTYPE_BITS[dtype] // quantized_bits
+            dtype = f"{quantized_bits}-bit in {dtype}"
         counts[dtype] = counts.get(dtype, 0) + elements
     return counts
 
