@@ -1,7 +1,7 @@
 """Tests for model snapshots and fit."""
 
 import pytest
-from conftest import QWEN_CONFIG
+from conftest import QWEN, QWEN_AWQ, QWEN_CONFIG, QWEN_GPTQ, SMOLVLM, real_model
 
 from ocq import measurements
 from ocq.model_analyzer import (
@@ -11,7 +11,7 @@ from ocq.model_analyzer import (
     quant_options,
     recommend_models,
 )
-from ocq.types import FitLevel, GpuProfile, HardwareProfile, RunMode
+from ocq.types import FactKind, FitLevel, GpuProfile, HardwareProfile, OcqError, RunMode
 
 
 def make_hardware(
@@ -172,3 +172,112 @@ def test_nvfp4_row_only_with_an_nvidia_gpu(qwen_tensors):
     nvfp4 = options_by_label(qwen_snapshot(qwen_tensors, nvidia), nvidia)["NVFP4 4-bit"]
     assert nvfp4.row_kind == "nvfp4"
     assert nvfp4.exact
+
+
+def real_snapshot(repo, hardware=None, context=4096, **meta_changes):
+    meta, config, tensors, dtypes = real_model(repo)
+    return build_snapshot(repo, meta | meta_changes, config, tensors, hardware, context, dtypes)
+
+
+# Bug 1: an already-quantized repo was read as a 409M model of 5.32 GB, marked exact.
+
+
+def test_gptq_repo_is_read_as_quantized_with_its_real_count():
+    snap = real_snapshot(QWEN_GPTQ)
+    assert snap.is_quantized
+    assert snap.facts.quantization.value == "GPTQ 4-bit"
+    assert snap.facts.quantization.kind == FactKind.CROSS_CHECKED
+    assert snap.facts.parameters.value == 1_543_714_304
+    assert snap.facts.parameters.kind == FactKind.CROSS_CHECKED
+    assert snap.params_b == pytest.approx(1.5437, abs=0.0001)
+    assert snap.original_gb == pytest.approx(1.07, abs=0.005)
+
+
+def test_quantized_repo_is_shown_as_stored_not_re_quantized():
+    hardware = make_hardware(vram_gb=8)
+    snap = real_snapshot(QWEN_GPTQ, hardware)
+    (stored,) = quant_options(snap, hardware)
+    assert stored.label == "GPTQ 4-bit (as stored)"
+    assert stored.row_kind == "stored"
+    assert stored.weights_gb == pytest.approx(snap.original_gb)
+    assert stored.context_gb > 0
+    assert snap.feasibility.quant_label == stored.label
+
+
+def test_header_count_that_disagrees_with_huggingface_is_an_estimate():
+    snap = real_snapshot(QWEN_GPTQ, safetensors={"total": 1_000_000_000})
+    assert snap.facts.parameters.value == 1_543_714_304
+    assert snap.facts.parameters.kind == FactKind.ESTIMATE
+    assert "HF API says 1,000,000,000" in snap.facts.parameters.note
+
+
+def test_awq_repo_counts_the_lm_head_it_stores():
+    # The config ties lm_head to the embeddings, but this repo saves a copy anyway.
+    snap = real_snapshot(QWEN_AWQ)
+    assert snap.facts.quantization.value == "AWQ 4-bit"
+    assert snap.facts.parameters.value == 1_777_088_000
+    assert snap.facts.parameters.kind == FactKind.CROSS_CHECKED
+    assert "lm_head stored" in snap.facts.architecture.note
+
+
+def test_plain_repo_facts_match_the_hub():
+    snap = real_snapshot(QWEN)
+    facts = snap.facts
+    assert not snap.is_quantized
+    assert facts.quantization.value == "none"
+    assert facts.parameters.value == 1_543_714_304
+    assert facts.parameters.kind == FactKind.CROSS_CHECKED
+    assert "338 tensors" in facts.parameters.note
+    assert facts.precision.value == "BF16"
+    assert facts.stored_bytes.value == 3_087_428_608
+    assert facts.architecture.value == "qwen2"
+    assert "tied embeddings" in facts.architecture.note
+    assert facts.context_length.value == 32768
+
+
+# Bug 2: layers and heads under text_config left the architecture unknown and the KV cache at 0.
+
+
+def test_vision_model_reads_its_language_model_from_text_config():
+    hardware = make_hardware(vram_gb=8)
+    snap = real_snapshot(SMOLVLM, hardware)
+    assert snap.architecture_known
+    assert (snap.num_layers, snap.num_attention_heads, snap.num_kv_heads) == (30, 9, 3)
+    assert snap.head_dim == 64
+    assert snap.context_length == 8192  # only in text_config, None at the top level
+    assert snap.facts.architecture.source == "config.json text_config"
+    assert options_by_label(snap, hardware)["Q4_K_M"].context_gb > 0
+
+
+@pytest.mark.parametrize("key", ["text_config", "llm_config", "language_config"])
+def test_nested_config_gives_the_same_memory_as_a_flat_one(qwen_tensors, key):
+    hardware = make_hardware(vram_gb=8)
+    flat = qwen_snapshot(qwen_tensors, hardware)
+    nested_config = {"architectures": ["SomeVisionModel"], key: QWEN_CONFIG}
+    nested = build_snapshot("org/vlm", {}, nested_config, qwen_tensors, hardware)
+    flat_q4 = options_by_label(flat, hardware)["Q4_K_M"]
+    nested_q4 = options_by_label(nested, hardware)["Q4_K_M"]
+    assert nested_q4.context_gb == pytest.approx(flat_q4.context_gb)
+    assert nested_q4.context_gb * 1024 == pytest.approx(112 + 296.75, abs=0.01)
+    assert nested_q4.exact
+
+
+# Bug 4: a missing count became 7B, and a size in the name looked like a real count.
+
+
+def test_no_count_means_no_fit_verdict():
+    hardware = make_hardware()
+    snap = build_snapshot("some-org/Cool-70B-Chat", {}, {}, [], hardware)
+    assert snap.params_b == 0
+    assert snap.parameter_count == "unknown (name says 70.00B)"
+    assert not snap.facts.parameters.known
+    assert snap.facts.parameters.note == "name says 70.00B, not used"
+    assert not snap.feasibility.runnable
+    with pytest.raises(OcqError, match="parameter count .* is unknown"):
+        quant_options(snap, hardware)
+
+
+def test_without_hardware_only_the_facts_are_read():
+    snap = real_snapshot(QWEN)
+    assert snap.facts.parameters.value == 1_543_714_304
+    assert snap.feasibility.quant_label == "unknown"

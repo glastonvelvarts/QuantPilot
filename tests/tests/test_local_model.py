@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import QWEN_CONFIG, write_safetensors
+from conftest import QWEN, QWEN_CONFIG, QWEN_GPTQ, real_model, write_safetensors
 
 from ocq.local_model import fetch_local_model_files, parse_model_ref, validate_hf_folder
 from ocq.model_analyzer import quant_options, resolve_model
-from ocq.types import HardwareProfile, OcqError
+from ocq.types import FactKind, HardwareProfile, OcqError
 
 
 def make_hardware() -> HardwareProfile:
@@ -134,3 +134,52 @@ def test_group_size_is_settled_in_the_plan(smollm_tensors, tmp_path):
         make_hardware(), snap, OptimizationGoal.BALANCED, QuantChoices(algorithm=QuantAlgorithm.AWQ)
     )
     assert config.group_size == 64
+
+
+def make_real_folder(folder: Path, repo: str) -> Path:
+    """A local folder with the real config.json and safetensors headers of a Hub repo."""
+    _, config, tensors, dtypes = real_model(repo)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "config.json").write_text(json.dumps(config))
+    write_safetensors(folder / "model.safetensors", tensors, dtypes)
+    return folder
+
+
+def test_local_folder_facts_come_from_its_own_files(tmp_path):
+    snap = resolve_model(str(make_real_folder(tmp_path / "qwen", QWEN)), None)
+    # Only one source on disk, so exact, not cross-checked.
+    assert snap.facts.parameters.value == 1_543_714_304
+    assert snap.facts.parameters.kind == FactKind.EXACT
+    assert snap.facts.parameters.source == "safetensors headers"
+    assert snap.facts.stored_bytes.value == 3_087_428_608
+
+
+def test_local_gptq_folder_is_seen_as_quantized(tmp_path):
+    from ocq.plan import generate_plan
+    from ocq.types import OptimizationGoal
+
+    folder = make_real_folder(tmp_path / "gptq", QWEN_GPTQ)
+    snap = resolve_model(str(folder), make_hardware())
+    assert snap.facts.quantization.value == "GPTQ 4-bit"
+    # Unpacked by us and nothing to check it against: an estimate.
+    assert snap.facts.parameters.value == 1_543_714_304
+    assert snap.facts.parameters.kind == FactKind.ESTIMATE
+    assert snap.facts.stored_bytes.value == 1_149_760_512
+
+    with pytest.raises(OcqError, match="already quantized"):
+        generate_plan(snap.model_id, make_hardware(), snap, OptimizationGoal.BALANCED, tmp_path)
+
+
+def test_inspect_prints_every_fact(tmp_path):
+    from typer.testing import CliRunner
+
+    from ocq.cli import app
+
+    folder = make_real_folder(tmp_path / "gptq", QWEN_GPTQ)
+    result = CliRunner().invoke(app, ["inspect", str(folder)], terminal_width=200)
+    assert result.exit_code == 0, result.output
+    assert "GPTQ 4-bit, 1.54B params (estimate), 1.07 GB of weights" in result.output
+    for line in ("Parameters", "Precision", "Stored bytes", "Architecture", "Context length"):
+        assert line in result.output
+    assert "1,543,714,304" in result.output
+    assert "32,768" in result.output

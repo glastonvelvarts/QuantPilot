@@ -4,8 +4,11 @@ from pathlib import Path
 
 from ocq.plan import generate_plan
 from ocq.types import (
+    Fact,
+    FactKind,
     FeasibilityEstimate,
     HardwareProfile,
+    ModelFacts,
     ModelSnapshot,
     OptimizationGoal,
     QuantAlgorithm,
@@ -47,6 +50,8 @@ def make_model() -> ModelSnapshot:
             runtime="llamacpp",
             estimate_confidence="estimated",
         ),
+        # 8B weights stored at 16-bit
+        facts=ModelFacts(stored_bytes=Fact(16 * 1024**3, "test", FactKind.EXACT)),
     )
 
 
