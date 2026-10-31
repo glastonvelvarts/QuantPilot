@@ -497,9 +497,46 @@ def test_awq_on_two_3090s_is_tensor_parallel_and_reads_twice_as_fast():
     snap = real_snapshot(QWEN_72B, two)
     awq = options_by_label(snap, two)["AWQ 4-bit"]
     assert awq.gpu_split == TENSOR_PARALLEL
-    assert awq.memory_available_gb == pytest.approx(2 * 22.46)  # 2 x the smaller free VRAM
+    # vLLM works with 92% of each card's total (24 GiB), not what is free, as long as that much
+    # is free on both (23.44 and 22.46 GiB are).
+    assert awq.memory_available_gb == pytest.approx(2 * 0.92 * 24)
     read_gb = awq.weights_gb * snap.read_fraction
     assert awq.estimated_tps == pytest.approx(2 * 936e9 / 1024**3 / read_gb, abs=0.1)
+
+
+def test_vllm_does_not_start_when_its_share_of_the_gpu_is_not_free(qwen_tensors):
+    # 0.92 x 24 GiB = 22.08 GiB must be free; with 2 GiB used by the desktop only 22 GiB is.
+    desktop = nvidia_pc("NVIDIA GeForce RTX 3090, 24576, 22528, 8.6")
+    options = options_by_label(qwen_snapshot(qwen_tensors, desktop), desktop)
+    awq = options["AWQ 4-bit"]
+    assert awq.fit_level == FitLevel.TOO_TIGHT
+    assert "vLLM starts only with 92% of the GPU's 24.0 GB free" in awq.note
+    assert "22.0 GB is free" in awq.note
+    # llama.cpp has no such rule: the same PC runs the GGUF rows.
+    assert options["Q4_K_M"].fit_level == FitLevel.PERFECT
+
+
+def test_vllm_does_not_spill_into_ram(qwen_tensors):
+    # 1 GiB of VRAM: llama.cpp keeps some layers in RAM, vLLM cannot.
+    small = nvidia_pc("NVIDIA GeForce RTX 3090, 1024, 1024, 8.6")
+    options = options_by_label(qwen_snapshot(qwen_tensors, small), small)
+    assert options["Q8_0"].run_mode == RunMode.GPU_OFFLOAD
+    assert options["GPTQ 8-bit"].fit_level == FitLevel.TOO_TIGHT
+
+
+def test_the_installed_vllm_default_is_read_from_its_source(tmp_path, monkeypatch):
+    from ocq import runtimes
+
+    package = tmp_path / "vllm"
+    (package / "config").mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "config" / "cache.py").write_text(
+        "    gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    assert runtimes.vllm_budget() == runtimes.VllmBudget(0.9, "the installed vLLM's default")
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    assert runtimes.vllm_budget().utilization == runtimes.VLLM_LATEST_UTILIZATION
 
 
 def test_a_model_that_fits_on_the_fast_card_stays_off_the_slow_one(qwen_tensors):

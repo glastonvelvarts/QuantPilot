@@ -45,6 +45,7 @@ from ocq.model_size import (
     stored_bytes,
     weights_per_token,
 )
+from ocq.runtimes import vllm_budget, vllm_card_budget_gb
 from ocq.types import (
     CONVERSATIONS,
     DTYPE_BITS,
@@ -1484,7 +1485,24 @@ def fit_at(
     # by layers.
     split = TENSOR_PARALLEL if row_kind in VLLM_ROWS else LAYER_SPLIT
     heads = model.num_attention_heads if model.architecture_known else None
-    pool = hardware.gpu_pool(split, heads)
+    # vLLM on NVIDIA works with a share of each card's total memory and only on the GPU.
+    vllm = runtime == VLLM and hardware.has_cuda
+    vllm_rule = vllm_budget() if vllm else None
+    budget = (
+        (lambda card, free: vllm_card_budget_gb(card, free, vllm_rule.utilization))
+        if vllm_rule
+        else None
+    )
+    pool = hardware.gpu_pool(split, heads, budget)
+    note = ""
+    if vllm_rule and pool and not pool.free_gb:
+        card = pool.cards[0]
+        note = (
+            f"vLLM starts only with {vllm_rule.utilization:.0%} of the GPU's "
+            f"{card.vram_gb:.1f} GB free ({vllm_rule.source}); "
+            f"{hardware.card_free_gb(card):.1f} GB is free. Lower --gpu-memory-utilization "
+            "or close what else uses the GPU."
+        )
     if pool and pool.split == LAYER_SPLIT:
         # Layers on a slower card slow every token down. When the model fits on the best card
         # alone and that card is faster than the split, one card is the better setup.
@@ -1503,6 +1521,9 @@ def fit_at(
     elif offload:
         run_mode, available = RunMode.GPU_EXPERTS_RAM, vram + ram
         experts_ram_layers, experts_ram_gb = offload
+    elif vllm and pool:
+        # vLLM does not spill into RAM by default (cpu_offload_gb is 0) or run on the CPU.
+        run_mode, available = RunMode.GPU, vram
     elif vram and not hardware.unified_memory and required <= vram + ram:
         run_mode, available = RunMode.GPU_OFFLOAD, vram + ram
     else:
@@ -1553,6 +1574,7 @@ def fit_at(
         else (),
         gpu_split=pool.split if pool else "",
         experts_in_ram=experts_ram_layers,
+        note=note,
     )
 
 

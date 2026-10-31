@@ -328,6 +328,12 @@ A quantized V cache needs flash attention; llama.cpp turns it on by itself. The 
 
 ---
 
+## How each runtime uses memory
+
+Each row of `feasibility` is run by one runtime (llama.cpp for GGUF, vLLM for AWQ, GPTQ and NVFP4, transformers for the original weights and bitsandbytes), and each budgets memory its own way:
+
+- **vLLM** takes a fixed share of each GPU's **total** memory (`--gpu-memory-utilization`: 0.92 since vLLM 0.20, 0.9 before; QuantPilot reads the default of the vLLM you have installed) and refuses to start when that much is not free, so a desktop using 2 GB of a 24 GB card already stops it. The weights, its working memory and the context must fit in that share: vLLM does not spill into RAM. Such a row says why it cannot run.
+
 ## Several GPUs
 
 QuantPilot uses every GPU in the PC, the way the runtime that serves each format does:
