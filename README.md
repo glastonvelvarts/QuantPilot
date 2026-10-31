@@ -211,7 +211,7 @@ The table has one row per **format**, not just GGUF:
 3. **AWQ / GPTQ / BNB** — packed size from the same tensor list, scales included. BNB 4-bit gets two rows, **single** and **double** quantization (see below)  
 4. **NVFP4** — only shown when the PC has an NVIDIA GPU  
 
-Columns: weight GB, context GB (from `--context`, default 4096, and `--kv-cache`), total need, **fit**, **runs on** (`gpu`, `2 gpus`, `gpu+ram`, `cpu`, `unfit`), **tok/s**.
+Columns: weight GB, context GB (from `--context`, default 4096, and `--kv-cache`), total need, **fit**, **runs on** (`gpu`, `2 gpus`, `gpu+ram`, `gpu+ram (experts)`, `cpu`, `unfit`), **tok/s**.
 
 An already-quantized repo gets a single row, the files as stored.
 
@@ -332,6 +332,8 @@ A model that fits on the fastest card alone stays there instead of being slowed 
 ## Mixture-of-experts models
 
 Models like Qwen3-30B-A3B, Mixtral, DeepSeek and gpt-oss hold many **experts** per layer but run only a few for each token (Qwen3-30B-A3B: 8 of 128). All experts must fit in memory, but each token reads only about 10% of the weights, so the speed limit is set by the **weights used per token**. QuantPilot counts the experts from the tensor names, checks them against `config.json`, and matches the "active parameters" the model cards publish (3.3B for Qwen3-30B-A3B, 12.9B for Mixtral, 3.61B for gpt-oss-20b).
+
+**Too big for your VRAM?** On a PC with a separate GPU, a GGUF mixture of experts can keep the **experts of its first layers in RAM** and everything else (attention, the context) in VRAM: llama.cpp's `--n-cpu-moe N`. A token uses only a few experts, so little is read from the slow RAM. `feasibility` shows such rows as `gpu+ram (experts)`, `plan` gives the smallest `N` that fits, and the benchmark runs with it. Expert sizes match `llama-quantize` exactly (OLMoE, Granite MoE).
 
 ---
 

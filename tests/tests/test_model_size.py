@@ -8,8 +8,10 @@ import pytest
 from conftest import (
     DEEPSEEK_V2_LITE,
     GPT_OSS,
+    GRANITE_MOE,
     MIXTRAL,
     OCQ_NVFP4,
+    OLMOE,
     QWEN,
     QWEN3_8B_NVFP4,
     QWEN3_FP8,
@@ -26,6 +28,7 @@ from ocq.model_size import (
     bnb_scale_bits,
     bnb_weights_bytes,
     experts_in_names,
+    gguf_tensor_bytes,
     gguf_weights_bytes,
     kv_cache_bytes,
     kv_value_bytes,
@@ -33,6 +36,7 @@ from ocq.model_size import (
     output_buffer_bytes,
     packed_weights_bytes,
     parameters_by_type,
+    routed_expert,
     stored_bytes,
     weights_per_token,
 )
@@ -279,3 +283,48 @@ def test_a_dense_model_reads_all_but_its_input_embedding_rows():
 )
 def test_a_cached_value_costs_what_its_runtime_stores(cache, runtime, value_bytes):
     assert kv_value_bytes(cache, runtime) == value_bytes
+
+
+# Mixtures of experts in GGUF. Expected sizes: llama-quantize --dry-run (build b11429), whose
+# "quant size" depends only on the tensor shapes, run on the models' published GGUF files.
+
+
+def moe_gguf_mib(repo, gguf_type):
+    _, config, tensors, _ = real_model(repo)
+    heads = config["num_attention_heads"] // config["num_key_value_heads"]
+    return gguf_weights_bytes(tensors, gguf_type, heads) / 2**20
+
+
+@pytest.mark.parametrize(
+    ("repo", "gguf_type", "llama_quantize_mib"),
+    [
+        (OLMOE, "Q8_0", 7017.29),
+        (OLMOE, "Q6_K", 5419.70),
+        (OLMOE, "Q5_K_M", 4696.90),
+        (OLMOE, "Q4_K_M", 4016.62),
+        (OLMOE, "Q3_K_M", 3187.32),
+        (GRANITE_MOE, "Q8_0", 1354.69),
+        (GRANITE_MOE, "Q4_K_M", 782.12),
+        (GRANITE_MOE, "Q3_K_M", 626.41),
+    ],
+)
+def test_moe_gguf_size_matches_llama_quantize(repo, gguf_type, llama_quantize_mib):
+    # The routers (ffn_gate_inp) stay at 32 bits, and Granite's output_linear becomes
+    # ffn_down_exps with the extra bits every down projection gets.
+    assert moe_gguf_mib(repo, gguf_type) == pytest.approx(llama_quantize_mib, abs=0.005)
+
+
+def test_expert_part_of_the_gguf_matches_llama_quantize():
+    # What --cpu-moe moves to RAM: blk.N.ffn_{gate,up,down}_exps, 3720.00 MiB at Q4_K_M.
+    _, config, tensors, _ = real_model(OLMOE)
+    sizes = gguf_tensor_bytes(tensors, "Q4_K_M", 1)
+    experts = sum(sizes[name] for name, shape in tensors if routed_expert(name, shape, 64))
+    assert experts / 2**20 == pytest.approx(3720.00, abs=0.005)
+
+
+def test_fused_experts_without_experts_in_the_name_are_found():
+    # Granite: block_sparse_moe.input_linear [32, 1024, 1024]; the router [32, 1024] is not one.
+    _, _, tensors, dtypes = real_model(GRANITE_MOE)
+    assert experts_in_names(tensors) == 32
+    read, _ = weights_per_token(tensors, dtypes, None, 32, 8)
+    assert read == 428_658_688  # "a400m": about 400M used per token

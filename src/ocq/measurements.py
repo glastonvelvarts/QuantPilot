@@ -42,6 +42,7 @@ def predict_speed(
     use_measurements: bool = True,
     gpu_read_speed: float | None = None,
     read_fraction: float = 1.0,
+    ram_read_gb: float = 0.0,
 ) -> tuple[float, str]:
     """Returns tokens per second and where the number comes from.
 
@@ -51,7 +52,9 @@ def predict_speed(
     if run_mode == RunMode.UNFIT or weights_gb <= 0:
         return 0.0, UPPER_BOUND
 
-    limit = bandwidth_limit(weights_gb, run_mode, vram_gb, hardware, gpu_read_speed, read_fraction)
+    limit = bandwidth_limit(
+        weights_gb, run_mode, vram_gb, hardware, gpu_read_speed, read_fraction, ram_read_gb
+    )
     device = {RunMode.GPU: "gpu", RunMode.CPU: "cpu"}.get(run_mode)
     runs = [run for run in load() if run["device"] == device] if use_measurements else []
     fitted = fit_runs(runs)
@@ -70,6 +73,7 @@ def bandwidth_limit(
     hardware: HardwareProfile,
     gpu_read_speed: float | None = None,
     read_fraction: float = 1.0,
+    ram_read_gb: float = 0.0,
 ) -> float:
     """Each new token reads every weight it uses once, so memory bandwidth caps the speed.
 
@@ -83,6 +87,9 @@ def bandwidth_limit(
     cpu_speed = (hardware.ram_bandwidth_gbs or hardware.measured_ram_bandwidth_gbs) * 1e9 / GB
 
     read_gb = weights_gb * read_fraction
+    if run_mode == RunMode.GPU_EXPERTS_RAM and gpu_speed and cpu_speed:
+        # ram_read_gb: the experts a token uses from the layers kept in RAM. The rest is in VRAM.
+        return 1 / ((read_gb - ram_read_gb) / gpu_speed + ram_read_gb / cpu_speed)
     if run_mode == RunMode.GPU and gpu_speed:
         return gpu_speed / read_gb
     if run_mode == RunMode.GPU_OFFLOAD and gpu_speed and cpu_speed:

@@ -1,5 +1,7 @@
 """Tests for model snapshots and fit."""
 
+from pathlib import Path
+
 import pytest
 from conftest import (
     DEEPSEEK_V2_LITE,
@@ -8,6 +10,7 @@ from conftest import (
     GEMMA3_1B,
     GPT_OSS,
     GRANITE_H,
+    GRANITE_MOE,
     JAMBA,
     LFM2,
     LLAMA4_SCOUT,
@@ -15,6 +18,7 @@ from conftest import (
     MIXTRAL,
     NEMOTRON_H,
     OCQ_NVFP4,
+    OLMOE,
     QWEN,
     QWEN3_8B_NVFP4,
     QWEN3_MOE,
@@ -699,3 +703,97 @@ def test_each_row_uses_the_cache_of_its_runtime():
     assert saved("Q4_K_M") == pytest.approx(full * (1 - 34 / 64))  # llama.cpp q8_0
     assert saved("AWQ 4-bit") == pytest.approx(full / 2)  # vLLM fp8
     assert saved("BNB 4-bit double") == 0  # transformers keeps 16 bits
+
+
+def test_granite_fused_experts_are_counted_per_token():
+    # They used to be missed: "8 of 32 experts per token, 100% of the weights", marked exact.
+    active = real_snapshot(GRANITE_MOE).facts.active_parameters
+    assert active.value == 428_658_688
+    assert active.kind == FactKind.CROSS_CHECKED
+
+
+def test_experts_in_config_but_not_in_the_names_is_an_estimate(qwen_tensors):
+    config = QWEN_CONFIG | {"num_local_experts": 8, "num_experts_per_tok": 2}
+    active = build_snapshot("org/model", {}, config, qwen_tensors, None).facts.active_parameters
+    assert active.kind == FactKind.ESTIMATE
+    assert "config.json says 8 experts, the tensor names show none" in active.note
+
+
+# Expert offload: llama.cpp --n-cpu-moe N keeps the experts of the first N layers in RAM.
+
+
+def moe_on(repo, *lines, ram_gb=48):
+    hardware = nvidia_pc(*lines, ram_gb=ram_gb)
+    return real_snapshot(repo, hardware), hardware
+
+
+def test_moe_too_big_for_vram_keeps_the_experts_of_some_layers_in_ram():
+    snap, hardware = moe_on(QWEN3_MOE, RTX_3060)  # 17.9 GB at Q4_K_M, 11.7 GB of VRAM
+    q4 = options_by_label(snap, hardware)["Q4_K_M"]
+    assert q4.run_mode == RunMode.GPU_EXPERTS_RAM
+    assert q4.experts_in_ram == 19  # the fewest layers that free enough VRAM
+    assert q4.fit_level == FitLevel.GOOD
+
+
+def test_the_speed_limit_reads_only_the_used_experts_from_ram():
+    from ocq.model_size import gguf_tensor_bytes, layer_index, routed_expert
+
+    snap, hardware = moe_on(OLMOE, "NVIDIA GeForce RTX 3060, 12288, 2500, 8.6")
+    q4 = options_by_label(snap, hardware)["Q4_K_M"]
+    assert q4.run_mode == RunMode.GPU_EXPERTS_RAM
+    # The expert tensors of the layers kept in RAM; a token uses 8 of their 64 experts.
+    sizes = gguf_tensor_bytes(list(snap.tensors), "Q4_K_M", 1)
+    moved = sum(
+        sizes[name]
+        for name, shape in snap.tensors
+        if routed_expert(name, shape, 64) and layer_index(name) < q4.experts_in_ram
+    )
+    from_ram = moved / 1024**3 * 8 / 64
+    gpu, cpu = 360e9 / 1024**3, 80e9 / 1024**3
+    read = q4.weights_gb * snap.read_fraction
+    expected = 1 / ((read - from_ram) / gpu + from_ram / cpu)
+    assert q4.estimated_tps == pytest.approx(expected, abs=0.1)
+
+
+def test_n_cpu_moe_counts_dense_layers_too():
+    # DeepSeek-V2-Lite's layer 0 has no experts. Moving the experts of layer 1 is --n-cpu-moe 2.
+    meta, config, tensors, dtypes = real_model(DEEPSEEK_V2_LITE)
+    probe = nvidia_pc(RTX_3090)
+    full = options_by_label(
+        build_snapshot(DEEPSEEK_V2_LITE, meta, config, tensors, probe, dtypes=dtypes), probe
+    )["Q4_K_M"]
+    just_short = (
+        f"NVIDIA GeForce RTX 3090, 24576, {int((full.memory_required_gb - 0.05) * 1024)}, 8.6"
+    )
+    snap, hardware = moe_on(DEEPSEEK_V2_LITE, just_short)
+    assert options_by_label(snap, hardware)["Q4_K_M"].experts_in_ram == 2
+
+
+def test_no_expert_offload_for_dense_models_or_unified_memory(qwen_tensors):
+    tiny_vram = "NVIDIA GeForce RTX 3060, 12288, 500, 8.6"
+    dense, hardware = moe_on(QWEN, tiny_vram)
+    assert options_by_label(dense, hardware)["Q4_K_M"].run_mode == RunMode.GPU_OFFLOAD
+    mac = HardwareProfile(
+        16,
+        8,
+        8,
+        "M2",
+        True,
+        "Metal",
+        True,
+        gpus=(GpuProfile("M2", 16, "Metal", 100, unified_memory=True),),
+    )
+    moe = real_snapshot(QWEN3_MOE, mac)
+    assert all(o.run_mode != RunMode.GPU_EXPERTS_RAM for o in quant_options(moe, mac))
+
+
+def test_plan_gives_the_n_cpu_moe_flag():
+    from ocq.plan import generate_plan
+    from ocq.types import OptimizationGoal, QuantAlgorithm, QuantChoices
+
+    snap, hardware = moe_on(QWEN3_MOE, RTX_3060)
+    choices = QuantChoices(algorithm=QuantAlgorithm.GGUF, gguf_type="Q4_K_M")
+    plan = generate_plan(
+        snap.model_id, hardware, snap, OptimizationGoal.BALANCED, Path("/tmp"), choices
+    )
+    assert any("--n-cpu-moe 19" in line for line in plan.rationale)

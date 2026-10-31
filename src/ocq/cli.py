@@ -458,6 +458,7 @@ def backend_cell(option, hardware) -> str:
 def runs_on(option) -> str:
     """gpu, gpu+ram or cpu, with the number of GPUs when it uses more than one."""
     where = str(option.run_mode).replace("gpu_offload", "gpu+ram")
+    where = where.replace("gpu_experts_ram", "gpu+ram (experts)")
     if option.gpu_count > 1:
         where = where.replace("gpu", f"{option.gpu_count} gpus")
     return where
