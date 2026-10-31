@@ -286,11 +286,12 @@ def output_buffer_bytes(vocab_size: int) -> int:
 # indexes, packed shapes. They are not weights of the model, so they are not counted as such.
 # weight_scale_2 is NVIDIA ModelOpt's per-tensor NVFP4 scale; MXFP4 (gpt-oss) stores
 # down_proj_blocks next to down_proj_scales; MLX stores its zero points as .biases (a layer's
-# own bias is .bias).
+# own bias is .bias), Ollama's MLX layout x.weight.scale and x.weight.bias.
 QUANT_METADATA = re.compile(
     r"\.(qzeros|scales|biases|g_idx|SCB|absmax|quant_map|nested_absmax|nested_quant_map|weight_scale"
     r"|weight_scale_2|weight_scale_inv|weight_zero_point|weight_global_scale|weight_shape|input_scale"
     r"|input_global_scale|input_zero_point|k_scale|v_scale)$|_scales$|quant_state"
+    r"|\.weight\.(scale|bias)$"
 )
 
 

@@ -139,6 +139,8 @@ def resolve_model(
     kv_cache: str = "f16",
 ) -> ModelSnapshot:
     """Read a model's facts from its files. Without hardware, the fit is not computed."""
+    if model_ref.startswith("ollama:"):
+        return ollama_snapshot(model_ref.removeprefix("ollama:"), hardware, context, kv_cache)
     display_id, local_dir = parse_model_ref(model_ref)
     if local_dir is not None and (local_dir.is_file() or gguf_files(local_dir)):
         if local_dir.is_file() or not (local_dir / "config.json").is_file():
@@ -500,6 +502,32 @@ def local_gguf_snapshot(
         with_fit(snapshot, hardware, context, kv_cache)
         if hardware and snapshot.params_b
         else snapshot
+    )
+
+
+def ollama_snapshot(
+    name: str, hardware: HardwareProfile | None, context: int, kv_cache: str
+) -> ModelSnapshot:
+    """An Ollama model: its GGUF blob, or the blobs of its MLX layout."""
+    from ocq.discovery import GGUF, find_ollama, ollama_mlx_files
+
+    _, found = find_ollama(name)
+    display_id = f"ollama/{found.label}"
+    if found.format == GGUF:
+        return local_gguf_snapshot(display_id, found.path, hardware, context, kv_cache)
+    config, tensors, dtypes = ollama_mlx_files(name)
+    snapshot = build_snapshot(
+        display_id, {"pipeline_tag": "local"}, config, tensors, hardware, context, dtypes, kv_cache
+    )
+    quantization = snapshot.facts.quantization
+    if quantization.source.startswith("config.json quantization_config"):
+        source = quantization.source.replace(
+            "config.json quantization_config", "Ollama blob metadata"
+        )
+        quantization = replace(quantization, source=source)
+    facts = replace(snapshot.facts, quantization=quantization)
+    return replace(
+        snapshot, facts=facts, provider="local", use_case="Ollama (MLX)", catalog_source="local"
     )
 
 
