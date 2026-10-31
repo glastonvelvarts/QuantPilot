@@ -709,10 +709,23 @@ LAYER_TYPE_KINDS = {
     "attention": FULL,
     "sliding_attention": SLIDING,
     "chunked_attention": CHUNKED,
+    "mamba": STATE,
+    "mamba2": STATE,
+    "linear_attention": STATE,
+    "conv": STATE,
 }
+# Nemotron-H's hybrid_override_pattern: attention, Mamba, MLP, MoE MLP.
+PATTERN_KINDS = {"*": FULL, "M": STATE, "-": NO_CACHE, "E": NO_CACHE}
 
 
-def layer_kinds(text: dict, layers: int) -> tuple[list[str], str]:
+def known_kinds(names: list[str], table: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Layer kinds by name, and the names not in the table. An unknown name is counted as full
+    attention: if it is not, the memory is overestimated, never underestimated."""
+    unknown = sorted({name for name in names if name not in table})
+    return [table.get(name, FULL) for name in names], unknown
+
+
+def layer_kinds(text: dict, layers: int) -> tuple[list[str], str, list[str]]:
     """The kind of every layer and which config.json key said so. Families write it differently:
 
     layer_types               one name per layer (Gemma 3, gpt-oss, Granite 4.0-H, ...)
@@ -723,41 +736,47 @@ def layer_kinds(text: dict, layers: int) -> tuple[list[str], str]:
     no_rope_layers            1 chunked attention, 0 full (Llama 4)
     sliding_window_pattern    every Nth layer full, the rest sliding (Gemma 3, Cohere2)
     Gemma 2 alternates sliding and full layers without saying so (as transformers does).
+    The third value lists layer kinds config.json names that QuantPilot does not know.
     """
     types = text.get("layer_types")
     if isinstance(types, list) and len(types) == layers:
-        return [LAYER_TYPE_KINDS.get(kind, STATE) for kind in types], "layer_types"
+        kinds, unknown = known_kinds(types, LAYER_TYPE_KINDS)
+        return kinds, "layer_types", unknown
     if isinstance(text.get("full_attn_idxs"), list):
         attention = set(text["full_attn_idxs"])
         kinds = [FULL if index in attention else STATE for index in range(layers)]
-        return kinds, "full_attn_idxs"
+        return kinds, "full_attn_idxs", []
     if text.get("full_attention_interval"):
         interval = text["full_attention_interval"]
         kinds = [STATE if (index + 1) % interval else FULL for index in range(layers)]
-        return kinds, "full_attention_interval"
+        return kinds, "full_attention_interval", []
     pattern = text.get("hybrid_override_pattern")
     if isinstance(pattern, str) and len(pattern) == layers:
-        letters = {"*": FULL, "M": STATE}
-        return [letters.get(letter, NO_CACHE) for letter in pattern], "hybrid_override_pattern"
+        kinds, unknown = known_kinds(list(pattern), PATTERN_KINDS)
+        return kinds, "hybrid_override_pattern", unknown
     if text.get("attn_layer_period"):
         period, offset = text["attn_layer_period"], text.get("attn_layer_offset", 0)
         kinds = [FULL if index % period == offset else STATE for index in range(layers)]
-        return kinds, "attn_layer_period"
+        return kinds, "attn_layer_period", []
     no_rope = text.get("no_rope_layers")
     if text.get("attention_chunk_size") and isinstance(no_rope, list) and len(no_rope) >= layers:
-        return [CHUNKED if no_rope[index] else FULL for index in range(layers)], "no_rope_layers"
+        kinds = [CHUNKED if no_rope[index] else FULL for index in range(layers)]
+        return kinds, "no_rope_layers", []
     if text.get("sliding_window_pattern"):
         every = text["sliding_window_pattern"]
         kinds = [SLIDING if (index + 1) % every else FULL for index in range(layers)]
-        return kinds, "sliding_window_pattern"
+        return kinds, "sliding_window_pattern", []
     if text.get("model_type") == "gemma2":
-        return [SLIDING if index % 2 == 0 else FULL for index in range(layers)], "Gemma 2"
+        return [SLIDING if index % 2 == 0 else FULL for index in range(layers)], "Gemma 2", []
+    if isinstance(types, list):
+        # A layer_types list of the wrong length does not say which layer is which.
+        return [FULL] * layers, "", [f"layer_types lists {len(types)} of {layers} layers"]
     if text.get("sliding_window"):
-        return [SLIDING] * layers, "sliding_window"
-    return [FULL] * layers, ""
+        return [SLIDING] * layers, "sliding_window", []
+    return [FULL] * layers, "", []
 
 
-def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str], str]:
+def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str], str, list[str]]:
     """Tokens each layer keeps per conversation (0 = all, None = no cache) and a note.
 
     llama.cpp only shrinks the cache of models that mix windowed and full layers (Gemma 2/3,
@@ -765,7 +784,7 @@ def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str],
     Mistral 7B v0.1's whole cache, and for Phi-3 it sets swa_type NONE ("Phi SWA is currently
     disabled", src/models/phi3.cpp).
     """
-    kinds, said_by = layer_kinds(text, layers)
+    kinds, said_by, unknown = layer_kinds(text, layers)
     window = text.get("sliding_window") or 0
     if text.get("use_sliding_window") is False:
         window = 0
@@ -794,7 +813,9 @@ def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str],
         notes.append(f"{chunked} of {layers} layers attend within {chunk:,}-token chunks")
     if said_by and any(kind in (STATE, NO_CACHE) for kind in kinds):
         notes.append(f"attention layers from {said_by}")
-    return windows, kinds, "; ".join(notes)
+    if unknown:
+        notes.append(f"unknown layer kind {', '.join(unknown)}, counted as full attention")
+    return windows, kinds, "; ".join(notes), unknown
 
 
 def state_per_layer(text: dict) -> tuple[int, str]:
@@ -828,14 +849,15 @@ def state_per_layer(text: dict) -> tuple[int, str]:
     return ((d_conv - 1) * d_inner + d_state * d_inner) * 4, "Mamba-1"
 
 
-def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
-    """What every layer caches per token, from config.json, and a note on anything unusual."""
+def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str, bool]:
+    """What every layer caches per token, from config.json, a note on anything unusual, and
+    whether a layer kind had to be guessed."""
     found = architecture_from(config)
     if not found:
-        return (), ""
+        return (), "", False
     text, _ = text_config(config)
     layers_count = found["num_layers"]
-    windows, kinds, note = layer_windows(text, layers_count)
+    windows, kinds, note, unknown = layer_windows(text, layers_count)
     state, state_kind = state_per_layer(text)
     stateful = [kind == STATE for kind in kinds]
     if state_kind.startswith("Mamba") and not any(stateful):
@@ -866,7 +888,7 @@ def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
             else KvLayer(compressed, window, expanded, extra)
             for window, extra in zip(windows, states, strict=True)
         )
-        return layers, "; ".join(filter(None, [note, mla]))
+        return layers, "; ".join(filter(None, [note, mla])), bool(unknown)
     head_dim = found["attention_head_dim"] or found["hidden_size"] // found["num_attention_heads"]
     per_layer = 2 * found["num_kv_heads"] * head_dim * KV_BYTES_PER_VALUE  # keys and values
     layers = tuple(
@@ -875,7 +897,7 @@ def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
         else KvLayer(per_layer, window, state_bytes=extra)
         for window, extra in zip(windows, states, strict=True)
     )
-    return layers, note
+    return layers, note, bool(unknown)
 
 
 MLA_PROJECTION = re.compile(
@@ -898,7 +920,7 @@ def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
     The value is what every layer adds per token. Sliding-window layers stop adding at their
     window, so the note gives the total at a long context too.
     """
-    layers, layout = kv_layers_from(config)
+    layers, layout, guessed = kv_layers_from(config)
     from_config = sum(layer.bytes_per_token for layer in layers) or None
     shapes = attention_from_tensors(tensors)
     from_shapes = shapes[0] * 2 if shapes else (mla_width_from_tensors(tensors) * 2 or None)
@@ -932,7 +954,9 @@ def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
         notes.append(f"tensor shapes give {from_shapes:,} bytes per token")
         return Fact(from_config, config_source, FactKind.ESTIMATE, "; ".join(notes))
     if from_config:
-        return Fact(from_config, config_source, FactKind.EXACT, "; ".join(notes))
+        # A layer kind QuantPilot had to guess, with no tensor shapes to check it, is an estimate.
+        kind = FactKind.ESTIMATE if guessed else FactKind.EXACT
+        return Fact(from_config, config_source, kind, "; ".join(notes))
     if from_shapes:
         note = "config.json has no layer or head counts; from the K and V projection shapes"
         return Fact(from_shapes, "tensor shapes", FactKind.ESTIMATE, note)
