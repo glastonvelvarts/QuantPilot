@@ -48,3 +48,24 @@ def test_a_separate_gpu_holds_copies_not_a_file_range():
     checks = predict(snap, header, parse_log(LOG), "f16", 0, unified_memory=False)
     gpu = next(c for c in checks if c.name == "weights on the GPU")
     assert gpu.predicted_mib == pytest.approx(sum(t.nbytes for t in header.tensors) / 2**20)
+
+
+def test_working_memory_is_read_from_the_real_load():
+    # Lines as llama.cpp b11429 printed them for Granite 4.0-H 350M at 4,096 tokens (Metal):
+    # a trial pass that allocates nothing, then the real load.
+    log = "\n".join(
+        [
+            "I load_tensors: loading model tensors, this can take a while... (load_mode = none)",
+            "I sched_reserve:       MTL0 compute buffer size =   999.00 MiB",
+            "I load_tensors: loading model tensors, this can take a while... (load_mode = mmap)",
+            "I llama_context:        CPU  output buffer size =     0.38 MiB",
+            "I sched_reserve:       MTL0 compute buffer size =   206.01 MiB",
+            "I sched_reserve:        CPU compute buffer size =    10.02 MiB",
+        ]
+    )
+    parsed = parse_log(log)
+    assert (parsed.gpu_compute_mib, parsed.cpu_compute_mib, parsed.output_mib) == (
+        206.01,
+        10.02,
+        0.38,
+    )

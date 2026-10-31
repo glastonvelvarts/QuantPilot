@@ -418,6 +418,16 @@ weights on the GPU             2,410.10    2,410.10        +0.00   ok
 weights on the CPU (file range) 1,342.57   1,342.57        +0.00   ok
 ```
 
+Below the table it shows the **working memory** llama.cpp reserved for one batch (on the GPU and the CPU) and its logits buffer. QuantPilot does not predict that yet: on a Mac it ranged from about 90 MiB to 750 MiB depending on the model and the context, and it is being measured on NVIDIA GPUs first. `--save-log FILE` keeps llama.cpp's whole log.
+
+**On an NVIDIA PC**, these runs check the CUDA side (one small and one mixture-of-experts GGUF is enough):
+
+```sh
+uv run ocq verify ./model-Q4_K_M.gguf -c 4096  --save-log verify-4k.log
+uv run ocq verify ./model-Q4_K_M.gguf -c 32768 --save-log verify-32k.log
+uv run ocq verify ./Qwen3-30B-A3B-Q4_K_M.gguf -c 8192 --save-log verify-moe.log   # experts in RAM if it does not fit
+```
+
 By default it runs llama.cpp with QuantPilot's own plan for this PC (for a mixture of experts too big for the VRAM, the `--n-cpu-moe` it predicts), so that plan is what gets checked. On an Apple Silicon Mac it matched exactly for dense, sliding-window, mixture-of-experts, Mamba and convolution hybrids; running it on an NVIDIA PC checks the CUDA side.
 
 ---
