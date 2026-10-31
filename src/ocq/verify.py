@@ -40,6 +40,11 @@ class LlamaLog:
     kv_mib: float
     state_mib: float
     cache_types: str
+    # Working memory llama.cpp reserves for one batch, and the logits buffer. QuantPilot does
+    # not predict these yet: they are shown so they can be measured on more PCs.
+    gpu_compute_mib: float = 0.0
+    cpu_compute_mib: float = 0.0
+    output_mib: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,14 @@ def parse_log(log: str) -> LlamaLog:
             cpu += float(size)
         else:
             gpu += float(size)
+    gpu_compute = cpu_compute = 0.0
+    for device, size in re.findall(
+        r"sched_reserve:\s+(\S+) compute buffer size =\s+([\d.]+) MiB", real
+    ):
+        if device.startswith("CPU"):
+            cpu_compute += float(size)
+        else:
+            gpu_compute += float(size)
     layers = re.search(r"offloaded (\d+)/(\d+) layers to GPU", real)
     types = re.search(r"llama_kv_cache: size = .*K \((\w+)\).*V \((\w+)\)", real)
     return LlamaLog(
@@ -86,6 +99,9 @@ def parse_log(log: str) -> LlamaLog:
             float(s) for s in re.findall(r"llama_memory_recurrent: size =\s+([\d.]+) MiB", real)
         ),
         cache_types=f"K {types.group(1)}, V {types.group(2)}" if types else "",
+        gpu_compute_mib=gpu_compute,
+        cpu_compute_mib=cpu_compute,
+        output_mib=sum(float(s) for s in re.findall(r"output buffer size =\s+([\d.]+) MiB", real)),
     )
 
 
@@ -180,7 +196,10 @@ def verify(
     context: int,
     kv_cache: str = "f16",
     experts_in_ram: int = 0,
-) -> tuple[LlamaLog, list[Check]]:
-    log = parse_log(run_llama(tool, model_path, context, kv_cache, experts_in_ram))
+) -> tuple[LlamaLog, list[Check], str]:
+    """llama.cpp's numbers, QuantPilot's next to them, and llama.cpp's whole log."""
+    text = run_llama(tool, model_path, context, kv_cache, experts_in_ram)
+    log = parse_log(text)
     header = read_local(model_path)
-    return log, predict(model, header, log, kv_cache, experts_in_ram, hardware.unified_memory)
+    checks = predict(model, header, log, kv_cache, experts_in_ram, hardware.unified_memory)
+    return log, checks, text
