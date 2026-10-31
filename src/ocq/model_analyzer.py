@@ -27,6 +27,7 @@ from ocq.local_model import fetch_local_model_files, gguf_files, parse_model_ref
 from ocq.model_size import (
     EMBEDDING,
     QUANT_METADATA,
+    LayerBits,
     Tensor,
     bnb_scale_bits,
     bnb_weights_bytes,
@@ -585,12 +586,13 @@ def model_facts(
 ) -> ModelFacts:
     """Everything known about the model, each fact with its source and how sure it is."""
     quantization, bits = quantization_fact(config, tensors, dtypes)
-    by_type = parameters_by_type(tensors, dtypes, bits) if tensors else None
+    mixed = layer_bits(config)
+    by_type = parameters_by_type(tensors, dtypes, bits, mixed) if tensors else None
     copy = lm_head_copy(config, tensors)
     parameters = parameter_fact(meta, model_id, tensors, by_type, bits, copy)
     return ModelFacts(
         parameters=parameters,
-        active_parameters=active_fact(config, tensors, dtypes, bits, parameters),
+        active_parameters=active_fact(config, tensors, dtypes, bits, parameters, mixed),
         precision=precision_fact(meta, by_type, bits),
         stored_bytes=stored_bytes_fact(meta, tensors, dtypes, bits),
         architecture=architecture_fact(config, tensors),
@@ -602,7 +604,23 @@ def model_facts(
 
 def quantization_config(config: dict) -> dict:
     text, _ = text_config(config)
-    return text.get("quantization_config") or text.get("compression_config") or {}
+    settings = text.get("quantization_config") or text.get("compression_config") or {}
+    # MLX writes "quantization" (newer versions copy it to quantization_config, without a
+    # method): {"bits": 4, "group_size": 64, "mode": "mxfp4", "<layer>": {"bits": 8, ...}}
+    mlx = text.get("quantization")
+    if isinstance(mlx, dict) and "bits" in mlx and not settings.get("quant_method"):
+        return {**mlx, "quant_method": "mlx"}
+    return settings
+
+
+def layer_bits(config: dict) -> LayerBits:
+    """The layers MLX quantized at another bit width than the rest."""
+    settings = quantization_config(config)
+    return {
+        layer: value["bits"]
+        for layer, value in settings.items()
+        if isinstance(value, dict) and isinstance(value.get("bits"), int)
+    }
 
 
 def quantized_bits(settings: dict) -> int:
@@ -629,6 +647,7 @@ METHOD_NAMES = {
     "fp8": "FP8",
     "mxfp4": "MXFP4",
     "compressed-tensors": "compressed-tensors",
+    "mlx": "MLX",
 }
 
 
@@ -637,6 +656,8 @@ def quantization_label(settings: dict, bits: int) -> str:
     name = METHOD_NAMES.get(method.lower(), method or "unknown method")
     if name in ("FP8", "MXFP4"):
         return f"{name} {settings.get('fmt', '')}".strip()
+    if name == "MLX" and str(settings.get("mode", "affine")) != "affine":
+        return f"MLX {str(settings['mode']).upper()}"
     if settings.get("quant_algo"):
         return f"{name} {settings['quant_algo']}"
     if name == "compressed-tensors" and settings.get("format"):
@@ -666,6 +687,10 @@ def quantization_fact(
         bits = quantized_bits(settings)
         label = quantization_label(settings, bits)
         note = f"group size {settings['group_size']}" if settings.get("group_size") else ""
+        mixed = layer_bits(config)
+        if mixed:
+            widths = sorted(set(mixed.values()))
+            note += f"; {len(mixed)} layers at {'/'.join(map(str, widths))}-bit"
         if settings.get("weight_block_size"):
             note = "blocks of " + " x ".join(map(str, settings["weight_block_size"])) + " weights"
         source = "config.json quantization_config"
@@ -700,7 +725,12 @@ def expert_settings(config: dict) -> tuple[int, int]:
 
 
 def active_fact(
-    config: dict, tensors: list[Tensor], dtypes: dict[str, str], bits: int | None, total: Fact
+    config: dict,
+    tensors: list[Tensor],
+    dtypes: dict[str, str],
+    bits: int | None,
+    total: Fact,
+    mixed: LayerBits | None = None,
 ) -> Fact:
     """Weights read for one token. The speed limit depends on this, not on the total.
 
@@ -714,7 +744,7 @@ def active_fact(
     experts = named or configured
     if experts and not per_token:
         return Fact(note=f"{experts} experts, but config.json does not say how many run per token")
-    counted = weights_per_token(tensors, dtypes, bits, experts, per_token)
+    counted = weights_per_token(tensors, dtypes, bits, experts, per_token, mixed)
     if counted is None:
         return Fact(note="packed tensors could not be unpacked")
 

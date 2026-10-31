@@ -16,6 +16,8 @@ from conftest import (
     LLAMA4_SCOUT,
     MISTRAL_V01,
     MIXTRAL,
+    MLX_GPT_OSS,
+    MLX_QWEN,
     NEMOTRON_H,
     OCQ_NVFP4,
     OLMOE,
@@ -350,6 +352,34 @@ def test_nvidia_nvfp4_repo_is_unpacked_and_checked_against_its_base_model():
     assert snap.facts.parameters.kind == FactKind.CROSS_CHECKED
     assert "matches base model Qwen/Qwen3-8B" in snap.facts.parameters.note
     assert snap.original_gb == pytest.approx(5.96, abs=0.005)
+
+
+def test_mlx_repo_is_unpacked_and_its_biases_are_not_counted_as_weights():
+    snap = real_snapshot(MLX_QWEN)
+    assert snap.is_mlx and snap.is_quantized
+    assert snap.facts.quantization.value == "MLX 4-bit"
+    assert snap.facts.quantization.note == "group size 64"
+    # 8 weights per U32; .scales and .biases (zero points) are not weights. A layer's own
+    # .bias still is: Qwen's q/k/v biases are in the 71,552 F16 weights.
+    assert snap.facts.parameters.value == 494_032_768
+    assert snap.facts.parameters.kind == FactKind.CROSS_CHECKED
+    assert "matches base model Qwen/Qwen2.5-0.5B" in snap.facts.parameters.note
+    assert snap.facts.precision.note == "4-bit in U32 494M, F16 71,552"
+    (row,) = quant_options(snap, make_hardware())
+    # 4 bits + a 16-bit scale and a 16-bit zero point per 64 weights
+    assert row.bits == pytest.approx(4.5, abs=0.01)
+
+
+def test_mlx_layers_at_another_bit_width_are_unpacked_with_their_own():
+    # 98 layers and the embeddings at 8-bit, the experts MXFP4: the count matches the original
+    # gpt-oss to the weight (the HF API is 1,536 off), and so do the weights used per token.
+    snap = real_snapshot(MLX_GPT_OSS)
+    original = real_snapshot(GPT_OSS)
+    assert snap.facts.quantization.value == "MLX MXFP4"
+    assert snap.facts.quantization.note == "group size 32; 122 layers at 8-bit"
+    assert snap.facts.parameters.value == original.facts.parameters.value == 20_914_757_184
+    assert snap.facts.active_parameters.value == original.facts.active_parameters.value
+    assert "8-bit in U32 1.80B" in snap.facts.precision.note
 
 
 def test_without_a_base_model_a_disagreeing_count_stays_an_estimate():
@@ -884,3 +914,16 @@ def test_facts_summary_says_how_sure_the_sizes_are():
 
     catalog_only = ModelSnapshot(model_id="org/model", params_b=7.0, catalog_source="llmfit")
     assert catalog_only.facts_summary() == "from llmfit's catalog, not read from the model's files"
+
+
+def test_feasibility_says_mlx_needs_an_apple_silicon_mac(monkeypatch):
+    from typer.testing import CliRunner
+
+    from ocq import cli
+
+    hardware = nvidia_pc(RTX_3090)
+    monkeypatch.setattr(cli, "detect_hardware", lambda _bin: hardware)
+    monkeypatch.setattr(cli, "resolve_model", lambda *a, **k: real_snapshot(MLX_QWEN, hardware))
+    result = CliRunner().invoke(cli.app, ["feasibility", MLX_QWEN], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "MLX runs only on Apple Silicon Macs" in result.output

@@ -121,6 +121,12 @@ def already_quantized(model: ModelSnapshot) -> str:
             f"{model.model_id} is already GGUF ({model.facts.quantization.note}). Run it with "
             "llama.cpp, Ollama or LM Studio: ocq feasibility shows which file fits this PC."
         )
+    if model.is_mlx:
+        return (
+            f"{model.model_id} is already quantized for MLX ({model.facts.quantization.value}). "
+            "Run it with mlx-lm or LM Studio on an Apple Silicon Mac; ocq feasibility shows "
+            "if it fits."
+        )
     message = (
         f"{model.model_id} is already quantized ({model.facts.quantization.value}). "
         "Quantizing it again would stack the rounding errors"

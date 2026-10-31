@@ -250,6 +250,11 @@ class HardwareProfile:
         return self.has_gpu and "cuda" in self.backend.lower()
 
     @property
+    def apple_silicon(self) -> bool:
+        """An Apple Silicon Mac: GPU and CPU share the memory, the GPU runs Metal (and MLX)."""
+        return self.unified_memory and "metal" in self.backend.lower()
+
+    @property
     def total_ram_bytes(self) -> int:
         return int(self.total_ram_gb * (1024**3))
 
@@ -518,6 +523,11 @@ class ModelSnapshot:
         """Size of the weights as the repo stores them. None when it could not be read."""
         stored = self.facts.stored_bytes
         return stored.value / 1024**3 if stored.known else None
+
+    @property
+    def is_mlx(self) -> bool:
+        """Quantized by MLX: runs in mlx-lm or LM Studio, on Apple Silicon only."""
+        return str(self.facts.quantization.value or "").startswith("MLX")
 
     @property
     def is_quantized(self) -> bool:

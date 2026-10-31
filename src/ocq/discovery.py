@@ -382,17 +382,16 @@ def gguf_quantization(path: Path) -> str:
 
 
 def safetensors_quantization(folder: Path) -> str:
+    """As ocq inspect names it, for example MLX 4-bit or GPTQ 4-bit; else the stored type."""
+    from ocq.model_analyzer import quantization_config, quantization_label, quantized_bits
+
     try:
         config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return "?"
-    quant = config.get("quantization_config") or {}
-    if isinstance(quant, dict) and quant:
-        method = quant.get("quant_method") or quant.get("quant_algo") or "quantized"
-        bits = quant.get("bits")
-        return f"{method} {bits}-bit" if bits else str(method)
-    if isinstance(config.get("quantization"), dict):  # MLX
-        return f"mlx {config['quantization'].get('bits', '?')}-bit"
+    settings = quantization_config(config)
+    if settings:
+        return quantization_label(settings, quantized_bits(settings))
     text = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
     return str(config.get("torch_dtype") or config.get("dtype") or text.get("torch_dtype") or "?")
 

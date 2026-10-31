@@ -534,6 +534,11 @@ def cmd_feasibility(
             "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "
             "whole layers instead.[/dim]"
         )
+    if snapshot.is_mlx and not hw.apple_silicon:
+        console.print(
+            "[yellow]MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio), not on this PC: "
+            "the sizes above are for comparison. Use a GGUF of the original model here.[/yellow]"
+        )
     bases = {option.speed_basis for option in options if option.runnable}
     if measurements.MEASURED in bases:
         console.print("[dim]~  expected speed, fitted to benchmark runs on this PC.[/dim]")
