@@ -13,8 +13,17 @@ from pathlib import Path
 
 from ocq import measurements
 from ocq.engine import default_group_size
+from ocq.gguf_file import (
+    SPLIT_PART,
+    GgufHeader,
+    config_from_gguf,
+    hf_style_tensors,
+    quant_from_filename,
+    read_local,
+    read_remote,
+)
 from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
-from ocq.local_model import fetch_local_model_files, parse_model_ref
+from ocq.local_model import fetch_local_model_files, gguf_files, parse_model_ref
 from ocq.model_size import (
     EMBEDDING,
     QUANT_METADATA,
@@ -130,6 +139,9 @@ def resolve_model(
 ) -> ModelSnapshot:
     """Read a model's facts from its files. Without hardware, the fit is not computed."""
     display_id, local_dir = parse_model_ref(model_ref)
+    if local_dir is not None and (local_dir.is_file() or gguf_files(local_dir)):
+        if local_dir.is_file() or not (local_dir / "config.json").is_file():
+            return local_gguf_snapshot(display_id, local_dir, hardware, context, kv_cache)
     if local_dir is not None:
         config, tensors, dtypes = fetch_local_model_files(local_dir)
         meta = {"pipeline_tag": "local"}
@@ -153,6 +165,10 @@ def resolve_model(
             return catalog
         raise
 
+    if not meta.get("safetensors") and any(
+        str(sibling.get("rfilename", "")).endswith(".gguf") for sibling in meta.get("siblings", [])
+    ):
+        return hub_gguf_snapshot(model_id, meta, hardware, context, kv_cache)
     config, tensors, dtypes = fetch_model_files(model_id, meta.get("sha", ""))
     if quantization_config(config):
         meta = meta | {"base_model_parameters": base_model_parameters(meta)}
@@ -324,7 +340,13 @@ def build_snapshot(
         return replace(snapshot, feasibility=unknown)
     if hardware is None:
         return snapshot
+    return with_fit(snapshot, hardware, context, kv_cache)
 
+
+def with_fit(
+    snapshot: ModelSnapshot, hardware: HardwareProfile, context: int, kv_cache: str = "f16"
+) -> ModelSnapshot:
+    """The snapshot with the best row of its fit table as its feasibility."""
     best = best_option(quant_options(snapshot, hardware, context, kv_cache))
     return replace(
         snapshot,
@@ -342,6 +364,170 @@ def build_snapshot(
             estimate_confidence=best.speed_basis,
         ),
     )
+
+
+def gguf_snapshot(
+    model_id: str,
+    meta: dict,
+    header: GgufHeader,
+    files: list[tuple[str, int]],
+    file_size: int | None,
+    whole: bool,
+) -> ModelSnapshot:
+    """A GGUF model's facts, read from one file's header. files: (quantization, tensor bytes)
+    of every file of the model. whole: the header lists all tensors (not one part of a split).
+    The settings become config.json's terms, so the same code sizes the context memory."""
+    config = config_from_gguf(header)
+    tensors = hf_style_tensors(header) if whole else []
+    snapshot = build_snapshot(model_id, meta, config, tensors, None)
+    stored = header.data_bytes
+    by_type: dict[str, int] = {}
+    for tensor in header.tensors:
+        by_type[tensor.type_name] = by_type.get(tensor.type_name, 0) + tensor.elements
+    ranked = sorted(by_type, key=by_type.get, reverse=True)
+    precision = Fact(
+        ranked[0] if ranked else None,
+        "GGUF tensor table",
+        FactKind.EXACT if ranked else FactKind.UNKNOWN,
+        ", ".join(f"{name} {format_params(by_type[name] / 1e9)}" for name in ranked),
+    )
+    stored_fact = Fact()
+    if whole and stored is not None:
+        matches = file_size == header.data_start + stored
+        stored_fact = Fact(
+            stored,
+            "GGUF tensor table + file size" if matches else "GGUF tensor table",
+            FactKind.CROSS_CHECKED if matches else FactKind.EXACT,
+            f"{stored / GB:.2f} GiB of tensors"
+            + ("; with the header it is the file's exact size" if matches else ""),
+        )
+    labels = ", ".join(label for label, _ in files)
+    quantization = Fact(
+        f"GGUF {header.file_type or files[0][0]}",
+        "GGUF general.file_type",
+        FactKind.EXACT,
+        f"{len(files)} file{'s' if len(files) > 1 else ''}: {labels}",
+    )
+    facts = replace(
+        snapshot.facts, precision=precision, stored_bytes=stored_fact, quantization=quantization
+    )
+    # The shared code names safetensors and config.json as sources; here they are the GGUF's.
+    renamed = {"safetensors headers": "GGUF tensor table", "config.json": "GGUF settings"}
+
+    def from_gguf(fact: Fact) -> Fact:
+        source, note = fact.source, fact.note
+        for old, new in renamed.items():
+            source, note = source.replace(old, new), note.replace(old, new)
+        return replace(fact, source=source, note=note)
+
+    facts = ModelFacts(
+        **{name: from_gguf(getattr(facts, name)) for name in facts.__dataclass_fields__}
+    )
+    exact_sizes = {}
+    if whole:
+        for (name, _), tensor in zip(tensors, header.tensors, strict=True):
+            exact_sizes[name] = tensor.nbytes or 0
+    return replace(
+        snapshot,
+        facts=facts,
+        gguf_files=tuple(files),
+        gguf_tensor_bytes=exact_sizes,
+        use_case=str(meta.get("pipeline_tag") or "General"),
+    )
+
+
+def gguf_variants(
+    names_and_sizes: list[tuple[str, int]], header_bytes: int
+) -> list[tuple[str, int]]:
+    """One (quantization, tensor bytes) per GGUF variant: split parts added up, mmproj left out.
+    The tensor bytes are the file size less the header, which all variants share."""
+    variants: dict[str, int] = {}
+    for name, size in names_and_sizes:
+        base = Path(name).name
+        if base.lower().startswith("mmproj") or not base.endswith(".gguf"):
+            continue
+        key = SPLIT_PART.sub(".gguf", base)
+        variants[key] = variants.get(key, 0) + size - header_bytes
+    labels: dict[str, int] = {}
+    # Largest first, like the other tables: the best fit is the first comfortable row.
+    for key, size in sorted(variants.items(), key=lambda item: item[1], reverse=True):
+        label = quant_from_filename(key) or Path(key).stem
+        if label in labels:  # two files with the same quantization in their names
+            label = Path(key).stem
+        labels[label] = size
+    return list(labels.items())
+
+
+def pick_gguf_file(names: list[str]) -> str:
+    """The file whose header to read: Q4_K_M if there is one, else the first of the smallest
+    variant. All files of a model share the settings; only the tensor types differ."""
+    models = [
+        n for n in names if n.endswith(".gguf") and not Path(n).name.lower().startswith("mmproj")
+    ]
+    if not models:
+        raise OcqError("No GGUF model file found (only mmproj vision projectors).")
+    preferred = [n for n in models if quant_from_filename(n) == "Q4_K_M"]
+    firsts = [n for n in (preferred or models) if not SPLIT_PART.search(n) or "-00001-of-" in n]
+    return sorted(firsts or models)[0]
+
+
+def local_gguf_snapshot(
+    display_id: str, path: Path, hardware: HardwareProfile | None, context: int, kv_cache: str
+) -> ModelSnapshot:
+    files = [path] if path.is_file() else gguf_files(path)
+    if path.is_file() and SPLIT_PART.search(path.name):
+        files = sorted(path.parent.glob(SPLIT_PART.sub("-*-of-*.gguf", path.name)))
+    chosen = Path(pick_gguf_file([str(f) for f in files]))
+    header = read_local(chosen)
+    whole = not SPLIT_PART.search(chosen.name)
+    variants = gguf_variants([(str(f), f.stat().st_size) for f in files], header.data_start)
+    snapshot = gguf_snapshot(
+        display_id, {"pipeline_tag": "local"}, header, variants, chosen.stat().st_size, whole
+    )
+    snapshot = replace(
+        snapshot,
+        provider="local",
+        use_case="Local GGUF",
+        catalog_source="local",
+        weights_dir=path,
+    )
+    return (
+        with_fit(snapshot, hardware, context, kv_cache)
+        if hardware and snapshot.params_b
+        else snapshot
+    )
+
+
+def hub_gguf_snapshot(
+    model_id: str, meta: dict, hardware: HardwareProfile | None, context: int, kv_cache: str
+) -> ModelSnapshot:
+    """A Hub repo with only GGUF files: one header read with range requests, the file sizes
+    from the Hub's file list."""
+    sizes = hub_file_sizes(model_id)
+    chosen = pick_gguf_file(list(sizes))
+    revision = meta.get("sha") or "main"
+    header = read_remote(f"https://huggingface.co/{model_id}/resolve/{revision}/{chosen}")
+    whole = not SPLIT_PART.search(chosen)
+    variants = gguf_variants(list(sizes.items()), header.data_start)
+    snapshot = gguf_snapshot(model_id, meta, header, variants, sizes.get(chosen), whole)
+    return (
+        with_fit(snapshot, hardware, context, kv_cache)
+        if hardware and snapshot.params_b
+        else snapshot
+    )
+
+
+def hub_file_sizes(model_id: str) -> dict[str, int]:
+    """Every file of a Hub repo and its size in bytes."""
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    headers = {"User-Agent": "ocq/0.1"} | ({"Authorization": f"Bearer {token}"} if token else {})
+    request = urllib.request.Request(f"{HF_API}/{model_id}?blobs=true", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            siblings = json.loads(response.read().decode()).get("siblings", [])
+    except (urllib.error.URLError, ValueError) as exc:
+        raise OcqError(f"Could not list the files of {model_id}") from exc
+    return {s["rfilename"]: s.get("size") or 0 for s in siblings}
 
 
 def runtime_for_row(option: QuantOption) -> str:
@@ -709,10 +895,24 @@ LAYER_TYPE_KINDS = {
     "attention": FULL,
     "sliding_attention": SLIDING,
     "chunked_attention": CHUNKED,
+    "mamba": STATE,
+    "mamba2": STATE,
+    "linear_attention": STATE,
+    "conv": STATE,
+    "mlp": NO_CACHE,  # a layer with neither (from GGUF files: no KV heads, no SSM tensors)
 }
+# Nemotron-H's hybrid_override_pattern: attention, Mamba, MLP, MoE MLP.
+PATTERN_KINDS = {"*": FULL, "M": STATE, "-": NO_CACHE, "E": NO_CACHE}
 
 
-def layer_kinds(text: dict, layers: int) -> tuple[list[str], str]:
+def known_kinds(names: list[str], table: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Layer kinds by name, and the names not in the table. An unknown name is counted as full
+    attention: if it is not, the memory is overestimated, never underestimated."""
+    unknown = sorted({name for name in names if name not in table})
+    return [table.get(name, FULL) for name in names], unknown
+
+
+def layer_kinds(text: dict, layers: int) -> tuple[list[str], str, list[str]]:
     """The kind of every layer and which config.json key said so. Families write it differently:
 
     layer_types               one name per layer (Gemma 3, gpt-oss, Granite 4.0-H, ...)
@@ -723,41 +923,47 @@ def layer_kinds(text: dict, layers: int) -> tuple[list[str], str]:
     no_rope_layers            1 chunked attention, 0 full (Llama 4)
     sliding_window_pattern    every Nth layer full, the rest sliding (Gemma 3, Cohere2)
     Gemma 2 alternates sliding and full layers without saying so (as transformers does).
+    The third value lists layer kinds config.json names that QuantPilot does not know.
     """
     types = text.get("layer_types")
     if isinstance(types, list) and len(types) == layers:
-        return [LAYER_TYPE_KINDS.get(kind, STATE) for kind in types], "layer_types"
+        kinds, unknown = known_kinds(types, LAYER_TYPE_KINDS)
+        return kinds, "layer_types", unknown
     if isinstance(text.get("full_attn_idxs"), list):
         attention = set(text["full_attn_idxs"])
         kinds = [FULL if index in attention else STATE for index in range(layers)]
-        return kinds, "full_attn_idxs"
+        return kinds, "full_attn_idxs", []
     if text.get("full_attention_interval"):
         interval = text["full_attention_interval"]
         kinds = [STATE if (index + 1) % interval else FULL for index in range(layers)]
-        return kinds, "full_attention_interval"
+        return kinds, "full_attention_interval", []
     pattern = text.get("hybrid_override_pattern")
     if isinstance(pattern, str) and len(pattern) == layers:
-        letters = {"*": FULL, "M": STATE}
-        return [letters.get(letter, NO_CACHE) for letter in pattern], "hybrid_override_pattern"
+        kinds, unknown = known_kinds(list(pattern), PATTERN_KINDS)
+        return kinds, "hybrid_override_pattern", unknown
     if text.get("attn_layer_period"):
         period, offset = text["attn_layer_period"], text.get("attn_layer_offset", 0)
         kinds = [FULL if index % period == offset else STATE for index in range(layers)]
-        return kinds, "attn_layer_period"
+        return kinds, "attn_layer_period", []
     no_rope = text.get("no_rope_layers")
     if text.get("attention_chunk_size") and isinstance(no_rope, list) and len(no_rope) >= layers:
-        return [CHUNKED if no_rope[index] else FULL for index in range(layers)], "no_rope_layers"
+        kinds = [CHUNKED if no_rope[index] else FULL for index in range(layers)]
+        return kinds, "no_rope_layers", []
     if text.get("sliding_window_pattern"):
         every = text["sliding_window_pattern"]
         kinds = [SLIDING if (index + 1) % every else FULL for index in range(layers)]
-        return kinds, "sliding_window_pattern"
+        return kinds, "sliding_window_pattern", []
     if text.get("model_type") == "gemma2":
-        return [SLIDING if index % 2 == 0 else FULL for index in range(layers)], "Gemma 2"
+        return [SLIDING if index % 2 == 0 else FULL for index in range(layers)], "Gemma 2", []
+    if isinstance(types, list):
+        # A layer_types list of the wrong length does not say which layer is which.
+        return [FULL] * layers, "", [f"layer_types lists {len(types)} of {layers} layers"]
     if text.get("sliding_window"):
-        return [SLIDING] * layers, "sliding_window"
-    return [FULL] * layers, ""
+        return [SLIDING] * layers, "sliding_window", []
+    return [FULL] * layers, "", []
 
 
-def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str], str]:
+def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str], str, list[str]]:
     """Tokens each layer keeps per conversation (0 = all, None = no cache) and a note.
 
     llama.cpp only shrinks the cache of models that mix windowed and full layers (Gemma 2/3,
@@ -765,7 +971,7 @@ def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str],
     Mistral 7B v0.1's whole cache, and for Phi-3 it sets swa_type NONE ("Phi SWA is currently
     disabled", src/models/phi3.cpp).
     """
-    kinds, said_by = layer_kinds(text, layers)
+    kinds, said_by, unknown = layer_kinds(text, layers)
     window = text.get("sliding_window") or 0
     if text.get("use_sliding_window") is False:
         window = 0
@@ -794,7 +1000,9 @@ def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str],
         notes.append(f"{chunked} of {layers} layers attend within {chunk:,}-token chunks")
     if said_by and any(kind in (STATE, NO_CACHE) for kind in kinds):
         notes.append(f"attention layers from {said_by}")
-    return windows, kinds, "; ".join(notes)
+    if unknown:
+        notes.append(f"unknown layer kind {', '.join(unknown)}, counted as full attention")
+    return windows, kinds, "; ".join(notes), unknown
 
 
 def state_per_layer(text: dict) -> tuple[int, str]:
@@ -828,14 +1036,15 @@ def state_per_layer(text: dict) -> tuple[int, str]:
     return ((d_conv - 1) * d_inner + d_state * d_inner) * 4, "Mamba-1"
 
 
-def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
-    """What every layer caches per token, from config.json, and a note on anything unusual."""
+def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str, bool]:
+    """What every layer caches per token, from config.json, a note on anything unusual, and
+    whether a layer kind had to be guessed."""
     found = architecture_from(config)
     if not found:
-        return (), ""
+        return (), "", False
     text, _ = text_config(config)
     layers_count = found["num_layers"]
-    windows, kinds, note = layer_windows(text, layers_count)
+    windows, kinds, note, unknown = layer_windows(text, layers_count)
     state, state_kind = state_per_layer(text)
     stateful = [kind == STATE for kind in kinds]
     if state_kind.startswith("Mamba") and not any(stateful):
@@ -866,7 +1075,7 @@ def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
             else KvLayer(compressed, window, expanded, extra)
             for window, extra in zip(windows, states, strict=True)
         )
-        return layers, "; ".join(filter(None, [note, mla]))
+        return layers, "; ".join(filter(None, [note, mla])), bool(unknown)
     head_dim = found["attention_head_dim"] or found["hidden_size"] // found["num_attention_heads"]
     per_layer = 2 * found["num_kv_heads"] * head_dim * KV_BYTES_PER_VALUE  # keys and values
     layers = tuple(
@@ -875,7 +1084,7 @@ def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
         else KvLayer(per_layer, window, state_bytes=extra)
         for window, extra in zip(windows, states, strict=True)
     )
-    return layers, note
+    return layers, note, bool(unknown)
 
 
 MLA_PROJECTION = re.compile(
@@ -898,7 +1107,7 @@ def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
     The value is what every layer adds per token. Sliding-window layers stop adding at their
     window, so the note gives the total at a long context too.
     """
-    layers, layout = kv_layers_from(config)
+    layers, layout, guessed = kv_layers_from(config)
     from_config = sum(layer.bytes_per_token for layer in layers) or None
     shapes = attention_from_tensors(tensors)
     from_shapes = shapes[0] * 2 if shapes else (mla_width_from_tensors(tensors) * 2 or None)
@@ -932,7 +1141,9 @@ def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
         notes.append(f"tensor shapes give {from_shapes:,} bytes per token")
         return Fact(from_config, config_source, FactKind.ESTIMATE, "; ".join(notes))
     if from_config:
-        return Fact(from_config, config_source, FactKind.EXACT, "; ".join(notes))
+        # A layer kind QuantPilot had to guess, with no tensor shapes to check it, is an estimate.
+        kind = FactKind.ESTIMATE if guessed else FactKind.EXACT
+        return Fact(from_config, config_source, kind, "; ".join(notes))
     if from_shapes:
         note = "config.json has no layer or head counts; from the K and V projection shapes"
         return Fact(from_shapes, "tensor shapes", FactKind.ESTIMATE, note)
@@ -993,6 +1204,12 @@ def quant_options(
 
     kv_cache is the cache type asked for (--kv-cache); each row uses its runtime's version.
     """
+    if model.gguf_files:
+        # GGUF files: one row per file, as published. llama.cpp runs them.
+        return [
+            fit_at(label, size / GB, model, hardware, context, True, "gguf", kv_cache)
+            for label, size in model.gguf_files
+        ]
     if model.is_quantized:
         # Already quantized: only the files as they are. Re-quantizing would stack the errors.
         if model.original_gb is None:
@@ -1218,7 +1435,7 @@ def fit_at(
     experts_ram_layers, experts_ram_gb = 0, 0.0
     offload = None
     if vram and required > vram and not hardware.unified_memory and row_kind == "gguf":
-        offload = experts_to_ram(model, label, required - vram, ram)
+        offload = experts_to_ram(model, label, required - vram, ram, weights_gb)
     if vram and required <= vram:
         run_mode, available = RunMode.GPU, vram
     elif offload:
@@ -1278,7 +1495,11 @@ def fit_at(
 
 
 def experts_to_ram(
-    model: ModelSnapshot, gguf_type: str, too_much_gb: float, ram_gb: float
+    model: ModelSnapshot,
+    gguf_type: str,
+    too_much_gb: float,
+    ram_gb: float,
+    weights_gb: float = 0.0,
 ) -> tuple[int, float] | None:
     """llama.cpp --n-cpu-moe N: the experts of the first N layers stay in RAM, everything else
     goes to VRAM. The smallest N that frees `too_much_gb` of VRAM, and the GB moved to RAM.
@@ -1289,8 +1510,13 @@ def experts_to_ram(
     """
     if not (model.experts and model.experts_per_token and model.tensors):
         return None
-    heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
-    sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
+    if model.gguf_tensor_bytes:
+        # A GGUF file: its own tensor sizes, scaled when the row is another file of the repo.
+        scale = weights_gb * GB / sum(model.gguf_tensor_bytes.values()) if weights_gb else 1.0
+        sizes = {name: size * scale for name, size in model.gguf_tensor_bytes.items()}
+    else:
+        heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
+        sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
     by_layer: dict[int, int] = {}
     for name, shape in model.tensors:
         if routed_expert(name, shape, model.experts):

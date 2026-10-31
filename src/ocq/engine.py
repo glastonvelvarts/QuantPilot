@@ -178,6 +178,7 @@ def build_rationale(
         f"{fit.memory_required_gb:.2f} of {fit.memory_available_gb:.2f} GB free "
         f"({fit.utilization_pct:.0f}%)",
         f"Selected: {config.summary()}",
+        f"Facts: {model.facts_summary()}",
     ]
     if config.algorithm == QuantAlgorithm.GGUF:
         lines.append("GGUF runs on CPU, NVIDIA, AMD and Apple GPUs through llama.cpp or Ollama.")

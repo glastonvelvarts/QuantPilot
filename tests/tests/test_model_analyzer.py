@@ -849,3 +849,38 @@ def test_phi3_window_is_counted_in_full_as_llama_cpp_keeps_it():
     snap = real_snapshot("microsoft/Phi-3-mini-4k-instruct")
     assert snap.kv_cache_bytes(4096) == 32 * 2 * 32 * 96 * 2 * 4096
     assert "on every layer, counted in full" in snap.facts.kv_cache.note
+
+
+# Layer kinds QuantPilot does not know are counted as full attention and flagged, not guessed.
+
+
+def test_unknown_layer_kind_counts_as_full_attention_and_is_flagged():
+    config = QWEN_CONFIG | {"layer_types": ["full_attention"] * 27 + ["new_fancy_attention"]}
+    kv = build_snapshot("org/model", {}, config, [], None).facts.kv_cache
+    assert kv.value == 28 * 1024  # all 28 layers counted, the unknown one too
+    assert kv.kind == FactKind.ESTIMATE
+    assert "unknown layer kind new_fancy_attention, counted as full attention" in kv.note
+
+
+def test_layer_types_of_the_wrong_length_are_flagged():
+    config = QWEN_CONFIG | {"layer_types": ["full_attention"] * 20}
+    kv = build_snapshot("org/model", {}, config, [], None).facts.kv_cache
+    assert kv.kind == FactKind.ESTIMATE
+    assert "layer_types lists 20 of 28 layers" in kv.note
+
+
+def test_known_state_layer_names_are_not_flagged():
+    snap = real_snapshot(GRANITE_H)  # layer_types "mamba" and "attention"
+    assert "unknown layer kind" not in snap.facts.kv_cache.note
+
+
+def test_facts_summary_says_how_sure_the_sizes_are():
+    assert real_snapshot(QWEN3_MOE).facts_summary() == (
+        "parameters cross-checked, context memory cross-checked, used per token cross-checked "
+        "(sources: ocq inspect)"
+    )
+    assert "quantization cross-checked" in real_snapshot(QWEN_GPTQ).facts_summary()
+    from ocq.types import ModelSnapshot
+
+    catalog_only = ModelSnapshot(model_id="org/model", params_b=7.0, catalog_source="llmfit")
+    assert catalog_only.facts_summary() == "from llmfit's catalog, not read from the model's files"
