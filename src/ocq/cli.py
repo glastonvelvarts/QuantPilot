@@ -231,6 +231,7 @@ def cmd_inspect(
         ("Stored bytes", facts.stored_bytes),
         ("Architecture", facts.architecture),
         ("Context length", facts.context_length),
+        ("KV bytes/token", facts.kv_cache),
         ("Quantization", facts.quantization),
     )
     # Three columns: long sources and notes wrap inside the last one, the kinds line up.
@@ -329,12 +330,12 @@ def cmd_feasibility(
     except OcqError as exc:
         raise fail(exc) from exc
 
-    exact = options[0].exact
-    sizes = (
-        "exact, computed from the model's tensor shapes"
-        if exact
-        else "estimated from the parameter count (tensor shapes not readable)"
-    )
+    if not snapshot.tensors:
+        sizes = "estimated from the parameter count (tensor shapes not readable)"
+    elif options[0].context_known:
+        sizes = "exact, computed from the model's tensor shapes"
+    else:
+        sizes = "weights exact from the tensor shapes, context memory unknown"
     if snapshot.is_quantized:
         sizes = (
             f"already quantized ({snapshot.facts.quantization.value}), shown as stored. "
@@ -372,13 +373,19 @@ def cmd_feasibility(
             backend_cell(option, hw),
             f"{option.bits:.2f}",
             f"{option.weights_gb:.2f}",
-            f"{option.context_gb:.2f}",
+            f"{option.context_gb:.2f}" if option.context_known else "?",
             f"{option.memory_required_gb:.2f}",
             colored_fit(option.fit_level),
             str(option.run_mode).replace("gpu_offload", "gpu+ram"),
             speed_cell(option),
         )
     console.print(table)
+    if not options[0].context_known:
+        console.print(
+            "[dim]?  context memory unknown: config.json has no layer or head counts and the "
+            "tensor names show no separate k_proj/v_proj. Fit and Needs count the weights only, "
+            "so no row is rated better than Marginal.[/dim]"
+        )
     bases = {option.speed_basis for option in options if option.runnable}
     if measurements.MEASURED in bases:
         console.print("[dim]~  expected speed, fitted to benchmark runs on this PC.[/dim]")
