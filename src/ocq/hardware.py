@@ -109,24 +109,33 @@ def apple_gpus(total_ram_bytes: int) -> list[GpuProfile]:
 
 
 def with_live_gpu_readings(profile: HardwareProfile) -> HardwareProfile:
-    """Adds what only the running machine knows: free VRAM and measured VRAM bandwidth."""
+    """Adds what only the running machine knows: free VRAM and measured VRAM bandwidth.
+
+    nvidia-smi lists every card on its own line, so the NVIDIA cards are replaced by that list,
+    one entry per card in card order. Matching by name would give two identical cards the
+    readings of one of them, and llmfit lists identical cards once with a count.
+    """
     if not profile.has_cuda:
         return profile
 
-    live = {gpu.name: gpu for gpu in nvidia_gpus()}
-    gpus = []
-    for gpu in profile.gpus:
-        reading = live.get(gpu.name)
-        gpus.append(
-            replace(
-                gpu,
-                vram_gb=reading.vram_gb if reading else gpu.vram_gb,
-                free_vram_gb=reading.free_vram_gb if reading else gpu.free_vram_gb,
-                compute_capability=reading.compute_capability if reading else None,
-                measured_bandwidth_gbs=measured_gpu_bandwidth(gpu.name),
-            )
+    live = nvidia_gpus()
+    if not live:
+        gpus = [
+            replace(g, measured_bandwidth_gbs=measured_gpu_bandwidth(g.name)) for g in profile.gpus
+        ]
+        return replace(profile, gpus=tuple(gpus))
+
+    spec = {gpu.name: gpu.bandwidth_gbs for gpu in profile.gpus}
+    cards = [
+        replace(
+            card,
+            bandwidth_gbs=spec.get(card.name, 0.0),
+            measured_bandwidth_gbs=measured_gpu_bandwidth(card.name),
         )
-    return replace(profile, gpus=tuple(gpus))
+        for card in live
+    ]
+    others = [gpu for gpu in profile.gpus if "cuda" not in gpu.backend.lower()]
+    return replace(profile, gpus=tuple(cards + others))
 
 
 def measured_gpu_bandwidth(gpu_name: str) -> float:

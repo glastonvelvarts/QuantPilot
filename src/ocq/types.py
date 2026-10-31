@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -141,6 +141,34 @@ class GpuProfile:
             return self.compute_capability >= 10.0
         return bool(BLACKWELL_NAMES.search(self.name.lower()))
 
+    @property
+    def read_speed(self) -> float:
+        """GiB the card reads per second: measured on this PC, else its specification."""
+        return self.measured_bandwidth_gbs or self.bandwidth_gbs * 1e9 / 1024**3
+
+
+# How a runtime spreads one model over several GPUs.
+# llama.cpp and transformers put whole layers on each card: the free VRAM adds up, and the
+# cards work one after another. vLLM gives every card an equal slice of every layer (tensor
+# parallel): N cards hold N x the smallest card, and they read their slices at the same time.
+ONE_GPU = "one GPU"
+LAYER_SPLIT = "layers"
+TENSOR_PARALLEL = "tensor parallel"
+
+
+@dataclass(frozen=True)
+class GpuPool:
+    """The GPUs one runtime would use together for a model."""
+
+    cards: tuple[GpuProfile, ...]
+    free_gb: float
+    read_speed: float  # GiB per second for reading all the weights once; 0 when unknown
+    split: str
+
+    @property
+    def count(self) -> int:
+        return len(self.cards)
+
 
 @dataclass(frozen=True)
 class HardwareProfile:
@@ -204,14 +232,70 @@ class HardwareProfile:
         return self.has_cuda and gpu is not None and gpu.fp4_tensor_cores
 
     @property
-    def free_vram_gb(self) -> float:
-        """VRAM a model can really use right now. Unified memory shares the free RAM."""
-        gpu = self.primary_gpu
-        if not self.has_gpu or gpu is None:
-            return 0.0
+    def cards(self) -> tuple[GpuProfile, ...]:
+        """Every GPU of the main backend, one entry per card.
+
+        llmfit lists identical cards once with a count and one card's VRAM in vram_gb.
+        """
+        with_vram = [g for g in self.gpus if g.vram_gb is not None]
+        main = [g for g in with_vram if g.backend.lower() == self.backend.lower()] or with_vram
+        cards = []
+        for gpu in main:
+            each = replace(gpu, count=1, free_vram_gb=gpu.free_vram_gb if gpu.count == 1 else None)
+            cards += [each] * gpu.count
+        return tuple(cards)
+
+    def card_free_gb(self, gpu: GpuProfile) -> float:
+        """VRAM a model can use on this card right now. Unified memory shares the free RAM."""
         if self.unified_memory:
             return self.available_ram_gb
         return gpu.free_vram_gb if gpu.free_vram_gb is not None else gpu.vram_gb
+
+    def gpu_pool(
+        self, split: str = LAYER_SPLIT, attention_heads: int | None = None
+    ) -> GpuPool | None:
+        """The GPUs a runtime would use, with their free VRAM and read speed together.
+
+        Tensor parallel needs the card count to divide the attention heads (vLLM checks it), so
+        without the head count only one card is assumed.
+        """
+        cards = sorted(self.cards, key=self.card_free_gb, reverse=True)
+        if not self.has_gpu or not cards:
+            return None
+        if self.unified_memory or len(cards) == 1 or split == ONE_GPU:
+            best = cards[0]
+            return GpuPool((best,), self.card_free_gb(best), best.read_speed, ONE_GPU)
+
+        if split == LAYER_SPLIT:
+            # llama.cpp splits by free memory: each card holds and reads its share in turn.
+            free = [self.card_free_gb(card) for card in cards]
+            total = sum(free)
+            seconds_per_gib = 0.0
+            for card, share in zip(cards, free, strict=True):
+                if not card.read_speed:
+                    seconds_per_gib = 0.0
+                    break
+                seconds_per_gib += share / total / card.read_speed
+            speed = 1 / seconds_per_gib if seconds_per_gib else 0.0
+            return GpuPool(tuple(cards), total, speed, LAYER_SPLIT)
+
+        best = None
+        for count in range(1, len(cards) + 1):
+            if count > 1 and (not attention_heads or attention_heads % count):
+                continue
+            used = cards[:count]
+            free = count * min(self.card_free_gb(card) for card in used)
+            speed = count * min(card.read_speed for card in used)
+            if best is None or free > best.free_gb:
+                kind = TENSOR_PARALLEL if count > 1 else ONE_GPU
+                best = GpuPool(tuple(used), free, speed, kind)
+        return best
+
+    @property
+    def free_vram_gb(self) -> float:
+        """VRAM a model can use right now, over every card when it is split by layers."""
+        pool = self.gpu_pool(LAYER_SPLIT)
+        return pool.free_gb if pool else 0.0
 
 
 @dataclass(frozen=True)
@@ -268,10 +352,18 @@ class QuantOption:
     # False when config.json has no layer or head counts: context_gb is then 0, not measured,
     # and the fit counts the weights only.
     context_known: bool = True
+    # GPUs the model runs on (none on the CPU), and how they share it: one GPU, layers,
+    # tensor parallel.
+    gpu_names: tuple[str, ...] = ()
+    gpu_split: str = ""
 
     @property
     def runnable(self) -> bool:
         return self.fit_level != FitLevel.TOO_TIGHT
+
+    @property
+    def gpu_count(self) -> int:
+        return len(self.gpu_names)
 
     @property
     def utilization_pct(self) -> float:
