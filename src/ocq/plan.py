@@ -64,7 +64,14 @@ def generate_plan(
     if predicted.experts_in_ram:
         rationale.append(experts_note(model, predicted))
     if config.kv_cache != "f16":
-        rationale.append(kv_cache_note(config))
+        rationale.append(kv_cache_note(config, hardware))
+    picked = not (choices and choices.algorithm)
+    if hardware.os_name == "Windows" and hardware.has_cuda and picked:
+        if config.algorithm == QuantAlgorithm.GGUF:
+            rationale.append(
+                "Windows: GGUF, because vLLM, which serves AWQ, GPTQ and NVFP4, does not run "
+                "natively on Windows. In WSL2 QuantPilot sees Linux and picks those as there."
+            )
     rationale.append(f"Speed: {describe_speed(predicted, config)}")
     if config.algorithm == QuantAlgorithm.BNB and config.bits == 4:
         rationale.append(double_quant_note(model, hardware, config, predicted))
@@ -132,7 +139,7 @@ def experts_note(model: ModelSnapshot, option: QuantOption) -> str:
     )
 
 
-def kv_cache_note(config: QuantConfig) -> str:
+def kv_cache_note(config: QuantConfig, hardware: HardwareProfile) -> str:
     """What --kv-cache means for the runtime that serves this backend, and the flags to pass."""
     cache = config.kv_cache
     runtime = runtime_of(
@@ -146,6 +153,15 @@ def kv_cache_note(config: QuantConfig) -> str:
             f"llama.cpp with -ctk {cache} -ctv {cache}; it turns on flash attention for it."
         )
     if runtime == VLLM:
+        if not hardware.vllm_fp8_kv_cache:
+            gpu = hardware.primary_gpu
+            capability = gpu.compute_capability if gpu else None
+            this = f"compute capability {capability}" if capability else "no known capability"
+            return (
+                f"Context cache: stays at 16 bits. vLLM's fp8 cache needs compute capability "
+                f"8.9 or newer (RTX 40xx, H100, RTX 50xx); this PC has {this}. "
+                "GGUF (llama.cpp) can use q8_0 here."
+            )
         extra = " (vLLM has no 4-bit cache)" if cache == "q4_0" else ""
         return f"Context cache: fp8, 8 bits per value{extra}. Serve with --kv-cache-dtype fp8."
     return (
@@ -251,6 +267,13 @@ def quantization_warnings(
 
     if config.algorithm == QuantAlgorithm.NVFP4:
         warnings += nvfp4_warnings(hardware, config)
+
+    vllm_formats = (QuantAlgorithm.AWQ, QuantAlgorithm.GPTQ, QuantAlgorithm.NVFP4)
+    if hardware.os_name == "Windows" and config.algorithm in vllm_formats:
+        warnings.append(
+            f"{config.algorithm.value.upper()} is served by vLLM, which does not run natively on "
+            "Windows: serve it in WSL2 or on Linux, or quantize to GGUF (-b gguf) to run it here."
+        )
 
     if config.algorithm in (QuantAlgorithm.AWQ, QuantAlgorithm.GPTQ, QuantAlgorithm.NVFP4):
         if not calibration_fits_in_ram(hardware, model):

@@ -167,7 +167,7 @@ Nothing is uploaded. **`feasibility`** reads **your** safetensors + config and s
 
 - **Linux + NVIDIA Blackwell + enough RAM** for calibration → NVFP4 (4-bit)  
 - **Linux + other NVIDIA + enough RAM** for calibration → AWQ or GPTQ  
-- **Everything else** (including **Windows + NVIDIA**) → GGUF  
+- **Everything else** (including **Windows + NVIDIA**) → GGUF. vLLM, which serves AWQ, GPTQ and NVFP4, does not run natively on Windows; in WSL2 QuantPilot sees Linux. Forcing `-b awq` on Windows gives a warning.  
 
 GGUF downloads **llama.cpp** automatically on first use (`~/.cache/ocq/llama.cpp`). Conversion uses the checkpoint’s real dtype (**f32 / bf16 / f16**), then quantizes.
 
@@ -296,7 +296,7 @@ Besides the weights, a model keeps a **key and a value for every token of contex
 | **Sliding window** | Gemma 2/3, gpt-oss, Cohere2 | only the last *window* tokens (Gemma 3: 512) |
 | **Chunked** | Llama 4 | one 8,192-token chunk |
 | **MLA** | DeepSeek V2/V3, Kimi | one small compressed vector per token (transformers expands it to full keys and values) |
-| **No cache** | Mamba, linear-attention and convolution layers of hybrids (Granite 4.0-H, Nemotron-H, Jamba, LFM2, Qwen3-Next) | a small fixed-size state instead (not counted) |
+| **No cache** | Mamba, linear-attention and convolution layers of hybrids (Granite 4.0-H, Nemotron-H, Jamba, LFM2, Qwen3-Next) | a fixed-size state per conversation (counted for Mamba and convolution layers, matching llama.cpp; not yet for linear attention) |
 
 Sliding-window sizes follow llama.cpp, checked against its own logs: a sliding layer keeps *window × conversations + 512* tokens. QuantPilot assumes **4 conversations**, `llama-server`'s default. A model with a window on every layer (Mistral 7B v0.1) is counted in full, as llama.cpp keeps it.
 
@@ -305,7 +305,7 @@ Sliding-window sizes follow llama.cpp, checked against its own logs: a sliding l
 | `--kv-cache` | llama.cpp (GGUF rows) | vLLM (AWQ, GPTQ, NVFP4 rows) | transformers (original, BNB rows) |
 |--------------|-----------------------|-------------------------------|-----------------------------------|
 | `f16` (default) | 16 bits | 16 bits | 16 bits |
-| `q8_0` | 8.5 bits, `-ctk q8_0 -ctv q8_0`, almost no quality loss | 8 bits, `--kv-cache-dtype fp8` | 16 bits |
+| `q8_0` | 8.5 bits, `-ctk q8_0 -ctv q8_0`, almost no quality loss | 8 bits, `--kv-cache-dtype fp8` (GPUs of compute capability 8.9+: RTX 40xx, H100, RTX 50xx; else 16 bits) | 16 bits |
 | `q4_0` | 4.5 bits, `-ctk q4_0 -ctv q4_0`, some quality loss | 8 bits (no 4-bit cache in vLLM) | 16 bits |
 
 ```sh
