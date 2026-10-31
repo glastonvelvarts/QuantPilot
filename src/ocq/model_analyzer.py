@@ -32,6 +32,9 @@ from ocq.model_size import (
 from ocq.types import (
     DTYPE_BITS,
     INTEGER_TYPES,
+    LAYER_SPLIT,
+    ONE_GPU,
+    TENSOR_PARALLEL,
     Fact,
     FactKind,
     FeasibilityEstimate,
@@ -47,6 +50,7 @@ from ocq.types import (
 )
 
 HF_API = "https://huggingface.co/api/models"
+VLLM_ROWS = (QuantAlgorithm.AWQ.value, QuantAlgorithm.GPTQ.value, QuantAlgorithm.NVFP4.value)
 MODEL_CACHE = Path.home() / ".cache" / "ocq" / "models"
 GB = 1024**3
 DEFAULT_CONTEXT = 4096
@@ -883,7 +887,18 @@ def fit_at(
         context_gb = (per_token * context + output_buffer_bytes(model.vocab_size)) / GB
 
     required = weights_gb + context_gb
-    vram = hardware.free_vram_gb
+    # vLLM serves AWQ, GPTQ and NVFP4 with tensor parallel; llama.cpp and transformers split
+    # by layers.
+    split = TENSOR_PARALLEL if row_kind in VLLM_ROWS else LAYER_SPLIT
+    heads = model.num_attention_heads if model.architecture_known else None
+    pool = hardware.gpu_pool(split, heads)
+    if pool and pool.split == LAYER_SPLIT:
+        # Layers on a slower card slow every token down. When the model fits on the best card
+        # alone and that card is faster than the split, one card is the better setup.
+        single = hardware.gpu_pool(ONE_GPU)
+        if required <= single.free_gb and single.read_speed > pool.read_speed:
+            pool = single
+    vram = pool.free_gb if pool else 0.0
     ram = hardware.available_ram_gb
 
     if vram and required <= vram:
@@ -907,7 +922,12 @@ def fit_at(
         fit_level = FitLevel.MARGINAL
 
     speed, speed_basis = measurements.predict_speed(
-        weights_gb, run_mode, vram, hardware, use_measurements
+        weights_gb,
+        run_mode,
+        vram,
+        hardware,
+        use_measurements,
+        gpu_read_speed=pool.read_speed if pool else 0.0,
     )
     return QuantOption(
         label=label,
@@ -923,6 +943,10 @@ def fit_at(
         estimated_tps=speed,
         speed_basis=speed_basis,
         row_kind=row_kind,
+        gpu_names=tuple(card.name for card in pool.cards)
+        if pool and run_mode != RunMode.CPU
+        else (),
+        gpu_split=pool.split if pool else "",
     )
 
 

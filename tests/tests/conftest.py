@@ -128,3 +128,34 @@ QWEN_W8A8 = "RedHatAI/Qwen2.5-1.5B-Instruct-quantized.w8a8"
 QWEN3_8B_NVFP4 = "nvidia/Qwen3-8B-NVFP4"
 # Written by `ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct -b nvfp4 --execute` (llm-compressor).
 OCQ_NVFP4 = "ocq/SmolLM2-135M-Instruct-nvfp4a16"
+QWEN_72B = "Qwen/Qwen2.5-72B-Instruct"
+
+# Lines as `nvidia-smi --query-gpu=name,memory.total,memory.free,compute_cap` prints them.
+RTX_3090 = "NVIDIA GeForce RTX 3090, 24576, 24000, 8.6"
+RTX_3090_BUSY = "NVIDIA GeForce RTX 3090, 24576, 23000, 8.6"
+RTX_3060 = "NVIDIA GeForce RTX 3060, 12288, 12000, 8.6"
+# Memory bandwidth from NVIDIA's specifications, GB/s.
+SPEC_BANDWIDTH = {"NVIDIA GeForce RTX 3090": 936.0, "NVIDIA GeForce RTX 3060": 360.0}
+
+
+def nvidia_pc(*lines: str, ram_gb: float = 60):
+    """A Linux PC with these NVIDIA cards, as QuantPilot's own probe reads them."""
+    from dataclasses import replace
+
+    from ocq.hardware import parse_nvidia_smi
+    from ocq.types import HardwareProfile
+
+    cards = parse_nvidia_smi("\n".join(lines))
+    cards = tuple(replace(card, bandwidth_gbs=SPEC_BANDWIDTH[card.name]) for card in cards)
+    return HardwareProfile(
+        total_ram_gb=ram_gb + 4,
+        available_ram_gb=ram_gb,
+        cpu_cores=16,
+        cpu_name="CPU",
+        has_gpu=True,
+        backend="CUDA",
+        unified_memory=False,
+        ram_bandwidth_gbs=80.0,
+        gpus=cards,
+        os_name="Linux",
+    )

@@ -5,12 +5,17 @@ from conftest import (
     OCQ_NVFP4,
     QWEN,
     QWEN3_8B_NVFP4,
+    QWEN_72B,
     QWEN_AWQ,
     QWEN_BNB,
     QWEN_CONFIG,
     QWEN_GPTQ,
     QWEN_W8A8,
+    RTX_3060,
+    RTX_3090,
+    RTX_3090_BUSY,
     SMOLVLM,
+    nvidia_pc,
     real_model,
 )
 
@@ -22,7 +27,16 @@ from ocq.model_analyzer import (
     quant_options,
     recommend_models,
 )
-from ocq.types import FactKind, FitLevel, GpuProfile, HardwareProfile, OcqError, RunMode
+from ocq.types import (
+    ONE_GPU,
+    TENSOR_PARALLEL,
+    FactKind,
+    FitLevel,
+    GpuProfile,
+    HardwareProfile,
+    OcqError,
+    RunMode,
+)
 
 
 def make_hardware(
@@ -406,3 +420,36 @@ def test_known_architecture_keeps_its_context_memory(qwen_tensors):
     option = options_by_label(qwen_snapshot(qwen_tensors, hardware), hardware)["Q4_K_M"]
     assert option.context_known
     assert option.fit_level == FitLevel.PERFECT
+
+
+# Several GPUs: Qwen2.5-72B at 4 bits needs about 46 GB, one RTX 3090 has 24.
+
+
+def test_72b_runs_fully_on_two_3090s_split_by_layers():
+    one, two = nvidia_pc(RTX_3090), nvidia_pc(RTX_3090, RTX_3090_BUSY)
+    on_one = options_by_label(real_snapshot(QWEN_72B, one), one)["Q4_K_M"]
+    on_two = options_by_label(real_snapshot(QWEN_72B, two), two)["Q4_K_M"]
+    assert on_one.run_mode == RunMode.GPU_OFFLOAD
+    assert on_two.run_mode == RunMode.GPU  # was GPU_OFFLOAD: only one card counted
+    assert on_two.gpu_count == 2
+    assert on_two.memory_available_gb == pytest.approx(23.44 + 22.46)
+    # The cards take turns, so the limit is one card's speed, not double.
+    assert on_two.estimated_tps == pytest.approx(936e9 / 1024**3 / on_two.weights_gb, abs=0.1)
+
+
+def test_awq_on_two_3090s_is_tensor_parallel_and_reads_twice_as_fast():
+    two = nvidia_pc(RTX_3090, RTX_3090_BUSY)
+    awq = options_by_label(real_snapshot(QWEN_72B, two), two)["AWQ 4-bit"]
+    assert awq.gpu_split == TENSOR_PARALLEL
+    assert awq.memory_available_gb == pytest.approx(2 * 22.46)  # 2 x the smaller free VRAM
+    assert awq.estimated_tps == pytest.approx(2 * 936e9 / 1024**3 / awq.weights_gb, abs=0.1)
+
+
+def test_a_model_that_fits_on_the_fast_card_stays_off_the_slow_one(qwen_tensors):
+    mixed = nvidia_pc(RTX_3090, RTX_3060)
+    q4 = options_by_label(qwen_snapshot(qwen_tensors, mixed), mixed)["Q4_K_M"]
+    assert q4.gpu_names == ("NVIDIA GeForce RTX 3090",)
+    assert q4.gpu_split == ONE_GPU
+    # Identical cards are as fast split as alone, and split has more room.
+    pair = nvidia_pc(RTX_3090, RTX_3090)
+    assert options_by_label(qwen_snapshot(qwen_tensors, pair), pair)["Q4_K_M"].gpu_count == 2
