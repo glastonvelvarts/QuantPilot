@@ -297,3 +297,62 @@ def test_ocq_models_lists_what_runs_and_hides_partial_downloads(tmp_path, monkey
 
     result = CliRunner().invoke(app, ["models", "--all"], env={"COLUMNS": "200"})
     assert "org/settings-only" in result.output and "only config.json" in result.output
+
+
+def test_ocq_models_rates_each_model_as_stored_offline(tmp_path, monkeypatch):
+    from conftest import MLX_QWEN, QWEN, RTX_3090, nvidia_pc, real_model, write_safetensors
+
+    from ocq import cli
+
+    folders = tmp_path / "models"
+    # An MLX model as LM Studio saves it: config.json and the safetensors, real headers.
+    _, config, tensors, dtypes = real_model(MLX_QWEN)
+    mlx = folders / "mlx-community" / "Qwen2.5-0.5B-Instruct-4bit"
+    mlx.mkdir(parents=True)
+    (mlx / "config.json").write_text(json.dumps(config))
+    write_safetensors(mlx / "model.safetensors", tensors, dtypes)
+    (folders / "tiny-Q8_0.gguf").write_bytes(tiny_gguf())
+    (folders / "broken-Q4_K_M.gguf").write_bytes(b"GGUF" + b"\0" * 8)  # a cut-off download
+    damaged = folders / "damaged"
+    damaged.mkdir()
+    (damaged / "config.json").write_text(json.dumps(config))
+    (damaged / "model.safetensors").write_bytes(b"not a safetensors file")
+    # A complete download in the Hugging Face cache, real config and headers.
+    _, qwen_config, qwen_tensors, qwen_dtypes = real_model(QWEN)
+    write_safetensors(tmp_path / "weights", qwen_tensors, qwen_dtypes)
+    hf_repo(
+        tmp_path / "hub",
+        QWEN,
+        {
+            "config.json": json.dumps(qwen_config).encode(),
+            "model.safetensors": (tmp_path / "weights").read_bytes(),
+        },
+    )
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    network = []
+    monkeypatch.setattr("ocq.model_analyzer.fetch_hf_model", lambda *a: network.append(a) or {})
+
+    def rows(hardware, *more) -> dict[str, str]:
+        monkeypatch.setattr(cli, "detect_hardware", lambda _bin: hardware)
+        args = ["models", "--dir", str(folders), *more]
+        result = CliRunner().invoke(cli.app, args, env={"COLUMNS": "250"})
+        assert result.exit_code == 0, result.output
+        return {
+            line.split("│")[1].strip(): line for line in result.output.splitlines() if "│" in line
+        }
+
+    on_nvidia = rows(nvidia_pc(RTX_3090))
+    tiny = on_nvidia["models/tiny-Q8_0.gguf"]
+    assert "Perfect" in tiny and "gpu" in tiny
+    assert "│ ?" in on_nvidia["damaged"]  # listed with a question mark, the others still rated
+    assert "models/broken-Q4_K_M.gguf" not in on_nvidia  # cut off: a partial download
+    assert "header unreadable" in str(rows(nvidia_pc(RTX_3090), "--all"))
+    assert "needs a Mac" in on_nvidia["mlx-community/Qwen2.5-0.5B-Instruct-4bit"]
+    assert "Perfect" in on_nvidia[QWEN]
+    assert not network  # every fit comes from the files on disk, not the Hub
+
+    mac = nvidia_pc(RTX_3090)
+    from dataclasses import replace
+
+    mac = replace(mac, backend="Metal", unified_memory=True)
+    assert "Perfect" in rows(mac)["mlx-community/Qwen2.5-0.5B-Instruct-4bit"]
