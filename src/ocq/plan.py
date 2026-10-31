@@ -116,6 +116,11 @@ def generate_plan(
 
 def already_quantized(model: ModelSnapshot) -> str:
     """Quantizing quantized weights again stacks the rounding errors. Point to the original."""
+    if model.gguf_files:
+        return (
+            f"{model.model_id} is already GGUF ({model.facts.quantization.note}). Run it with "
+            "llama.cpp, Ollama or LM Studio: ocq feasibility shows which file fits this PC."
+        )
     message = (
         f"{model.model_id} is already quantized ({model.facts.quantization.value}). "
         "Quantizing it again would stack the rounding errors"

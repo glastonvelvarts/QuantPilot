@@ -284,3 +284,146 @@ def quant_from_filename(name: str) -> str:
     """The quantization in a GGUF file name, for example Q4_K_M in model-Q4_K_M.gguf."""
     match = QUANT_IN_NAME.search(Path(name).name)
     return match.group(1).upper() if match else ""
+
+
+# llama.cpp's sliding-window pattern by architecture, when the file does not carry one:
+# every Nth layer is full attention, the others slide (llama_hparams::set_swa_pattern).
+SWA_PATTERNS = {"gemma2": 2, "gemma3": 6, "gpt-oss": 2, "cohere2": 4}
+# Architectures whose window llama.cpp switches off (src/models/phi3.cpp: swa_type NONE).
+SWA_DISABLED = ("phi3", "phimoe")
+
+
+def config_from_gguf(header: GgufHeader) -> dict:
+    """The header's settings in config.json's terms, so the same code sizes both."""
+    arch, get = header.architecture, header.get
+    layers = get("block_count") or 0
+    heads = get("attention.head_count")
+    if isinstance(heads, list):
+        heads = max(heads)
+    kv_heads = get("attention.head_count_kv", heads)
+    hidden = get("embedding_length")
+    config: dict[str, Any] = {
+        "model_type": arch,
+        "architectures": [f"{arch} (GGUF)"],
+        "num_hidden_layers": layers,
+        "hidden_size": hidden,
+        "num_attention_heads": heads,
+        "num_key_value_heads": max(kv_heads) if isinstance(kv_heads, list) else kv_heads,
+        "max_position_embeddings": get("context_length"),
+        "vocab_size": get("vocab_size") or embedding_rows(header),
+        # GGUF has no such setting: the embeddings are tied when there is no output tensor.
+        "tie_word_embeddings": not any(t.name == "output.weight" for t in header.tensors),
+    }
+    key, value = get("attention.key_length"), get("attention.value_length")
+    if key and value:
+        config["head_dim"] = (key + value) // 2  # keys and values together, per head
+    if (get("expert_count") or 0) > 1:
+        config["num_experts"] = get("expert_count")
+        config["num_experts_per_tok"] = get("expert_used_count")
+    if get("attention.kv_lora_rank"):  # MLA (DeepSeek)
+        config["kv_lora_rank"] = get("attention.kv_lora_rank")
+        config["qk_rope_head_dim"] = get("rope.dimension_count", 0)
+    if get("shortconv.l_cache"):  # LFM2
+        config["conv_L_cache"] = get("shortconv.l_cache")
+    if get("ssm.state_size") and arch != "qwen3next":  # Qwen3-Next's linear attention differs
+        config["mamba_d_state"] = get("ssm.state_size")
+        config["mamba_d_conv"] = get("ssm.conv_kernel", 4)
+        if get("ssm.group_count"):  # Mamba-2: time_step_rank is the head count
+            config["mamba_n_heads"] = get("ssm.time_step_rank")
+            config["mamba_d_ssm"] = get("ssm.inner_size")
+            config["mamba_n_groups"] = get("ssm.group_count")
+        else:  # Mamba-1
+            config["mamba_expand"] = get("ssm.inner_size") // hidden
+
+    window = get("attention.sliding_window") or 0
+    if arch in SWA_DISABLED:
+        window = 0
+    kinds = layer_types(header, layers, kv_heads, window)
+    if kinds:
+        config["layer_types"] = kinds
+    if window:
+        config["sliding_window"] = window
+    return config
+
+
+def embedding_rows(header: GgufHeader) -> int:
+    """The vocabulary size: one row of the embedding table per token (ggml lists it second)."""
+    for tensor in header.tensors:
+        if tensor.name == "token_embd.weight" and len(tensor.shape) == 2:
+            return tensor.shape[1]
+    return len(header.settings.get("tokenizer.ggml.tokens", []))
+
+
+def layer_types(header: GgufHeader, layers: int, kv_heads, window: int) -> list[str] | None:
+    """Each layer's kind, as config.json's layer_types would name it. None when every layer is
+    plain full attention."""
+    has = {index: set() for index in range(layers)}
+    for tensor in header.tensors:
+        parts = tensor.name.split(".")
+        if parts[0] == "blk" and parts[1].isdigit() and int(parts[1]) < layers:
+            has[int(parts[1])].add(parts[2])
+    pattern = header.get("attention.sliding_window_pattern", SWA_PATTERNS.get(header.architecture))
+    kinds = []
+    for index in range(layers):
+        heads = kv_heads[index] if isinstance(kv_heads, list) else kv_heads
+        if not heads:
+            if any(name.startswith("ssm") for name in has[index]):
+                kinds.append("linear_attention" if header.architecture == "qwen3next" else "mamba")
+            elif any(name.startswith("shortconv") for name in has[index]):
+                kinds.append("conv")
+            else:
+                kinds.append("mlp")
+        elif window and isinstance(pattern, list):
+            kinds.append("sliding_attention" if pattern[index] else "full_attention")
+        elif window and pattern:
+            # llama.cpp: a layer slides when index % pattern < pattern - 1.
+            sliding = index % pattern < pattern - 1
+            kinds.append("sliding_attention" if sliding else "full_attention")
+        elif window:
+            kinds.append("sliding_attention")
+        else:
+            kinds.append("full_attention")
+    if set(kinds) == {"full_attention"}:
+        return None
+    return kinds
+
+
+GGUF_NAMES = [
+    (re.compile(r"^token_embd\.weight$"), "model.embed_tokens.weight"),
+    (re.compile(r"^output\.weight$"), "lm_head.weight"),
+    (re.compile(r"^blk\.(\d+)\.attn_q\.(.+)$"), r"model.layers.\1.self_attn.q_proj.\2"),
+    (re.compile(r"^blk\.(\d+)\.attn_k\.(.+)$"), r"model.layers.\1.self_attn.k_proj.\2"),
+    (re.compile(r"^blk\.(\d+)\.attn_v\.(.+)$"), r"model.layers.\1.self_attn.v_proj.\2"),
+    (re.compile(r"^blk\.(\d+)\.attn_qkv\.(.+)$"), r"model.layers.\1.self_attn.qkv_proj.\2"),
+    (re.compile(r"^blk\.(\d+)\.attn_output\.(.+)$"), r"model.layers.\1.self_attn.o_proj.\2"),
+    (
+        re.compile(r"^blk\.(\d+)\.attn_kv_a_mqa\.(.+)$"),
+        r"model.layers.\1.self_attn.kv_a_proj_with_mqa.\2",
+    ),
+    (
+        re.compile(r"^blk\.(\d+)\.ffn_(gate|up|down)_exps\.(.+)$"),
+        r"model.layers.\1.mlp.experts.\2_proj",
+    ),
+    (
+        re.compile(r"^blk\.(\d+)\.ffn_(gate|up|down)_shexp\.(.+)$"),
+        r"model.layers.\1.mlp.shared_experts.\2_proj.\3",
+    ),
+    (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.(.+)$"), r"model.layers.\1.mlp.gate.\2"),
+    (re.compile(r"^blk\.(\d+)\.ffn_(gate|up|down)\.(.+)$"), r"model.layers.\1.mlp.\2_proj.\3"),
+    (re.compile(r"^blk\.(\d+)\.(ssm_.+)$"), r"model.layers.\1.mamba.\2"),
+    (re.compile(r"^blk\.(\d+)\.(.+)$"), r"model.layers.\1.\2"),
+]
+
+
+def hf_style_tensors(header: GgufHeader) -> list[tuple[str, tuple[int, ...]]]:
+    """The tensor table with Hugging Face style names and shapes (ggml lists dimensions the
+    other way round), so the safetensors code reads it: k_proj widths, experts, embeddings."""
+    tensors = []
+    for tensor in header.tensors:
+        name = tensor.name
+        for pattern, replacement in GGUF_NAMES:
+            if pattern.match(name):
+                name = pattern.sub(replacement, name)
+                break
+        tensors.append((name, tuple(reversed(tensor.shape))))
+    return tensors

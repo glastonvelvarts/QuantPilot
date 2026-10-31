@@ -17,6 +17,12 @@ from ocq.types import OcqError
 def parse_model_ref(ref: str) -> tuple[str, Path | None]:
     """Return (display_id, local_dir). HuggingFace ids pass through with local_dir=None."""
     path = Path(ref).expanduser()
+    if path.is_file() and path.suffix.lower() == ".gguf":
+        resolved = path.resolve()
+        return f"local/{resolved.name}", resolved
+    if path.is_dir() and gguf_files(path) and not (path / "config.json").is_file():
+        resolved = path.resolve()
+        return f"local/{resolved.name}", resolved
     if path.is_dir():
         problem = validate_hf_folder(path)
         if problem:
@@ -49,6 +55,11 @@ def validate_hf_folder(path: Path) -> str | None:
             )
         return f"{path} has no *.safetensors weight files."
     return None
+
+
+def gguf_files(folder: Path) -> list[Path]:
+    """The GGUF model files of a folder. mmproj files are vision projectors, not models."""
+    return sorted(f for f in folder.glob("*.gguf") if not f.name.lower().startswith("mmproj"))
 
 
 def weight_files(folder: Path) -> list[Path]:
