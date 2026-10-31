@@ -202,7 +202,8 @@ def cmd_profile(llmfit_bin: LlmfitBin = None) -> None:
         if gpu.measured_bandwidth_gbs > 0:
             speeds.append(f"{gpu.measured_bandwidth_gbs:.1f} GB/s live")
         speed = f" ({', '.join(speeds)})" if speeds else ""
-        table.add_row(f"GPU {index}", f"{gpu.name} - {vram}{speed}")
+        cards = f" x{gpu.count}" if gpu.count > 1 else ""
+        table.add_row(f"GPU {index}", f"{gpu.name}{cards} - {vram}{speed}")
     if hw.has_gpu and hw.pcie_bandwidth_gbs > 0 and not hw.unified_memory:
         table.add_row("PCIe Bandwidth", f"{hw.pcie_bandwidth_gbs:.1f} GB/s")
     table.add_row("Free disk", f"{free_disk_gb(Path.cwd()):.0f} GB (current folder)")
@@ -348,7 +349,8 @@ def cmd_feasibility(
             f"Params: {snapshot.parameter_count} | Use case: {snapshot.use_case}\n"
             f"Sizes: {sizes}\n"
             f"Context: {context} tokens\n"
-            f"Free right now: {hw.free_vram_gb:.2f} GB VRAM, {hw.available_ram_gb:.2f} GB RAM\n"
+            f"Free right now: {hw.free_vram_gb:.2f} GB VRAM{gpu_note(hw)}, "
+            f"{hw.available_ram_gb:.2f} GB RAM\n"
             f"Best fit: {colored_fit(fit.fit_level)} ({fit.run_mode}) @ {fit.quant_label}, "
             f"{fit.memory_required_gb:.2f} of {fit.memory_available_gb:.2f} GB "
             f"({fit.utilization_pct:.0f}%)",
@@ -376,7 +378,7 @@ def cmd_feasibility(
             f"{option.context_gb:.2f}" if option.context_known else "?",
             f"{option.memory_required_gb:.2f}",
             colored_fit(option.fit_level),
-            str(option.run_mode).replace("gpu_offload", "gpu+ram"),
+            runs_on(option),
             speed_cell(option),
         )
     console.print(table)
@@ -411,6 +413,11 @@ def cmd_feasibility(
         )
 
 
+def gpu_note(hardware) -> str:
+    cards = hardware.cards
+    return f" on {len(cards)} GPUs" if len(cards) > 1 and not hardware.unified_memory else ""
+
+
 def backend_cell(option, hardware) -> str:
     if option.row_kind == "stored":
         return "original"
@@ -424,6 +431,14 @@ def backend_cell(option, hardware) -> str:
     ready, _ = get_quantizer(algorithm).check(hardware)
     name = algorithm.value
     return name if ready else f"{name} [dim](install --extra {name})[/dim]"
+
+
+def runs_on(option) -> str:
+    """gpu, gpu+ram or cpu, with the number of GPUs when it uses more than one."""
+    where = str(option.run_mode).replace("gpu_offload", "gpu+ram")
+    if option.gpu_count > 1:
+        where = where.replace("gpu", f"{option.gpu_count} gpus")
+    return where
 
 
 def speed_cell(option) -> str:

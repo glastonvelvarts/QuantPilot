@@ -16,6 +16,8 @@ from ocq.local_model import NO_TOKENIZER, has_tokenizer
 from ocq.model_analyzer import predict_for_config
 from ocq.quantizers import get_quantizer
 from ocq.types import (
+    LAYER_SPLIT,
+    TENSOR_PARALLEL,
     HardwareProfile,
     ModelSnapshot,
     OcqError,
@@ -53,6 +55,9 @@ def generate_plan(
             f"unknown amount for a {config.context} token context "
             f"({predicted.fit_level}, {predicted.run_mode})"
         )
+    gpus = gpu_setup(predicted, hardware)
+    if gpus:
+        rationale.append(gpus)
     rationale.append(f"Speed: {describe_speed(predicted, config)}")
     if config.algorithm == QuantAlgorithm.BNB and config.bits == 4:
         rationale.append(double_quant_note(model, hardware, config, predicted))
@@ -107,6 +112,34 @@ def already_quantized(model: ModelSnapshot) -> str:
     if base:
         return f"{message}; quantize the original instead: ocq optimize {base}"
     return f"{message}. Quantize the original model instead. (ocq feasibility shows if it fits.)"
+
+
+def gpu_setup(option: QuantOption, hardware: HardwareProfile) -> str:
+    """How the model uses a PC with several GPUs. Empty with one GPU or none."""
+    cards = hardware.cards
+    if len(cards) < 2 or hardware.unified_memory or not option.gpu_count:
+        return ""
+    names = " + ".join(option.gpu_names)
+    if option.gpu_split == TENSOR_PARALLEL:
+        return (
+            f"GPUs: tensor parallel over {option.gpu_count} GPUs ({names}), each holding an "
+            f"equal slice. Serve with vLLM --tensor-parallel-size {option.gpu_count}."
+        )
+    if option.gpu_split == LAYER_SPLIT:
+        return (
+            f"GPUs: layers split over {option.gpu_count} GPUs ({names}). llama.cpp and "
+            "transformers spread a model over every GPU by themselves."
+        )
+    if option.row_kind in (QuantAlgorithm.AWQ.value, QuantAlgorithm.GPTQ.value, "nvfp4"):
+        return (
+            f"GPUs: runs on the {names} alone. Tensor parallel gives every GPU an equal slice, "
+            "so with these GPUs or this model's head count more GPUs would not hold more."
+        )
+    return (
+        f"GPUs: runs on the {names} alone. It fits there, and layers on the slower GPUs would "
+        "lower the speed. llama.cpp spreads over every GPU unless you pick one, for example "
+        "with CUDA_VISIBLE_DEVICES."
+    )
 
 
 def double_quant_note(

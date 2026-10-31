@@ -38,6 +38,7 @@ def predict_speed(
     vram_gb: float,
     hardware: HardwareProfile,
     use_measurements: bool = True,
+    gpu_read_speed: float | None = None,
 ) -> tuple[float, str]:
     """Returns tokens per second and where the number comes from.
 
@@ -46,7 +47,7 @@ def predict_speed(
     if run_mode == RunMode.UNFIT or weights_gb <= 0:
         return 0.0, UPPER_BOUND
 
-    limit = bandwidth_limit(weights_gb, run_mode, vram_gb, hardware)
+    limit = bandwidth_limit(weights_gb, run_mode, vram_gb, hardware, gpu_read_speed)
     device = {RunMode.GPU: "gpu", RunMode.CPU: "cpu"}.get(run_mode)
     runs = [run for run in load() if run["device"] == device] if use_measurements else []
     fitted = fit_runs(runs)
@@ -59,13 +60,21 @@ def predict_speed(
 
 
 def bandwidth_limit(
-    weights_gb: float, run_mode: RunMode, vram_gb: float, hardware: HardwareProfile
+    weights_gb: float,
+    run_mode: RunMode,
+    vram_gb: float,
+    hardware: HardwareProfile,
+    gpu_read_speed: float | None = None,
 ) -> float:
-    """Each new token reads every weight once, so memory bandwidth caps the speed."""
+    """Each new token reads every weight once, so memory bandwidth caps the speed.
+
+    gpu_read_speed is how fast the GPUs in use read the weights together (see GpuPool);
+    without it, the largest GPU's speed.
+    """
     gpu = hardware.primary_gpu
-    gpu_speed = 0.0
-    if gpu is not None:
-        gpu_speed = gpu.measured_bandwidth_gbs or gpu.bandwidth_gbs * 1e9 / GB
+    gpu_speed = gpu_read_speed or 0.0
+    if gpu_read_speed is None and gpu is not None:
+        gpu_speed = gpu.read_speed
     cpu_speed = (hardware.ram_bandwidth_gbs or hardware.measured_ram_bandwidth_gbs) * 1e9 / GB
 
     if run_mode == RunMode.GPU and gpu_speed:
