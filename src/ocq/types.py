@@ -520,6 +520,18 @@ class ModelSnapshot:
         quantization = self.facts.quantization
         return quantization.known and quantization.value != "none"
 
+    def facts_summary(self) -> str:
+        """How sure the facts behind the sizes are, in one line, for feasibility and plan."""
+        facts = self.facts
+        if not facts.parameters.known and self.catalog_source == "llmfit":
+            return "from llmfit's catalog, not read from the model's files"
+        parts = [f"parameters {facts.parameters.kind}", f"context memory {facts.kv_cache.kind}"]
+        if self.is_moe:
+            parts.append(f"used per token {facts.active_parameters.kind}")
+        if self.is_quantized:
+            parts.append(f"quantization {facts.quantization.kind}")
+        return ", ".join(parts) + " (sources: ocq inspect)"
+
     @property
     def read_fraction(self) -> float:
         """Share of the weights read for each token: below 1 for mixture-of-experts models,
