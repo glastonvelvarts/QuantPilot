@@ -872,3 +872,15 @@ def test_layer_types_of_the_wrong_length_are_flagged():
 def test_known_state_layer_names_are_not_flagged():
     snap = real_snapshot(GRANITE_H)  # layer_types "mamba" and "attention"
     assert "unknown layer kind" not in snap.facts.kv_cache.note
+
+
+def test_facts_summary_says_how_sure_the_sizes_are():
+    assert real_snapshot(QWEN3_MOE).facts_summary() == (
+        "parameters cross-checked, context memory cross-checked, used per token cross-checked "
+        "(sources: ocq inspect)"
+    )
+    assert "quantization cross-checked" in real_snapshot(QWEN_GPTQ).facts_summary()
+    from ocq.types import ModelSnapshot
+
+    catalog_only = ModelSnapshot(model_id="org/model", params_b=7.0, catalog_source="llmfit")
+    assert catalog_only.facts_summary() == "from llmfit's catalog, not read from the model's files"

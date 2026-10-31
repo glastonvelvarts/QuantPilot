@@ -370,6 +370,7 @@ def cmd_feasibility(
             f"[bold]{snapshot.model_id}[/bold]\n"
             f"Params: {snapshot.parameter_count} | Use case: {snapshot.use_case}\n"
             f"Sizes: {sizes}\n"
+            f"Facts: {snapshot.facts_summary()}\n"
             f"Context: {context} tokens\n"
             f"Free right now: {hw.free_vram_gb:.2f} GB VRAM{gpu_note(hw)}, "
             f"{hw.available_ram_gb:.2f} GB RAM\n"
