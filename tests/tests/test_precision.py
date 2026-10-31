@@ -123,8 +123,19 @@ def test_benchmark_runs_llama_cpp_with_the_planned_cache(tmp_path, monkeypatch):
         output_dir=tmp_path,
         hardware=None,
         quant_config=SimpleNamespace(context=4096, kv_cache="q8_0"),
+        predicted=None,
     )
     gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
     assert len(commands) == 2  # the sample answer (llama-completion), the speed (llama-bench)
     for command in commands:
         assert command[-4:] == ["-ctk", "q8_0", "-ctv", "q8_0"]
+
+    # A mixture of experts planned with the experts of 5 layers in RAM.
+    commands.clear()
+    plan.predicted = SimpleNamespace(experts_in_ram=5)
+    result = gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
+    completion, bench = commands
+    assert completion[-2:] == ["--n-cpu-moe", "5"]
+    assert bench[-2:] == ["-ncmoe", "5"]
+    # Not a plain GPU run, so it is kept out of this PC's GPU speed history.
+    assert result.device == "gpu (experts of 5 layers in ram)"

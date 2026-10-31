@@ -96,6 +96,9 @@ class GGUFQuantizer(Quantizer):
         # attention, which llama.cpp's default (-fa auto) switches on by itself.
         cache = plan.quant_config.kv_cache
         cache_flags = [] if cache == "f16" else ["-ctk", cache, "-ctv", cache]
+        # Mixture of experts that does not fit in VRAM: the experts of the first layers in RAM.
+        experts = plan.predicted.experts_in_ram if plan.predicted else 0
+        moe_flags = ["--n-cpu-moe", str(experts)] if experts else []
 
         # One real answer: the sample text, the time to first token, and where the layers ran.
         text, log = run_tool(
@@ -116,6 +119,7 @@ class GGUFQuantizer(Quantizer):
                 "--log-verbosity",
                 "4",
                 *cache_flags,
+                *moe_flags,
             ],
             log=workspace / "benchmark.log",
         )
@@ -128,6 +132,9 @@ class GGUFQuantizer(Quantizer):
             device = "gpu"
             if on_gpu.group(1) != on_gpu.group(2):
                 device = f"gpu+cpu ({on_gpu.group(1)}/{on_gpu.group(2)} layers on gpu)"
+            elif experts:
+                # Not a plain GPU run, so it does not go into this PC's GPU speed history.
+                device = f"gpu (experts of {experts} layers in ram)"
 
         # Speed comes from llama-bench: a fixed number of tokens, repeated, then averaged.
         report, _ = run_tool(
@@ -146,6 +153,7 @@ class GGUFQuantizer(Quantizer):
                 "-o",
                 "json",
                 *cache_flags,
+                *(["-ncmoe", str(experts)] if experts else []),
             ],
             log=workspace / "speed.log",
         )

@@ -139,6 +139,8 @@ QWEN3_MOE = "Qwen/Qwen3-30B-A3B"  # 128 experts, 8 per token, one tensor per exp
 DEEPSEEK_V2_LITE = "deepseek-ai/DeepSeek-V2-Lite-Chat"  # + 2 shared experts, layer 0 dense
 MIXTRAL = "mistralai/Mixtral-8x7B-Instruct-v0.1"  # 8 experts, 2 per token
 GPT_OSS = "openai/gpt-oss-20b"  # 32 experts fused in one tensor, MXFP4 quantized
+OLMOE = "allenai/OLMoE-1B-7B-0924-Instruct"  # 64 experts, 8 per token
+GRANITE_MOE = "ibm-granite/granite-3.1-1b-a400m-instruct"  # 32 experts fused, 3-D, no "experts"
 # Sliding-window attention (Google's own Gemma repos are gated; unsloth's carry the same config).
 GEMMA3_1B = "unsloth/gemma-3-1b-it"  # 22 of 26 layers keep the last 512 tokens
 GEMMA2_2B = "unsloth/gemma-2-2b-it"  # every other layer keeps the last 4,096 tokens

@@ -61,6 +61,8 @@ def generate_plan(
     gpus = gpu_setup(predicted, hardware)
     if gpus:
         rationale.append(gpus)
+    if predicted.experts_in_ram:
+        rationale.append(experts_note(model, predicted))
     if config.kv_cache != "f16":
         rationale.append(kv_cache_note(config))
     rationale.append(f"Speed: {describe_speed(predicted, config)}")
@@ -117,6 +119,17 @@ def already_quantized(model: ModelSnapshot) -> str:
     if base:
         return f"{message}; quantize the original instead: ocq optimize {base}"
     return f"{message}. Quantize the original model instead. (ocq feasibility shows if it fits.)"
+
+
+def experts_note(model: ModelSnapshot, option: QuantOption) -> str:
+    """Mixture of experts in llama.cpp with the experts of some layers kept in RAM."""
+    layers = option.experts_in_ram
+    return (
+        f"Experts: the experts of the first {layers} of {model.num_layers} layers stay in RAM, "
+        "attention, the context and everything else in VRAM. Run llama.cpp with "
+        f"--n-cpu-moe {layers}. A token uses only {model.experts_per_token} of "
+        f"{model.experts} experts, so far less is read from RAM than with whole layers there."
+    )
 
 
 def kv_cache_note(config: QuantConfig) -> str:
