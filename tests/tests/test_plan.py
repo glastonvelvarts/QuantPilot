@@ -199,3 +199,14 @@ def test_plan_promises_vllm_fp8_cache_only_on_a_capable_gpu():
     line = next(line for line in plan.rationale if line.startswith("Context cache"))
     assert "--kv-cache-dtype fp8" in line
     assert "no 4-bit cache" in line
+
+
+def test_mlx_models_are_pointed_to_apple_silicon():
+    from conftest import MLX_QWEN, real_model
+
+    from ocq.model_analyzer import build_snapshot
+    from ocq.plan import already_quantized
+
+    meta, config, tensors, dtypes = real_model(MLX_QWEN)
+    snap = build_snapshot(MLX_QWEN, meta, config, tensors, None, 4096, dtypes)
+    assert "mlx-lm or LM Studio on an Apple Silicon Mac" in already_quantized(snap)

@@ -102,13 +102,15 @@ uv run ocq inspect ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf     # a file, or a f
 
 The tensor table is checked against the file size, and the context memory computed from a GGUF header matches llama.cpp's own log (Gemma 2/3, LFM2, Granite 4.0-H, Falcon-H1, Jamba).
 
-**Already-quantized repos** (GPTQ, AWQ, bitsandbytes, FP8, W8A8, NVFP4, MXFP4) are recognised. `feasibility` shows them as stored, and `plan` / `optimize` refuse to quantize them again, since that would stack the rounding errors. They point you to the original instead:
+**Already-quantized repos** (GPTQ, AWQ, bitsandbytes, FP8, W8A8, NVFP4, MXFP4, MLX) are recognised. `feasibility` shows them as stored, and `plan` / `optimize` refuse to quantize them again, since that would stack the rounding errors. They point you to the original instead:
 
 ```
 Error: Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int4 is already quantized (GPTQ 4-bit). Quantizing it
 again would stack the rounding errors; quantize the original instead: ocq optimize
 Qwen/Qwen2.5-1.5B-Instruct
 ```
+
+**MLX models** (mlx-community, LM Studio's MLX downloads) are read from MLX's own `quantization` settings, including layers it stored at another bit width (for example the 8-bit layers of `gpt-oss-20b-MXFP4-Q8`, whose count then matches the original gpt-oss to the weight). MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio); on any other PC `feasibility` says so.
 
 Optional: `ocq recommend` suggests models from the [llmfit](https://github.com/AlexsJones/llmfit) catalog when available.
 

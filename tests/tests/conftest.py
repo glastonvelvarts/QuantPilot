@@ -134,6 +134,10 @@ QWEN3_8B_NVFP4 = "nvidia/Qwen3-8B-NVFP4"
 # Written by `ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct -b nvfp4 --execute` (llm-compressor).
 OCQ_NVFP4 = "ocq/SmolLM2-135M-Instruct-nvfp4a16"
 QWEN_72B = "Qwen/Qwen2.5-72B-Instruct"
+# MLX (Apple): 4-bit weights packed 8 to a U32, with .scales and .biases per 64 weights.
+MLX_QWEN = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+# MLX MXFP4 experts with 122 layers at 8-bit, each listed in config.json.
+MLX_GPT_OSS = "mlx-community/gpt-oss-20b-MXFP4-Q8"
 # Mixtures of experts, each laying its experts out differently.
 QWEN3_MOE = "Qwen/Qwen3-30B-A3B"  # 128 experts, 8 per token, one tensor per expert
 DEEPSEEK_V2_LITE = "deepseek-ai/DeepSeek-V2-Lite-Chat"  # + 2 shared experts, layer 0 dense
