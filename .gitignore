@@ -12,3 +12,4 @@ ocq-output/
 # OS / IDE
 .DS_Store
 .idea/
+data/

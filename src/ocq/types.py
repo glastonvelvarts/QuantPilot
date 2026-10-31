@@ -8,8 +8,29 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I8": 1, "U8": 1}
-
+# Bits per element of every type a safetensors header can name (safetensors 0.6).
+DTYPE_BITS = {
+    "F64": 64,
+    "I64": 64,
+    "U64": 64,
+    "F32": 32,
+    "I32": 32,
+    "U32": 32,
+    "F16": 16,
+    "BF16": 16,
+    "I16": 16,
+    "U16": 16,
+    "F8_E4M3": 8,
+    "F8_E5M2": 8,
+    "F8_E8M0": 8,
+    "I8": 8,
+    "U8": 8,
+    "BOOL": 8,
+    "F6_E2M3": 6,
+    "F6_E3M2": 6,
+    "F4": 4,
+}
+INTEGER_TYPES = ("I64", "U64", "I32", "U32", "I16", "U16", "I8", "U8")
 
 FLOAT_TYPES = ("F32", "BF16", "F16")
 
@@ -20,6 +41,40 @@ BLACKWELL_NAMES = re.compile(r"blackwell|rtx 50[5-9]0|\bg?b(100|200|300)\b|\bgb1
 
 class OcqError(RuntimeError):
     pass
+
+
+class FactKind(str, Enum):
+    EXACT = "exact"  # read from one of the model's files
+    CROSS_CHECKED = "cross-checked"  # read from two sources that agree
+    ESTIMATE = "estimate"  # derived, or the sources disagree
+    UNKNOWN = "unknown"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True)
+class Fact:
+    """One thing known about a model, where it was read from and how sure that is."""
+
+    value: Any = None
+    source: str = ""
+    kind: FactKind = FactKind.UNKNOWN
+    note: str = ""
+
+    @property
+    def known(self) -> bool:
+        return self.kind != FactKind.UNKNOWN
+
+
+@dataclass(frozen=True)
+class ModelFacts:
+    parameters: Fact = Fact()  # int: weights as the model counts them, packed ones unpacked
+    precision: Fact = Fact()  # str: the type most weights are stored in
+    stored_bytes: Fact = Fact()  # int: bytes of every tensor in the weight files
+    architecture: Fact = Fact()  # str: model_type
+    context_length: Fact = Fact()  # int: tokens
+    quantization: Fact = Fact()  # str: "none", or a label such as "GPTQ 4-bit"
 
 
 class OptimizationGoal(str, Enum):
@@ -189,7 +244,7 @@ class FeasibilityEstimate:
     def runnable(self) -> bool:
         if isinstance(self.fit_level, FitLevel):
             return self.fit_level != FitLevel.TOO_TIGHT
-        return str(self.fit_level).lower() != "too tight"
+        return str(self.fit_level).lower() not in ("too tight", "unknown")
 
 
 @dataclass(frozen=True)
@@ -260,6 +315,7 @@ class ModelSnapshot:
 
     catalog_source: str = "llmfit"  # llmfit | huggingface | local
     weights_dir: Path | None = None  # local HuggingFace-format folder; skip Hub download
+    facts: ModelFacts = field(default_factory=ModelFacts)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -276,19 +332,20 @@ class ModelSnapshot:
 
     @property
     def stored_precision(self) -> str:
-        """F32, BF16 or F16: the type most of the weights are stored in. Empty when unknown."""
-        counts = (self.raw.get("safetensors") or {}).get("parameters") or {}
-        floats = {dtype: count for dtype, count in counts.items() if dtype in FLOAT_TYPES}
-        return max(floats, key=floats.get) if floats else ""
+        """F32, BF16 or F16: the type most of the weights are stored in. Empty otherwise."""
+        precision = self.facts.precision.value
+        return precision if precision in FLOAT_TYPES else ""
 
     @property
-    def original_gb(self) -> float:
-        """Size of the weights as the repo stores them, from HuggingFace's per-type counts."""
-        counts = (self.raw.get("safetensors") or {}).get("parameters") or {}
-        if counts:
-            stored = sum(count * DTYPE_BYTES.get(dtype, 2) for dtype, count in counts.items())
-            return stored / 1024**3
-        return self.params_b * 2e9 / 1024**3
+    def original_gb(self) -> float | None:
+        """Size of the weights as the repo stores them. None when it could not be read."""
+        stored = self.facts.stored_bytes
+        return stored.value / 1024**3 if stored.known else None
+
+    @property
+    def is_quantized(self) -> bool:
+        quantization = self.facts.quantization
+        return quantization.known and quantization.value != "none"
 
     @property
     def head_dim(self) -> int:

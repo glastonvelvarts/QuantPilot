@@ -14,8 +14,9 @@ from pathlib import Path
 from ocq import measurements
 from ocq.engine import default_group_size
 from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
-from ocq.local_model import fetch_local_model_files, local_hf_meta, parse_model_ref
+from ocq.local_model import fetch_local_model_files, parse_model_ref
 from ocq.model_size import (
+    QUANT_METADATA,
     Tensor,
     bnb_scale_bits,
     bnb_weights_bytes,
@@ -25,11 +26,18 @@ from ocq.model_size import (
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
+    parameters_by_type,
+    stored_bytes,
 )
 from ocq.types import (
+    DTYPE_BITS,
+    INTEGER_TYPES,
+    Fact,
+    FactKind,
     FeasibilityEstimate,
     FitLevel,
     HardwareProfile,
+    ModelFacts,
     ModelSnapshot,
     OcqError,
     QuantAlgorithm,
@@ -98,15 +106,16 @@ STARTER_MODELS = {
 
 def resolve_model(
     model_ref: str,
-    hardware: HardwareProfile,
+    hardware: HardwareProfile | None,
     llmfit_bin: str | None = None,
     context: int = DEFAULT_CONTEXT,
 ) -> ModelSnapshot:
+    """Read a model's facts from its files. Without hardware, the fit is not computed."""
     display_id, local_dir = parse_model_ref(model_ref)
     if local_dir is not None:
-        config, tensors, parameters = fetch_local_model_files(local_dir)
-        meta = local_hf_meta(parameters)
-        snapshot = build_snapshot(display_id, meta, config, tensors, hardware, context)
+        config, tensors, dtypes = fetch_local_model_files(local_dir)
+        meta = {"pipeline_tag": "local"}
+        snapshot = build_snapshot(display_id, meta, config, tensors, hardware, context, dtypes)
         return replace(
             snapshot,
             provider="local",
@@ -124,8 +133,8 @@ def resolve_model(
             return catalog
         raise
 
-    config, tensors = fetch_model_files(model_id, meta.get("sha", ""))
-    snapshot = build_snapshot(model_id, meta, config, tensors, hardware, context)
+    config, tensors, dtypes = fetch_model_files(model_id, meta.get("sha", ""))
+    snapshot = build_snapshot(model_id, meta, config, tensors, hardware, context, dtypes)
     if catalog:
         snapshot = replace(
             snapshot,
@@ -186,13 +195,14 @@ def fetch_hf_model(model_id: str) -> dict:
         raise OcqError(f"Could not reach HuggingFace: {exc.reason}") from exc
 
 
-def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor]]:
-    """config.json and every tensor's shape. Only file headers are read, never the weights."""
+def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor], dict[str, str]]:
+    """config.json, every tensor's shape and stored type. Only file headers are read."""
     cached = MODEL_CACHE / f"{model_id.replace('/', '--')}.json"
     try:
         saved = json.loads(cached.read_text())
         if saved["revision"] == revision:
-            return saved["config"], [(name, tuple(shape)) for name, shape in saved["tensors"]]
+            tensors = [(name, tuple(shape)) for name, shape in saved["tensors"]]
+            return saved["config"], tensors, saved["dtypes"]
     except (OSError, ValueError, KeyError):
         pass
 
@@ -212,20 +222,23 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor]]
     disable_progress_bars()
     try:
         metadata = get_safetensors_metadata(model_id)
-        tensors = [
-            (name, tuple(info.shape))
+        headers = [
+            (name, info)
             for file in metadata.files_metadata.values()
             for name, info in file.tensors.items()
         ]
     except (OSError, NotASafetensorsRepoError, SafetensorsParsingError):
-        tensors = []
+        headers = []
     finally:
         enable_progress_bars()
+    tensors = [(name, tuple(info.shape)) for name, info in headers]
+    dtypes = {name: info.dtype for name, info in headers}
 
     if config and tensors:
         MODEL_CACHE.mkdir(parents=True, exist_ok=True)
-        cached.write_text(json.dumps({"revision": revision, "config": config, "tensors": tensors}))
-    return config, tensors
+        saved = {"revision": revision, "config": config, "tensors": tensors, "dtypes": dtypes}
+        cached.write_text(json.dumps(saved))
+    return config, tensors, dtypes
 
 
 def build_snapshot(
@@ -233,27 +246,40 @@ def build_snapshot(
     meta: dict,
     config: dict,
     tensors: list[Tensor],
-    hardware: HardwareProfile,
+    hardware: HardwareProfile | None,
     context: int = DEFAULT_CONTEXT,
+    dtypes: dict[str, str] | None = None,
 ) -> ModelSnapshot:
-    if tensors:
-        parameters = sum(math.prod(shape) for _, shape in tensors)
-    else:
-        parameters = parameters_from_hf(meta, model_id)
+    facts = model_facts(model_id, meta, config, tensors, dtypes or {})
+    parameters = facts.parameters.value or 0
+    hint = parse_params_from_name(model_id)
 
     snapshot = ModelSnapshot(
         model_id=model_id,
         provider=model_id.split("/")[0] if "/" in model_id else "unknown",
-        parameter_count=format_params(parameters / 1e9) if parameters else "unknown (assuming 7B)",
-        params_b=(parameters or 7e9) / 1e9,
-        context_length=config.get("max_position_embeddings") or context_from_hf(meta),
+        parameter_count=(
+            format_params(parameters / 1e9)
+            if parameters
+            else f"unknown (name says {format_params(hint)})"
+            if hint
+            else "unknown"
+        ),
+        params_b=parameters / 1e9,
+        context_length=facts.context_length.value,
         use_case=str(meta.get("pipeline_tag") or "General"),
         is_moe=is_moe(meta, model_id),
         tensors=tuple(tensors),
         catalog_source="huggingface",
+        facts=facts,
         raw=meta,
         **architecture_from(config),
     )
+    if not parameters:
+        # No real count, so no fit verdict.
+        unknown = replace(snapshot.feasibility, fit_level="unknown", run_mode="unknown")
+        return replace(snapshot, feasibility=unknown)
+    if hardware is None:
+        return snapshot
 
     best = best_option(quant_options(snapshot, hardware, context))
     return replace(
@@ -282,11 +308,31 @@ def runtime_for_row(option: QuantOption) -> str:
     return "vLLM / transformers"
 
 
+# Where vision and multimodal models (Gemma 3, Llama 4, Idefics, LLaVA, InternVL) keep the
+# settings of their language model.
+NESTED_CONFIGS = ("text_config", "llm_config", "language_config")
+
+
+def text_config(config: dict) -> tuple[dict, str]:
+    """The settings of the language model, and the config.json key they were under ("" = top).
+
+    A nested block is merged over the top level, so values only found at the top still count.
+    """
+    if config.get("num_hidden_layers") or config.get("n_layer"):
+        return config, ""
+    for key in NESTED_CONFIGS:
+        nested = config.get(key)
+        if isinstance(nested, dict) and (nested.get("num_hidden_layers") or nested.get("n_layer")):
+            return config | {k: v for k, v in nested.items() if v is not None}, key
+    return config, ""
+
+
 def architecture_from(config: dict) -> dict:
-    layers = config.get("num_hidden_layers") or config.get("n_layer")
-    hidden = config.get("hidden_size") or config.get("n_embd") or config.get("d_model")
-    heads = config.get("num_attention_heads") or config.get("n_head")
-    vocab = config.get("vocab_size")
+    text, _ = text_config(config)
+    layers = text.get("num_hidden_layers") or text.get("n_layer")
+    hidden = text.get("hidden_size") or text.get("n_embd") or text.get("d_model")
+    heads = text.get("num_attention_heads") or text.get("n_head")
+    vocab = text.get("vocab_size")
     if not (layers and hidden and heads and vocab):
         return {}
     return {
@@ -294,16 +340,242 @@ def architecture_from(config: dict) -> dict:
         "num_layers": layers,
         "hidden_size": hidden,
         "num_attention_heads": heads,
-        "num_kv_heads": config.get("num_key_value_heads") or heads,
+        "num_kv_heads": text.get("num_key_value_heads") or heads,
         "vocab_size": vocab,
-        "attention_head_dim": config.get("head_dim") or 0,
+        "attention_head_dim": text.get("head_dim") or 0,
     }
+
+
+def model_facts(
+    model_id: str, meta: dict, config: dict, tensors: list[Tensor], dtypes: dict[str, str]
+) -> ModelFacts:
+    """Everything known about the model, each fact with its source and how sure it is."""
+    quantization, bits = quantization_fact(config, tensors, dtypes)
+    by_type = parameters_by_type(tensors, dtypes, bits) if tensors else None
+    return ModelFacts(
+        parameters=parameter_fact(meta, model_id, tensors, by_type, bits),
+        precision=precision_fact(meta, by_type, bits),
+        stored_bytes=stored_bytes_fact(meta, tensors, dtypes, bits),
+        architecture=architecture_fact(config, tensors),
+        context_length=context_fact(config, meta),
+        quantization=quantization,
+    )
+
+
+def quantization_config(config: dict) -> dict:
+    text, _ = text_config(config)
+    return text.get("quantization_config") or text.get("compression_config") or {}
+
+
+def quantized_bits(settings: dict) -> int:
+    """Bit width of the quantized weights. 0 when quantization_config does not say."""
+    if settings.get("load_in_4bit"):
+        return 4
+    if settings.get("load_in_8bit"):
+        return 8
+    for key in ("bits", "w_bit", "weight_bits"):
+        if isinstance(settings.get(key), int):
+            return settings[key]
+    for group in (settings.get("config_groups") or {}).values():
+        bits = (group.get("weights") or {}).get("num_bits")
+        if bits:
+            return bits
+    return {"fp8": 8, "mxfp4": 4}.get(str(settings.get("quant_method", "")).lower(), 0)
+
+
+METHOD_NAMES = {
+    "gptq": "GPTQ",
+    "awq": "AWQ",
+    "bitsandbytes": "BNB",
+    "fp8": "FP8",
+    "mxfp4": "MXFP4",
+    "compressed-tensors": "compressed-tensors",
+}
+
+
+def quantization_label(settings: dict, bits: int) -> str:
+    method = str(settings.get("quant_method") or "")
+    name = METHOD_NAMES.get(method.lower(), method or "unknown method")
+    if name in ("FP8", "MXFP4"):
+        return f"{name} {settings.get('fmt', '')}".strip()
+    if name == "compressed-tensors" and settings.get("format"):
+        name += f" {settings['format']}"
+    return f"{name} {bits}-bit" if bits else name
+
+
+def is_quantization_tensor(name: str, dtype: str) -> bool:
+    return (
+        bool(QUANT_METADATA.search(name))
+        or name.endswith((".qweight", ".weight_packed"))
+        or dtype.startswith(("F8", "F6", "F4"))
+    )
+
+
+def quantization_fact(
+    config: dict, tensors: list[Tensor], dtypes: dict[str, str]
+) -> tuple[Fact, int | None]:
+    """Whether the weights are already quantized, and their bit width (None when they are not).
+
+    config.json says so in quantization_config, and the tensors show it: packed integers,
+    scales and zero points next to the weights, or 8-bit float weights.
+    """
+    settings = quantization_config(config)
+    found = sum(is_quantization_tensor(name, dtypes.get(name, "")) for name, _ in tensors)
+    if settings:
+        bits = quantized_bits(settings)
+        label = quantization_label(settings, bits)
+        note = f"group size {settings['group_size']}" if settings.get("group_size") else ""
+        if settings.get("weight_block_size"):
+            note = "blocks of " + " x ".join(map(str, settings["weight_block_size"])) + " weights"
+        source = "config.json quantization_config"
+        if found:
+            return Fact(label, f"{source} + tensor names", FactKind.CROSS_CHECKED, note), bits
+        if not tensors:
+            return Fact(label, source, FactKind.EXACT, note), bits
+        note = "; ".join(filter(None, [note, "but no quantized tensors in the weight files"]))
+        return Fact(label, source, FactKind.ESTIMATE, note), bits
+    if found:
+        note = f"{found} quantization tensors, but no quantization_config in config.json"
+        return Fact("quantized (method not stated)", "tensor names", FactKind.ESTIMATE, note), 0
+    if config and tensors:
+        source, kind = "config.json + safetensors headers", FactKind.CROSS_CHECKED
+    elif config or tensors:
+        source, kind = ("config.json" if config else "safetensors headers"), FactKind.EXACT
+    else:
+        return Fact(), None
+    return Fact("none", source, kind, "no quantization_config, plain weights"), None
+
+
+def parameter_fact(
+    meta: dict,
+    model_id: str,
+    tensors: list[Tensor],
+    by_type: dict[str, int] | None,
+    bits: int | None,
+) -> Fact:
+    """Our count from the tensor headers, checked against the count the HuggingFace API reports."""
+    hf_total = parameters_from_hf(meta)
+    if by_type:
+        counted = sum(by_type.values())
+        detail = f"{len(tensors)} tensors"
+        if bits is not None:
+            stored = sum(math.prod(shape) for _, shape in tensors)
+            unpacked = any(dtype.startswith("packed") for dtype in by_type)
+            what = "packed weights unpacked, scales left out" if unpacked else "scales left out"
+            detail += f", {what} ({stored:,} stored values)"
+        # Unpacking quantized weights is our own reading, so on its own it is an estimate.
+        alone = FactKind.EXACT if bits is None else FactKind.ESTIMATE
+        if hf_total == counted:
+            source = "safetensors headers + HF API"
+            return Fact(counted, source, FactKind.CROSS_CHECKED, f"{detail}, matches HF API total")
+        if hf_total:
+            note = f"{detail}; HF API says {int(hf_total):,}"
+            return Fact(counted, "safetensors headers", alone, note)
+        return Fact(counted, "safetensors headers", alone, detail)
+    if hf_total:
+        return Fact(int(hf_total), "HF API", FactKind.EXACT, "tensor headers not readable")
+    hint = parse_params_from_name(model_id)
+    note = f"name says {format_params(hint)}, not used" if hint else ""
+    return Fact(note=note)
+
+
+def precision_fact(meta: dict, by_type: dict[str, int] | None, bits: int | None) -> Fact:
+    """The type most weights are stored in, from the headers, checked against the HF API."""
+    hf_counts = dict((meta.get("safetensors") or {}).get("parameters") or {})
+    if bits is not None:
+        # The HF API counts packed weights unpacked, under their integer type.
+        hf_counts = {
+            f"packed {bits}-bit" if dtype in INTEGER_TYPES else dtype: count
+            for dtype, count in hf_counts.items()
+        }
+    if by_type and "" not in by_type:
+        counts, source = by_type, "safetensors headers"
+        kind = FactKind.CROSS_CHECKED if counts == hf_counts else FactKind.EXACT
+        if kind == FactKind.CROSS_CHECKED:
+            source += " + HF API"
+    elif hf_counts:
+        counts, source, kind = hf_counts, "HF API", FactKind.EXACT
+    else:
+        return Fact()
+    ranked = sorted(counts, key=counts.get, reverse=True)
+    note = ", ".join(f"{dtype} {format_params(counts[dtype] / 1e9)}" for dtype in ranked)
+    return Fact(ranked[0], source, kind, note)
+
+
+def stored_bytes_fact(
+    meta: dict, tensors: list[Tensor], dtypes: dict[str, str], bits: int | None
+) -> Fact:
+    """Bytes of the weight files' tensors. A type we do not know makes it unknown, not a guess."""
+    if tensors and dtypes:
+        total = stored_bytes(tensors, dtypes)
+        if total is not None:
+            return Fact(total, "safetensors headers", FactKind.EXACT, f"{total / GB:.2f} GiB")
+        unknown = sorted({dtypes.get(name, "?") for name, _ in tensors} - DTYPE_BITS.keys())
+        note = f"unknown tensor type {', '.join(unknown)}"
+        return Fact(source="safetensors headers", note=note)
+
+    counts = (meta.get("safetensors") or {}).get("parameters") or {}
+    if not counts:
+        return Fact()
+    unknown = sorted(set(counts) - DTYPE_BITS.keys())
+    if unknown:
+        return Fact(source="HF API", note=f"unknown tensor type {', '.join(unknown)}")
+    if bits is not None and any(dtype in INTEGER_TYPES for dtype in counts):
+        return Fact(source="HF API", note="HF API counts packed weights unpacked")
+    total = -(-sum(count * DTYPE_BITS[dtype] for dtype, count in counts.items()) // 8)
+    # The HF API leaves quantization scales out, so for quantized weights this runs short.
+    kind = FactKind.EXACT if bits is None else FactKind.ESTIMATE
+    return Fact(total, "HF API parameter counts", kind, f"{total / GB:.2f} GiB")
+
+
+def architecture_fact(config: dict, tensors: list[Tensor]) -> Fact:
+    text, key = text_config(config)
+    found = architecture_from(config)
+    source = f"config.json {key}".strip()
+    if not found:
+        return Fact(config.get("model_type"), source, FactKind.UNKNOWN, "no layer or head counts")
+
+    parts = [found["architecture"]]
+    if key:
+        parts.append(f"language model ({text.get('model_type')}) read from {key}")
+    parts += [
+        f"{found['num_layers']} layers",
+        f"{found['num_attention_heads']} heads",
+        f"{found['num_kv_heads']} KV heads",
+        f"hidden {found['hidden_size']}",
+    ]
+    tied = text.get("tie_word_embeddings", True)
+    lm_head = any(name.endswith("lm_head.weight") for name, _ in tensors)
+    if tied and tensors and lm_head:
+        parts.append("lm_head stored although config.json ties it to the embeddings")
+    else:
+        parts.append("tied embeddings" if tied else "separate lm_head")
+    return Fact(config.get("model_type"), source, FactKind.EXACT, ", ".join(parts))
+
+
+def context_fact(config: dict, meta: dict) -> Fact:
+    text, key = text_config(config)
+    for name in ("max_position_embeddings", "n_positions", "max_sequence_length"):
+        if text.get(name):
+            return Fact(int(text[name]), f"config.json {key}".strip(), FactKind.EXACT, name)
+    from_gguf = context_from_hf(meta)
+    if from_gguf:
+        return Fact(from_gguf, "HF API (GGUF metadata)", FactKind.EXACT, "context_length")
+    return Fact()
 
 
 def quant_options(
     model: ModelSnapshot, hardware: HardwareProfile, context: int = DEFAULT_CONTEXT
 ) -> list[QuantOption]:
     """Stored checkpoint, GGUF levels, then AWQ/GPTQ/BNB packed sizes from the same tensors."""
+    if model.is_quantized:
+        # Already quantized: only the files as they are. Re-quantizing would stack the errors.
+        if model.original_gb is None:
+            raise OcqError(f"Could not read how big the files of {model.model_id} are.")
+        label = f"{model.facts.quantization.value} (as stored)"
+        return [
+            fit_at(label, model.original_gb, model, hardware, context, False, row_kind="stored")
+        ]
     stored = model.stored_precision or "FP16"
     options: list[QuantOption] = [
         fit_at(
@@ -440,7 +712,7 @@ def gguf_weights_gb(model: ModelSnapshot, gguf_type: str) -> float:
 
 
 def best_option(options: list[QuantOption]) -> QuantOption:
-    quantized = [option for option in options if option.row_kind != "stored"]
+    quantized = [option for option in options if option.row_kind != "stored"] or options
     for option in quantized:
         if option.fit_level in (FitLevel.PERFECT, FitLevel.GOOD):
             return option
@@ -459,6 +731,13 @@ def fit_at(
     use_measurements: bool = True,
     row_kind: str = "gguf",
 ) -> QuantOption:
+    if model.params_b <= 0:
+        hint = model.facts.parameters.note
+        raise OcqError(
+            f"The parameter count of {model.model_id} is unknown: no readable safetensors "
+            f"headers and no count from HuggingFace{f' ({hint})' if hint else ''}. "
+            "Its memory needs cannot be computed."
+        )
     context_gb = 0.0
     if model.architecture_known:
         kv_cache = kv_cache_bytes(model.num_layers, model.num_kv_heads, model.head_dim, context)
@@ -504,13 +783,13 @@ def fit_at(
     )
 
 
-def parameters_from_hf(meta: dict, model_id: str) -> float | None:
+def parameters_from_hf(meta: dict) -> int | None:
+    """The count the HuggingFace API reports. The model's name is not a count."""
     for source in ("safetensors", "gguf"):
         total = (meta.get(source) or {}).get("total")
         if total:
-            return float(total)
-    from_name = parse_params_from_name(model_id)
-    return from_name * 1e9 if from_name else None
+            return int(total)
+    return None
 
 
 def parse_params_from_name(model_id: str) -> float | None:

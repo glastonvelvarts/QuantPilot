@@ -5,6 +5,7 @@ and by llama.cpp's load log for the real models.
 """
 
 import pytest
+from conftest import QWEN, QWEN3_FP8, QWEN_AWQ, QWEN_GPTQ, SMOLVLM, real_model
 
 from ocq.model_size import (
     bnb_scale_bits,
@@ -14,6 +15,8 @@ from ocq.model_size import (
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
+    parameters_by_type,
+    stored_bytes,
 )
 
 MIB = 1024**2
@@ -122,3 +125,48 @@ SMOLLM_NVFP4 = {
 def test_nvfp4_size_matches_real_artifact(smollm_tensors, fp4_activations):
     ours = nvfp4_weights_bytes(smollm_tensors, fp4_activations)
     assert ours == pytest.approx(SMOLLM_NVFP4[fp4_activations], rel=0.002)
+
+
+@pytest.mark.parametrize(
+    ("repo", "quantized_bits"),
+    [(QWEN, None), (QWEN_GPTQ, 4), (QWEN_AWQ, 4), (QWEN3_FP8, 8), (SMOLVLM, None)],
+)
+def test_weight_count_matches_the_huggingface_api(repo, quantized_bits):
+    # GPTQ and AWQ pack 8 weights per int32 and store scales and zeros next to them; FP8 stores
+    # a scale per 128x128 block. Unpacked and without those, the count is HuggingFace's.
+    meta, _, tensors, dtypes = real_model(repo)
+    counts = parameters_by_type(tensors, dtypes, quantized_bits)
+    assert sum(counts.values()) == meta["safetensors"]["total"]
+
+
+def test_packed_weights_are_counted_apart_from_plain_ones():
+    _, _, tensors, dtypes = real_model(QWEN_GPTQ)
+    assert parameters_by_type(tensors, dtypes, 4) == {
+        "packed 4-bit": 1_310_195_712,
+        "F16": 233_518_592,
+    }
+
+
+def test_packed_weights_without_a_bit_width_or_type_cannot_be_counted():
+    _, _, tensors, dtypes = real_model(QWEN_GPTQ)
+    assert parameters_by_type(tensors, dtypes, 0) is None
+    assert parameters_by_type(tensors, {}, 4) is None
+
+
+@pytest.mark.parametrize(
+    ("repo", "expected"),
+    [
+        (QWEN, 3_087_428_608),  # 1,543,714,304 weights x 2 bytes
+        (QWEN_GPTQ, 1_149_760_512),  # 1.07 GiB, not the 5.32 GB the int32 counts suggested
+        (QWEN3_FP8, 2_654_365_696),  # 1 byte per FP8 weight
+    ],
+)
+def test_stored_bytes_follow_each_tensor_type(repo, expected):
+    _, _, tensors, dtypes = real_model(repo)
+    assert stored_bytes(tensors, dtypes) == expected
+
+
+def test_stored_bytes_are_unknown_for_a_type_we_do_not_know():
+    assert stored_bytes([("w", (4, 4))], {"w": "F3_NEW"}) is None
+    assert stored_bytes([("w", (4, 4))], {}) is None
+    assert stored_bytes([("w", (4, 4))], {"w": "F4"}) == 8

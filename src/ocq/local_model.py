@@ -7,7 +7,6 @@ Axolotl `output_dir`, TRL `save_pretrained`, vanilla PyTorch training checkpoint
 from __future__ import annotations
 
 import json
-import math
 import re
 from pathlib import Path
 
@@ -100,29 +99,20 @@ def read_safetensors_header(file: Path) -> dict:
     return header
 
 
-def fetch_local_model_files(folder: Path) -> tuple[dict, list[Tensor], dict[str, int]]:
-    """config.json, every tensor's shape, and parameter counts per stored type."""
+def fetch_local_model_files(folder: Path) -> tuple[dict, list[Tensor], dict[str, str]]:
+    """config.json, every tensor's shape, and every tensor's stored type."""
     config = load_local_config(folder)
     tensors: list[Tensor] = []
-    parameters: dict[str, int] = {}
+    dtypes: dict[str, str] = {}
 
     for file in weight_files(folder):
         for name, info in read_safetensors_header(file).items():
-            shape = tuple(info["shape"])
-            tensors.append((name, shape))
-            parameters[info["dtype"]] = parameters.get(info["dtype"], 0) + math.prod(shape)
+            tensors.append((name, tuple(info["shape"])))
+            dtypes[name] = info["dtype"]
 
     if not tensors:
         raise OcqError(f"No tensors found in {folder}")
-    return config, tensors, parameters
-
-
-def local_hf_meta(parameters: dict[str, int]) -> dict:
-    """Same shape as the HuggingFace API answer, so the rest of the code treats both alike."""
-    return {
-        "safetensors": {"parameters": parameters, "total": sum(parameters.values())},
-        "pipeline_tag": "local",
-    }
+    return config, tensors, dtypes
 
 
 def slug_local(model_id: str) -> str:

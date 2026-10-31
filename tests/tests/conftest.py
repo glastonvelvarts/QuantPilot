@@ -1,8 +1,17 @@
 """Shared test setup."""
 
+import json
+import math
+from pathlib import Path
+
 import pytest
 
 from ocq import measurements, model_analyzer
+from ocq.types import DTYPE_BITS
+
+# Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
+# 2026-10-31. Headers only: names, types and shapes, no weights.
+DATA = Path(__file__).parent / "data"
 
 
 @pytest.fixture(autouse=True)
@@ -75,20 +84,40 @@ QWEN_CONFIG = {
 }
 
 
-def write_safetensors(path, tensors, dtype: str = "BF16") -> None:
-    """Writes only the header of a safetensors file: names, shapes and types, no weight data."""
-    import json
-    import math
+def write_safetensors(path, tensors, dtype: str | dict[str, str] = "BF16") -> None:
+    """Writes only the header of a safetensors file: names, shapes and types, no weight data.
 
-    width = {"F32": 4, "BF16": 2, "F16": 2}[dtype]
+    dtype is one type for every tensor, or a type per tensor name.
+    """
     header, offset = {}, 0
     for name, shape in tensors:
-        size = math.prod(shape) * width
+        tensor_dtype = dtype[name] if isinstance(dtype, dict) else dtype
+        size = -(-math.prod(shape) * DTYPE_BITS[tensor_dtype] // 8)
         header[name] = {
-            "dtype": dtype,
+            "dtype": tensor_dtype,
             "shape": list(shape),
             "data_offsets": [offset, offset + size],
         }
         offset += size
     encoded = json.dumps(header).encode()
     path.write_bytes(len(encoded).to_bytes(8, "little") + encoded)
+
+
+def real_model(repo: str):
+    """(meta, config, tensors, dtypes) of a saved repo, meta shaped like the HF API answer."""
+    saved = json.loads((DATA / f"{repo.replace('/', '--')}.json").read_text())
+    meta = {
+        "safetensors": saved["hf_safetensors"],
+        "cardData": {"base_model": saved["hf_base_model"]},
+        "sha": saved["hf_sha"],
+    }
+    tensors = [(name, tuple(shape)) for name, (_, shape) in saved["tensors"].items()]
+    dtypes = {name: dtype for name, (dtype, _) in saved["tensors"].items()}
+    return meta, saved["config"], tensors, dtypes
+
+
+QWEN = "Qwen/Qwen2.5-1.5B-Instruct"
+QWEN_GPTQ = "Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int4"
+QWEN_AWQ = "Qwen/Qwen2.5-1.5B-Instruct-AWQ"
+QWEN3_FP8 = "Qwen/Qwen3-1.7B-FP8"
+SMOLVLM = "HuggingFaceTB/SmolVLM-256M-Instruct"

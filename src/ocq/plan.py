@@ -18,6 +18,7 @@ from ocq.quantizers import get_quantizer
 from ocq.types import (
     HardwareProfile,
     ModelSnapshot,
+    OcqError,
     OptimizationGoal,
     OptimizationPlan,
     QuantAlgorithm,
@@ -35,6 +36,8 @@ def generate_plan(
     output_dir: Path,
     choices: QuantChoices | None = None,
 ) -> OptimizationPlan:
+    if model.is_quantized:
+        raise OcqError(already_quantized(model))
     config = decide_quant_config(hardware, model, goal, choices)
     predicted = predict_for_config(model, hardware, config)
     rationale = build_rationale(hardware, model, config, goal)
@@ -77,6 +80,20 @@ def generate_plan(
         warnings=warnings,
         predicted=predicted,
     )
+
+
+def already_quantized(model: ModelSnapshot) -> str:
+    """Quantizing quantized weights again stacks the rounding errors. Point to the original."""
+    message = (
+        f"{model.model_id} is already quantized ({model.facts.quantization.value}). "
+        "Quantizing it again would stack the rounding errors"
+    )
+    base = (model.raw.get("cardData") or {}).get("base_model")
+    if isinstance(base, list):
+        base = base[0] if len(base) == 1 else None
+    if base:
+        return f"{message}; quantize the original instead: ocq optimize {base}"
+    return f"{message}. Quantize the original model instead. (ocq feasibility shows if it fits.)"
 
 
 def double_quant_note(
@@ -132,14 +149,20 @@ def quantization_warnings(
     if not ready:
         warnings.append(detail)
 
-    disk_needed = original_gb + quantized_gb
-    if config.algorithm == QuantAlgorithm.GGUF:
-        disk_needed += original_gb
-    disk_free = free_disk_gb(output_dir)
-    if disk_needed > disk_free:
+    if original_gb is None:
         warnings.append(
-            f"Quantizing needs {disk_needed:.1f} GB of disk, only {disk_free:.1f} GB free."
+            "The size of the original weight files could not be read, so disk space and RAM "
+            "for quantizing were not checked."
         )
+    else:
+        disk_needed = original_gb + quantized_gb
+        if config.algorithm == QuantAlgorithm.GGUF:
+            disk_needed += original_gb
+        disk_free = free_disk_gb(output_dir)
+        if disk_needed > disk_free:
+            warnings.append(
+                f"Quantizing needs {disk_needed:.1f} GB of disk, only {disk_free:.1f} GB free."
+            )
 
     if config.algorithm == QuantAlgorithm.NVFP4:
         warnings += nvfp4_warnings(hardware, config)
