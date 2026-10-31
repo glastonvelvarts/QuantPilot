@@ -6,9 +6,12 @@ import pytest
 
 from ocq.engine import decide_quant_config
 from ocq.types import (
+    Fact,
+    FactKind,
     FeasibilityEstimate,
     GpuProfile,
     HardwareProfile,
+    ModelFacts,
     ModelSnapshot,
     OcqError,
     OptimizationGoal,
@@ -39,6 +42,8 @@ def make_model(**overrides) -> ModelSnapshot:
             runtime="llamacpp",
             estimate_confidence="estimated",
         ),
+        # 7B weights stored at 16-bit
+        facts=ModelFacts(stored_bytes=Fact(14 * 1024**3, "test", FactKind.EXACT)),
     )
     defaults.update(overrides)
     return ModelSnapshot(**defaults)

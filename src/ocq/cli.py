@@ -19,6 +19,8 @@ from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
 from ocq.types import (
+    Fact,
+    FactKind,
     FitLevel,
     OcqError,
     OptimizationGoal,
@@ -34,6 +36,13 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+KIND_COLORS = {
+    FactKind.EXACT: "green",
+    FactKind.CROSS_CHECKED: "green",
+    FactKind.ESTIMATE: "yellow",
+    FactKind.UNKNOWN: "red",
+}
 
 FIT_COLORS = {
     FitLevel.PERFECT: "green",
@@ -200,6 +209,61 @@ def cmd_profile(llmfit_bin: LlmfitBin = None) -> None:
     console.print(table)
 
 
+@app.command("inspect")
+def cmd_inspect(
+    model: ModelArg = None,
+    model_path: ModelPath = None,
+    llmfit_bin: LlmfitBin = None,
+) -> None:
+    """Show what QuantPilot knows about a model, where each fact comes from and how sure it is."""
+    ref = model_ref(model, model_path)
+    try:
+        snapshot = resolve_model(ref, None, llmfit_bin)
+    except OcqError as exc:
+        raise fail(exc) from exc
+
+    facts = snapshot.facts
+    console.print(Panel(f"[bold]{snapshot.model_id}[/bold]\n{fact_summary(snapshot)}"))
+    rows = (
+        ("Parameters", facts.parameters),
+        ("Precision", facts.precision),
+        ("Stored bytes", facts.stored_bytes),
+        ("Architecture", facts.architecture),
+        ("Context length", facts.context_length),
+        ("Quantization", facts.quantization),
+    )
+    for name, fact in rows:
+        color = KIND_COLORS[fact.kind]
+        source = f" [dim]from {fact.source}[/dim]" if fact.source else ""
+        console.print(
+            f"[bold]{name:<15}[/bold]{fact_value(fact)}  [{color}]{fact.kind}[/{color}]{source}",
+            highlight=False,
+        )
+        if fact.note:
+            console.print(f"{'':<15}[dim]{fact.note}[/dim]", highlight=False)
+    if snapshot.catalog_source == "llmfit" and not facts.parameters.known:
+        console.print("[dim]HuggingFace could not be reached: only llmfit's catalog entry.[/dim]")
+
+
+def fact_value(fact: Fact) -> str:
+    if fact.value is None:
+        return "-"
+    if isinstance(fact.value, int):
+        return f"{fact.value:,}"
+    return str(fact.value)
+
+
+def fact_summary(snapshot) -> str:
+    """One line, for example: GPTQ 4-bit, 1.54B params (cross-checked), 1.07 GB of weights."""
+    facts = snapshot.facts
+    quantized = facts.quantization.value if snapshot.is_quantized else "not quantized"
+    params = "unknown params"
+    if facts.parameters.known:
+        params = f"{snapshot.parameter_count} params ({facts.parameters.kind})"
+    size = f"{snapshot.original_gb:.2f} GB" if snapshot.original_gb is not None else "unknown size"
+    return f"{quantized}, {params}, {size} of weights"
+
+
 @app.command("backends")
 def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     """Show which quantization backends can run on this PC."""
@@ -257,16 +321,21 @@ def cmd_feasibility(
     try:
         hw = detect_hardware(llmfit_bin)
         snapshot = resolve_model(ref, hw, llmfit_bin, context)
+        options = quant_options(snapshot, hw, context)
     except OcqError as exc:
         raise fail(exc) from exc
 
-    options = quant_options(snapshot, hw, context)
     exact = options[0].exact
     sizes = (
         "exact, computed from the model's tensor shapes"
         if exact
         else "estimated from the parameter count (tensor shapes not readable)"
     )
+    if snapshot.is_quantized:
+        sizes = (
+            f"already quantized ({snapshot.facts.quantization.value}), shown as stored. "
+            "Quantize the original model to compare formats"
+        )
     fit = snapshot.feasibility
     console.print(
         Panel(

@@ -5,7 +5,10 @@ from pathlib import Path
 from ocq.plan import generate_plan
 from ocq.types import (
     BenchmarkResult,
+    Fact,
+    FactKind,
     HardwareProfile,
+    ModelFacts,
     ModelSnapshot,
     OptimizationGoal,
     QuantizationResult,
@@ -25,7 +28,8 @@ def make_plan(tmp_path: Path):
         backend="CPU",
         unified_memory=False,
     )
-    model = ModelSnapshot(model_id="org/model", params_b=1.0)
+    stored = ModelFacts(stored_bytes=Fact(2 * 1024**3, "test", FactKind.EXACT))
+    model = ModelSnapshot(model_id="org/model", params_b=1.0, facts=stored)
     return generate_plan("org/model", hw, model, OptimizationGoal.BALANCED, tmp_path)
 
 
@@ -62,3 +66,11 @@ def test_garbage_output_fails(tmp_path):
     plan = make_plan(tmp_path)
     bench = BenchmarkResult(tokens_per_second=50.0, method="test", sample_output="the the the the")
     assert not validate_artifact(plan, make_result(plan, 0.6), bench).passed
+
+
+def test_unknown_original_size_is_said_not_guessed(tmp_path):
+    plan = make_plan(tmp_path)
+    plan.model = ModelSnapshot(model_id="org/model", params_b=1.0)
+    bench = BenchmarkResult(tokens_per_second=50.0, method="test", sample_output=GOOD_TEXT)
+    result = validate_artifact(plan, make_result(plan, 2.5), bench)
+    assert any("original size unknown" in check for check in result.checks)

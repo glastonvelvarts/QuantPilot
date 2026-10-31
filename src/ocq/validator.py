@@ -17,12 +17,16 @@ def validate_artifact(
     original_gb = plan.model.original_gb
     words = benchmark.sample_output.split()
 
-    results = [
-        (size_gb > 0, f"artifact on disk: {quantization.artifact_path} ({size_gb:.2f} GB)"),
-        (
+    if original_gb is None:
+        smaller = (True, f"original size unknown, {size_gb:.2f} GB not compared")
+    else:
+        smaller = (
             size_gb < original_gb,
             f"smaller than the original: {size_gb:.2f} GB vs {original_gb:.2f} GB",
-        ),
+        )
+    results = [
+        (size_gb > 0, f"artifact on disk: {quantization.artifact_path} ({size_gb:.2f} GB)"),
+        smaller,
         (benchmark.tokens_per_second is not None, "artifact loads and generates tokens"),
         (
             len(set(words)) >= 5,
