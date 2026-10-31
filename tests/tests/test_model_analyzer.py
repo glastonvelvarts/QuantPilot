@@ -41,7 +41,9 @@ from ocq.model_analyzer import (
     quant_options,
     recommend_models,
 )
+from ocq.model_size import kv_value_bytes
 from ocq.types import (
+    LLAMA_CPP,
     ONE_GPU,
     TENSOR_PARALLEL,
     TRANSFORMERS,
@@ -664,3 +666,36 @@ def test_the_note_says_which_runtime_settings_are_assumed():
     note = real_snapshot(GEMMA3_1B).facts.kv_cache.note
     assert "windows sized for 4 conversations" in note
     assert "183 MiB at 32,768 tokens (150 MiB for 1 conversation)" in note
+
+
+# --kv-cache: llama.cpp's own log gives the sizes (-ctk/-ctv q8_0 or q4_0, -c N, 1 conversation).
+
+
+@pytest.mark.parametrize(
+    ("repo", "context", "cache", "llama_cpp_mib"),
+    [
+        (GEMMA3_1B, 32768, "q8_0", 68 + 11.6875),  # "68.00 MiB" + "11.69 MiB"
+        (GEMMA3_1B, 32768, "q4_0", 36 + 6.1875),  # "36.00 MiB" + "6.19 MiB"
+        # SmolLM2-135M, QuantPilot's own benchmark run with --kv-cache q8_0: "47.81 MiB"
+        (OCQ_NVFP4, 4096, "q8_0", 47.8125),
+    ],
+)
+def test_quantized_cache_matches_llama_cpp(repo, context, cache, llama_cpp_mib):
+    value_bytes = kv_value_bytes(cache, LLAMA_CPP)
+    size = real_snapshot(repo).kv_cache_bytes(context, LLAMA_CPP, 1, value_bytes)
+    assert size == llama_cpp_mib * MIB
+
+
+def test_each_row_uses_the_cache_of_its_runtime():
+    hardware = nvidia_pc(RTX_3090)
+    snap = real_snapshot(QWEN, hardware)
+    f16 = options_by_label(snap, hardware, context=32768)
+    q8 = {o.label: o for o in quant_options(snap, hardware, 32768, kv_cache="q8_0")}
+    full = 28 * 1024 * 32768  # Qwen2.5-1.5B at 16-bit
+
+    def saved(label):
+        return (f16[label].context_gb - q8[label].context_gb) * 1024**3
+
+    assert saved("Q4_K_M") == pytest.approx(full * (1 - 34 / 64))  # llama.cpp q8_0
+    assert saved("AWQ 4-bit") == pytest.approx(full / 2)  # vLLM fp8
+    assert saved("BNB 4-bit double") == 0  # transformers keeps 16 bits

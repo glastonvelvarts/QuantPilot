@@ -1,5 +1,7 @@
 """The GGUF conversion must start from the precision the model is really stored in."""
 
+from pathlib import Path
+
 import pytest
 from conftest import QWEN3_FP8, QWEN_GPTQ, real_model
 
@@ -99,3 +101,30 @@ def test_packed_counts_from_the_hub_are_not_turned_into_bytes():
     snap = build_snapshot(QWEN_GPTQ, meta, config, [], None)
     assert snap.original_gb is None
     assert snap.facts.precision.value == "4-bit in I32"
+
+
+def test_benchmark_runs_llama_cpp_with_the_planned_cache(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from ocq.quantizers import gguf
+
+    commands = []
+
+    def fake_run_tool(command, log):
+        commands.append(command)
+        if "llama-bench" in command[0]:
+            return json.dumps([{"avg_ts": 100.0, "stddev_ts": 1.0}]), ""
+        return "The sky is blue.", "offloaded 31/31 layers to GPU"
+
+    monkeypatch.setattr(gguf, "run_tool", fake_run_tool)
+    monkeypatch.setattr(gguf, "tool_path", lambda name, hardware: Path(name))
+    plan = SimpleNamespace(
+        output_dir=tmp_path,
+        hardware=None,
+        quant_config=SimpleNamespace(context=4096, kv_cache="q8_0"),
+    )
+    gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
+    assert len(commands) == 2  # the sample answer (llama-completion), the speed (llama-bench)
+    for command in commands:
+        assert command[-4:] == ["-ctk", "q8_0", "-ctv", "q8_0"]

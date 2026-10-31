@@ -20,6 +20,7 @@ from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
 from ocq.types import (
+    KV_CACHE_TYPES,
     Fact,
     FactKind,
     FitLevel,
@@ -100,6 +101,15 @@ Output = Annotated[Path | None, typer.Option("--output", "-o", help="Where to wr
 Context = Annotated[
     int, typer.Option("--context", "-c", help="Context size in tokens the model will run with")
 ]
+KvCache = Annotated[
+    str,
+    typer.Option(
+        "--kv-cache",
+        help="Cache type for the context: f16 (default), q8_0 (about half the memory, "
+        "almost no quality loss) or q4_0 (about a quarter, some loss). llama.cpp uses it as "
+        "is, vLLM uses fp8 for both, transformers stays at f16.",
+    ),
+]
 
 
 def fail(exc: Exception) -> typer.Exit:
@@ -125,6 +135,7 @@ def read_choices(
     context: int,
     double_quant: bool | None = None,
     fp4_activations: bool | None = None,
+    kv_cache: str = "f16",
 ) -> QuantChoices:
     algorithm = None
     if backend:
@@ -141,9 +152,17 @@ def read_choices(
         calibration_samples=samples,
         calibration_seq_len=seq_len,
         context=context,
+        kv_cache=kv_cache,
         double_quant=double_quant,
         fp4_activations=fp4_activations,
     )
+
+
+def read_kv_cache(value: str) -> str:
+    cache_type = value.lower()
+    if cache_type not in KV_CACHE_TYPES:
+        raise typer.BadParameter(f"Use one of: {', '.join(KV_CACHE_TYPES)}")
+    return cache_type
 
 
 def model_ref(model: str | None, model_path: Path | None) -> str:
@@ -321,14 +340,16 @@ def cmd_feasibility(
     model: ModelArg = None,
     model_path: ModelPath = None,
     context: Context = DEFAULT_CONTEXT,
+    kv_cache: KvCache = "f16",
     llmfit_bin: LlmfitBin = None,
 ) -> None:
     """Show whether a model can run on this PC at each quantization level."""
     ref = model_ref(model, model_path)
     try:
         hw = detect_hardware(llmfit_bin)
-        snapshot = resolve_model(ref, hw, llmfit_bin, context)
-        options = quant_options(snapshot, hw, context)
+        kv_cache = read_kv_cache(kv_cache)
+        snapshot = resolve_model(ref, hw, llmfit_bin, context, kv_cache)
+        options = quant_options(snapshot, hw, context, kv_cache)
     except OcqError as exc:
         raise fail(exc) from exc
 
@@ -463,6 +484,7 @@ def cmd_plan(
     double_quant: DoubleQuant = None,
     fp4_activations: Fp4Activations = None,
     context: Context = DEFAULT_CONTEXT,
+    kv_cache: KvCache = "f16",
     output: Output = None,
     llmfit_bin: LlmfitBin = None,
 ) -> None:
@@ -478,10 +500,11 @@ def cmd_plan(
         context,
         double_quant,
         fp4_activations,
+        read_kv_cache(kv_cache),
     )
     try:
         hw = detect_hardware(llmfit_bin)
-        snapshot = resolve_model(ref, hw, llmfit_bin, context)
+        snapshot = resolve_model(ref, hw, llmfit_bin, context, choices.kv_cache)
         plan = generate_plan(
             snapshot.model_id,
             hw,
@@ -510,6 +533,7 @@ def cmd_optimize(
     double_quant: DoubleQuant = None,
     fp4_activations: Fp4Activations = None,
     context: Context = DEFAULT_CONTEXT,
+    kv_cache: KvCache = "f16",
     output: Output = None,
     dry_run: Annotated[
         bool,
@@ -529,6 +553,7 @@ def cmd_optimize(
         context,
         double_quant,
         fp4_activations,
+        read_kv_cache(kv_cache),
     )
     try:
         result = run_optimize(
