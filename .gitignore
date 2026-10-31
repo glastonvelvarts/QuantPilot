@@ -12,4 +12,5 @@ ocq-output/
 # OS / IDE
 .DS_Store
 .idea/
-data/
+# Downloaded models / dumps at repo root only. Do not ignore tests/tests/data/.
+/data/
