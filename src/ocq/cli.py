@@ -292,7 +292,7 @@ def fact_summary(snapshot) -> str:
 
 @app.command("verify")
 def cmd_verify(
-    model: Annotated[Path, typer.Argument(help="A local .gguf file")],
+    model: Annotated[str, typer.Argument(help="A local .gguf file, or ollama:name:tag")],
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     n_cpu_moe: Annotated[
@@ -306,20 +306,22 @@ def cmd_verify(
     llmfit_bin: LlmfitBin = None,
 ) -> None:
     """Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction."""
+    from ocq.local_model import parse_model_ref
     from ocq.quantizers.llama_cpp import tool_path
     from ocq.verify import verify
 
     kv_cache = read_kv_cache(kv_cache)
     try:
         hw = detect_hardware(llmfit_bin)
-        snapshot = resolve_model(str(model), hw, llmfit_bin, context, kv_cache)
-        if not snapshot.gguf_files or not model.is_file():
-            raise OcqError("ocq verify takes one local .gguf file.")
+        snapshot = resolve_model(model, hw, llmfit_bin, context, kv_cache)
+        path = parse_model_ref(model)[1]
+        if not snapshot.gguf_files or path is None or not path.is_file():
+            raise OcqError("ocq verify takes one local .gguf file, or ollama:name:tag.")
         if n_cpu_moe is None:
             (row,) = quant_options(snapshot, hw, context, kv_cache)
             n_cpu_moe = row.experts_in_ram
         log, checks = verify(
-            snapshot, model, hw, tool_path("llama-completion", hw), context, kv_cache, n_cpu_moe
+            snapshot, path, hw, tool_path("llama-completion", hw), context, kv_cache, n_cpu_moe
         )
     except OcqError as exc:
         raise fail(exc) from exc
@@ -348,6 +350,93 @@ def cmd_verify(
         console.print("[dim]Not every layer is on the GPU, so the weights were not compared.[/dim]")
     if not all(check.ok for check in checks):
         raise typer.Exit(1)
+
+
+@app.command("models")
+def cmd_models(
+    show_all: Annotated[
+        bool, typer.Option("--all", help="Also list partial downloads (for example config only)")
+    ] = False,
+    folders: Annotated[
+        list[Path] | None,
+        typer.Option("--dir", "-d", help="Also search this folder (can be given more than once)"),
+    ] = None,
+    context: Context = DEFAULT_CONTEXT,
+    kv_cache: KvCache = "f16",
+    llmfit_bin: LlmfitBin = None,
+) -> None:
+    """List the models already on this PC and how each one fits it, as it is on disk."""
+    from ocq.discovery import SOURCES, find_models, searched_locations, tilde
+
+    kv_cache = read_kv_cache(kv_cache)
+    try:
+        models = find_models(folders)
+        hw = detect_hardware(llmfit_bin)
+    except OcqError as exc:
+        raise fail(exc) from exc
+    shown = [m for m in models if m.complete or show_all]
+    table = Table(title=f"Models on this PC ({len(shown)})")
+    table.add_column("Model", overflow="fold")
+    table.add_column("Source")
+    table.add_column("Format")
+    table.add_column("Size", justify="right", no_wrap=True)
+    table.add_column("Fit")
+    table.add_column("Runs on")
+    table.add_column("tok/s", justify="right")
+    table.add_column("Use with ocq", overflow="fold")
+    for model in sorted(shown, key=lambda m: (m.source, m.label.lower())):
+        size = f"{model.size_bytes / 1e9:.2f} GB" if model.size_bytes else "-"
+        label = escape(model.label)
+        note = model.note
+        fit, place, speed = local_fit(model, hw, context, kv_cache)
+        if fit.startswith("?") and len(fit) > 1:
+            note, fit = "; ".join(filter(None, [note, fit[2:]])), "?"
+        if note:
+            color = "dim" if model.complete else "yellow"
+            label += f"\n[{color}]{escape(note)}[/{color}]"
+        kind = f"{model.format} {model.quantization}".strip()
+        table.add_row(label, model.source, escape(kind), size, fit, place, speed, escape(model.ref))
+    console.print(table)
+    console.print(
+        f"[dim]Fit as stored, at {context:,} tokens of context, in the memory free right now "
+        f"({hw.free_vram_gb:.2f} GB VRAM{gpu_note(hw)}, {hw.available_ram_gb:.2f} GB RAM). "
+        "ocq feasibility <model> shows the other formats.[/dim]"
+    )
+    hidden = len(models) - len(shown)
+    if hidden:
+        console.print(
+            f"[dim]{hidden} partial download(s) hidden, most with only config.json "
+            "(fetched to size a model, not to run it): ocq models --all[/dim]"
+        )
+    searched = searched_locations(folders)
+    places = ", ".join(f"{source} {tilde(path)}" for source, path in searched)
+    console.print(f"[dim]Searched: {escape(places) or 'no model folders found'}[/dim]")
+    missing = [s for s in SOURCES if s not in {source for source, _ in searched}]
+    if missing:
+        console.print(f"[dim]Not found on this PC: {', '.join(missing)}[/dim]")
+
+
+def local_fit(model, hw, context: int, kv_cache: str) -> tuple[str, str, str]:
+    """(fit, runs on, tok/s) of a found model as it is on disk, read offline from its files.
+    "? reason" when it cannot be worked out."""
+    from ocq.discovery import GGUF, MLX_LAYOUT, SAFETENSORS
+
+    if not model.complete:
+        return "", "", ""
+    if model.format not in (GGUF, SAFETENSORS, MLX_LAYOUT):
+        return "?", "", ""
+    # The local copy, not the Hub: no network, and exactly the files on this PC.
+    ref = model.ref if model.ref.startswith("ollama:") else str(model.path)
+    try:
+        snapshot = resolve_model(ref, hw, None, context, kv_cache)
+        option = quant_options(snapshot, hw, context, kv_cache)[0]
+    except OcqError as exc:
+        return f"? {exc}", "", ""
+    except (OSError, ValueError, KeyError) as exc:  # a broken file must not hide the others
+        return f"? could not read it ({type(exc).__name__})", "", ""
+    if snapshot.is_mlx and not hw.apple_silicon:
+        return "[red]needs a Mac[/red]", "", ""
+    return colored_fit(option.fit_level), runs_on(option), speed_cell(option)
 
 
 @app.command("backends")
@@ -484,6 +573,11 @@ def cmd_feasibility(
             "[dim]gpu+ram (experts): llama.cpp only (--n-cpu-moe, see ocq plan). The AWQ, GPTQ, "
             "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "
             "whole layers instead.[/dim]"
+        )
+    if snapshot.is_mlx and not hw.apple_silicon:
+        console.print(
+            "[yellow]MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio), not on this PC: "
+            "the sizes above are for comparison. Use a GGUF of the original model here.[/yellow]"
         )
     bases = {option.speed_basis for option in options if option.runnable}
     if measurements.MEASURED in bases:
