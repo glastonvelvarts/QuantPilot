@@ -2,9 +2,13 @@
 
 import pytest
 from conftest import (
+    DEEPSEEK_V2_LITE,
+    GPT_OSS,
+    MIXTRAL,
     OCQ_NVFP4,
     QWEN,
     QWEN3_8B_NVFP4,
+    QWEN3_MOE,
     QWEN_72B,
     QWEN_AWQ,
     QWEN_BNB,
@@ -427,22 +431,27 @@ def test_known_architecture_keeps_its_context_memory(qwen_tensors):
 
 def test_72b_runs_fully_on_two_3090s_split_by_layers():
     one, two = nvidia_pc(RTX_3090), nvidia_pc(RTX_3090, RTX_3090_BUSY)
+    snap = real_snapshot(QWEN_72B, two)
     on_one = options_by_label(real_snapshot(QWEN_72B, one), one)["Q4_K_M"]
-    on_two = options_by_label(real_snapshot(QWEN_72B, two), two)["Q4_K_M"]
+    on_two = options_by_label(snap, two)["Q4_K_M"]
     assert on_one.run_mode == RunMode.GPU_OFFLOAD
     assert on_two.run_mode == RunMode.GPU  # was GPU_OFFLOAD: only one card counted
     assert on_two.gpu_count == 2
     assert on_two.memory_available_gb == pytest.approx(23.44 + 22.46)
-    # The cards take turns, so the limit is one card's speed, not double.
-    assert on_two.estimated_tps == pytest.approx(936e9 / 1024**3 / on_two.weights_gb, abs=0.1)
+    # The cards take turns, so the limit is one card's speed, not double. Each token reads
+    # the weights minus the input embedding table (one row of it).
+    read_gb = on_two.weights_gb * snap.read_fraction
+    assert on_two.estimated_tps == pytest.approx(936e9 / 1024**3 / read_gb, abs=0.1)
 
 
 def test_awq_on_two_3090s_is_tensor_parallel_and_reads_twice_as_fast():
     two = nvidia_pc(RTX_3090, RTX_3090_BUSY)
-    awq = options_by_label(real_snapshot(QWEN_72B, two), two)["AWQ 4-bit"]
+    snap = real_snapshot(QWEN_72B, two)
+    awq = options_by_label(snap, two)["AWQ 4-bit"]
     assert awq.gpu_split == TENSOR_PARALLEL
     assert awq.memory_available_gb == pytest.approx(2 * 22.46)  # 2 x the smaller free VRAM
-    assert awq.estimated_tps == pytest.approx(2 * 936e9 / 1024**3 / awq.weights_gb, abs=0.1)
+    read_gb = awq.weights_gb * snap.read_fraction
+    assert awq.estimated_tps == pytest.approx(2 * 936e9 / 1024**3 / read_gb, abs=0.1)
 
 
 def test_a_model_that_fits_on_the_fast_card_stays_off_the_slow_one(qwen_tensors):
@@ -453,3 +462,67 @@ def test_a_model_that_fits_on_the_fast_card_stays_off_the_slow_one(qwen_tensors)
     # Identical cards are as fast split as alone, and split has more room.
     pair = nvidia_pc(RTX_3090, RTX_3090)
     assert options_by_label(qwen_snapshot(qwen_tensors, pair), pair)["Q4_K_M"].gpu_count == 2
+
+
+# Mixture of experts: every expert is in memory, only a few run for each token.
+
+
+@pytest.mark.parametrize("repo", [QWEN3_MOE, DEEPSEEK_V2_LITE, MIXTRAL, GPT_OSS])
+def test_expert_count_is_cross_checked_and_marks_the_model_as_moe(repo):
+    snap = real_snapshot(repo)
+    assert snap.is_moe
+    assert snap.facts.active_parameters.kind == FactKind.CROSS_CHECKED
+    assert snap.facts.active_parameters.source == "config.json + tensor names"
+    assert snap.read_fraction < 0.3
+
+
+def test_moe_speed_limit_follows_the_weights_used_per_token():
+    hardware = nvidia_pc(RTX_3090, RTX_3090_BUSY)
+    snap = real_snapshot(QWEN3_MOE, hardware)
+    q4 = options_by_label(snap, hardware)["Q4_K_M"]
+    # All 30.5B weights must fit in memory ...
+    assert q4.weights_gb > 16
+    # ... but a token reads 3.0B of them (10%), so the limit is about 10x a dense model's.
+    assert snap.read_fraction == pytest.approx(3_041_867_776 / 30_532_122_624)
+    gpu = 936e9 / 1024**3
+    assert q4.estimated_tps == pytest.approx(gpu / (q4.weights_gb * snap.read_fraction), abs=0.5)
+    assert q4.estimated_tps > 9 * gpu / q4.weights_gb
+
+
+def test_expert_counts_that_disagree_are_an_estimate():
+    meta, config, tensors, dtypes = real_model(MIXTRAL)
+    wrong = config | {"num_local_experts": 16}
+    snap = build_snapshot(MIXTRAL, meta, wrong, tensors, None, dtypes=dtypes)
+    assert snap.facts.active_parameters.kind == FactKind.ESTIMATE
+    assert (
+        "config.json says 16 experts, the tensor names show 8" in snap.facts.active_parameters.note
+    )
+
+
+def test_moe_is_read_from_the_files_not_the_name(qwen_tensors):
+    # Before, a "moe" in the name or tags made any model a mixture of experts.
+    snap = build_snapshot("org/moe-chat-1.5b", {"tags": ["moe"]}, QWEN_CONFIG, qwen_tensors, None)
+    assert not snap.is_moe
+    assert snap.read_fraction == 1.0
+
+
+def test_without_experts_per_token_the_active_weights_are_unknown():
+    meta, config, tensors, dtypes = real_model(MIXTRAL)
+    no_top_k = {k: v for k, v in config.items() if k != "num_experts_per_tok"}
+    snap = build_snapshot(MIXTRAL, meta, no_top_k, tensors, None, dtypes=dtypes)
+    assert not snap.facts.active_parameters.known
+    assert snap.read_fraction == 1.0
+
+
+def test_benchmark_runs_are_stored_as_what_one_token_reads():
+    from types import SimpleNamespace
+
+    from ocq.pipeline import remember_speed
+    from ocq.types import QuantAlgorithm
+
+    snap = real_snapshot(QWEN3_MOE)
+    plan = SimpleNamespace(model=snap, quant_config=SimpleNamespace(algorithm=QuantAlgorithm.GGUF))
+    run = SimpleNamespace(artifact_size_gb=17.0)
+    remember_speed(plan, run, SimpleNamespace(device="gpu", tokens_per_second=120.0))
+    # A 17 GB MoE file that reads 1.7 GB per token must not look like a fast 17 GB dense model.
+    assert measurements.load()[-1]["weights_gb"] == pytest.approx(17.0 * snap.read_fraction)
