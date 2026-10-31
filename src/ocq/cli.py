@@ -359,7 +359,12 @@ def cmd_feasibility(
         sizes = "exact, computed from the model's tensor shapes"
     else:
         sizes = "weights exact from the tensor shapes, context memory unknown"
-    if snapshot.is_quantized:
+    if snapshot.gguf_files:
+        sizes = (
+            f"the {len(snapshot.gguf_files)} GGUF files as published (file sizes; settings and "
+            "tensor table from one file's header)"
+        )
+    elif snapshot.is_quantized:
         sizes = (
             f"already quantized ({snapshot.facts.quantization.value}), shown as stored. "
             "Quantize the original model to compare formats"
@@ -382,10 +387,12 @@ def cmd_feasibility(
         )
     )
 
-    table = Table(
-        title="By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same "
-        "tensor math)"
+    title = (
+        "By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same tensor math)"
     )
+    if snapshot.gguf_files:
+        title = "The repo's GGUF files, sizes in GB (run with llama.cpp, Ollama or LM Studio)"
+    table = Table(title=title)
     table.add_column("Level", no_wrap=True)
     table.add_column("Backend", no_wrap=True)
     for column in ("Bits", "Weights", "Context", "Needs"):

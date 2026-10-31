@@ -13,8 +13,17 @@ from pathlib import Path
 
 from ocq import measurements
 from ocq.engine import default_group_size
+from ocq.gguf_file import (
+    SPLIT_PART,
+    GgufHeader,
+    config_from_gguf,
+    hf_style_tensors,
+    quant_from_filename,
+    read_local,
+    read_remote,
+)
 from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
-from ocq.local_model import fetch_local_model_files, parse_model_ref
+from ocq.local_model import fetch_local_model_files, gguf_files, parse_model_ref
 from ocq.model_size import (
     EMBEDDING,
     QUANT_METADATA,
@@ -130,6 +139,9 @@ def resolve_model(
 ) -> ModelSnapshot:
     """Read a model's facts from its files. Without hardware, the fit is not computed."""
     display_id, local_dir = parse_model_ref(model_ref)
+    if local_dir is not None and (local_dir.is_file() or gguf_files(local_dir)):
+        if local_dir.is_file() or not (local_dir / "config.json").is_file():
+            return local_gguf_snapshot(display_id, local_dir, hardware, context, kv_cache)
     if local_dir is not None:
         config, tensors, dtypes = fetch_local_model_files(local_dir)
         meta = {"pipeline_tag": "local"}
@@ -153,6 +165,10 @@ def resolve_model(
             return catalog
         raise
 
+    if not meta.get("safetensors") and any(
+        str(sibling.get("rfilename", "")).endswith(".gguf") for sibling in meta.get("siblings", [])
+    ):
+        return hub_gguf_snapshot(model_id, meta, hardware, context, kv_cache)
     config, tensors, dtypes = fetch_model_files(model_id, meta.get("sha", ""))
     if quantization_config(config):
         meta = meta | {"base_model_parameters": base_model_parameters(meta)}
@@ -324,7 +340,13 @@ def build_snapshot(
         return replace(snapshot, feasibility=unknown)
     if hardware is None:
         return snapshot
+    return with_fit(snapshot, hardware, context, kv_cache)
 
+
+def with_fit(
+    snapshot: ModelSnapshot, hardware: HardwareProfile, context: int, kv_cache: str = "f16"
+) -> ModelSnapshot:
+    """The snapshot with the best row of its fit table as its feasibility."""
     best = best_option(quant_options(snapshot, hardware, context, kv_cache))
     return replace(
         snapshot,
@@ -342,6 +364,170 @@ def build_snapshot(
             estimate_confidence=best.speed_basis,
         ),
     )
+
+
+def gguf_snapshot(
+    model_id: str,
+    meta: dict,
+    header: GgufHeader,
+    files: list[tuple[str, int]],
+    file_size: int | None,
+    whole: bool,
+) -> ModelSnapshot:
+    """A GGUF model's facts, read from one file's header. files: (quantization, tensor bytes)
+    of every file of the model. whole: the header lists all tensors (not one part of a split).
+    The settings become config.json's terms, so the same code sizes the context memory."""
+    config = config_from_gguf(header)
+    tensors = hf_style_tensors(header) if whole else []
+    snapshot = build_snapshot(model_id, meta, config, tensors, None)
+    stored = header.data_bytes
+    by_type: dict[str, int] = {}
+    for tensor in header.tensors:
+        by_type[tensor.type_name] = by_type.get(tensor.type_name, 0) + tensor.elements
+    ranked = sorted(by_type, key=by_type.get, reverse=True)
+    precision = Fact(
+        ranked[0] if ranked else None,
+        "GGUF tensor table",
+        FactKind.EXACT if ranked else FactKind.UNKNOWN,
+        ", ".join(f"{name} {format_params(by_type[name] / 1e9)}" for name in ranked),
+    )
+    stored_fact = Fact()
+    if whole and stored is not None:
+        matches = file_size == header.data_start + stored
+        stored_fact = Fact(
+            stored,
+            "GGUF tensor table + file size" if matches else "GGUF tensor table",
+            FactKind.CROSS_CHECKED if matches else FactKind.EXACT,
+            f"{stored / GB:.2f} GiB of tensors"
+            + ("; with the header it is the file's exact size" if matches else ""),
+        )
+    labels = ", ".join(label for label, _ in files)
+    quantization = Fact(
+        f"GGUF {header.file_type or files[0][0]}",
+        "GGUF general.file_type",
+        FactKind.EXACT,
+        f"{len(files)} file{'s' if len(files) > 1 else ''}: {labels}",
+    )
+    facts = replace(
+        snapshot.facts, precision=precision, stored_bytes=stored_fact, quantization=quantization
+    )
+    # The shared code names safetensors and config.json as sources; here they are the GGUF's.
+    renamed = {"safetensors headers": "GGUF tensor table", "config.json": "GGUF settings"}
+
+    def from_gguf(fact: Fact) -> Fact:
+        source, note = fact.source, fact.note
+        for old, new in renamed.items():
+            source, note = source.replace(old, new), note.replace(old, new)
+        return replace(fact, source=source, note=note)
+
+    facts = ModelFacts(
+        **{name: from_gguf(getattr(facts, name)) for name in facts.__dataclass_fields__}
+    )
+    exact_sizes = {}
+    if whole:
+        for (name, _), tensor in zip(tensors, header.tensors, strict=True):
+            exact_sizes[name] = tensor.nbytes or 0
+    return replace(
+        snapshot,
+        facts=facts,
+        gguf_files=tuple(files),
+        gguf_tensor_bytes=exact_sizes,
+        use_case=str(meta.get("pipeline_tag") or "General"),
+    )
+
+
+def gguf_variants(
+    names_and_sizes: list[tuple[str, int]], header_bytes: int
+) -> list[tuple[str, int]]:
+    """One (quantization, tensor bytes) per GGUF variant: split parts added up, mmproj left out.
+    The tensor bytes are the file size less the header, which all variants share."""
+    variants: dict[str, int] = {}
+    for name, size in names_and_sizes:
+        base = Path(name).name
+        if base.lower().startswith("mmproj") or not base.endswith(".gguf"):
+            continue
+        key = SPLIT_PART.sub(".gguf", base)
+        variants[key] = variants.get(key, 0) + size - header_bytes
+    labels: dict[str, int] = {}
+    # Largest first, like the other tables: the best fit is the first comfortable row.
+    for key, size in sorted(variants.items(), key=lambda item: item[1], reverse=True):
+        label = quant_from_filename(key) or Path(key).stem
+        if label in labels:  # two files with the same quantization in their names
+            label = Path(key).stem
+        labels[label] = size
+    return list(labels.items())
+
+
+def pick_gguf_file(names: list[str]) -> str:
+    """The file whose header to read: Q4_K_M if there is one, else the first of the smallest
+    variant. All files of a model share the settings; only the tensor types differ."""
+    models = [
+        n for n in names if n.endswith(".gguf") and not Path(n).name.lower().startswith("mmproj")
+    ]
+    if not models:
+        raise OcqError("No GGUF model file found (only mmproj vision projectors).")
+    preferred = [n for n in models if quant_from_filename(n) == "Q4_K_M"]
+    firsts = [n for n in (preferred or models) if not SPLIT_PART.search(n) or "-00001-of-" in n]
+    return sorted(firsts or models)[0]
+
+
+def local_gguf_snapshot(
+    display_id: str, path: Path, hardware: HardwareProfile | None, context: int, kv_cache: str
+) -> ModelSnapshot:
+    files = [path] if path.is_file() else gguf_files(path)
+    if path.is_file() and SPLIT_PART.search(path.name):
+        files = sorted(path.parent.glob(SPLIT_PART.sub("-*-of-*.gguf", path.name)))
+    chosen = Path(pick_gguf_file([str(f) for f in files]))
+    header = read_local(chosen)
+    whole = not SPLIT_PART.search(chosen.name)
+    variants = gguf_variants([(str(f), f.stat().st_size) for f in files], header.data_start)
+    snapshot = gguf_snapshot(
+        display_id, {"pipeline_tag": "local"}, header, variants, chosen.stat().st_size, whole
+    )
+    snapshot = replace(
+        snapshot,
+        provider="local",
+        use_case="Local GGUF",
+        catalog_source="local",
+        weights_dir=path,
+    )
+    return (
+        with_fit(snapshot, hardware, context, kv_cache)
+        if hardware and snapshot.params_b
+        else snapshot
+    )
+
+
+def hub_gguf_snapshot(
+    model_id: str, meta: dict, hardware: HardwareProfile | None, context: int, kv_cache: str
+) -> ModelSnapshot:
+    """A Hub repo with only GGUF files: one header read with range requests, the file sizes
+    from the Hub's file list."""
+    sizes = hub_file_sizes(model_id)
+    chosen = pick_gguf_file(list(sizes))
+    revision = meta.get("sha") or "main"
+    header = read_remote(f"https://huggingface.co/{model_id}/resolve/{revision}/{chosen}")
+    whole = not SPLIT_PART.search(chosen)
+    variants = gguf_variants(list(sizes.items()), header.data_start)
+    snapshot = gguf_snapshot(model_id, meta, header, variants, sizes.get(chosen), whole)
+    return (
+        with_fit(snapshot, hardware, context, kv_cache)
+        if hardware and snapshot.params_b
+        else snapshot
+    )
+
+
+def hub_file_sizes(model_id: str) -> dict[str, int]:
+    """Every file of a Hub repo and its size in bytes."""
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    headers = {"User-Agent": "ocq/0.1"} | ({"Authorization": f"Bearer {token}"} if token else {})
+    request = urllib.request.Request(f"{HF_API}/{model_id}?blobs=true", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            siblings = json.loads(response.read().decode()).get("siblings", [])
+    except (urllib.error.URLError, ValueError) as exc:
+        raise OcqError(f"Could not list the files of {model_id}") from exc
+    return {s["rfilename"]: s.get("size") or 0 for s in siblings}
 
 
 def runtime_for_row(option: QuantOption) -> str:
@@ -713,6 +899,7 @@ LAYER_TYPE_KINDS = {
     "mamba2": STATE,
     "linear_attention": STATE,
     "conv": STATE,
+    "mlp": NO_CACHE,  # a layer with neither (from GGUF files: no KV heads, no SSM tensors)
 }
 # Nemotron-H's hybrid_override_pattern: attention, Mamba, MLP, MoE MLP.
 PATTERN_KINDS = {"*": FULL, "M": STATE, "-": NO_CACHE, "E": NO_CACHE}
@@ -1017,6 +1204,12 @@ def quant_options(
 
     kv_cache is the cache type asked for (--kv-cache); each row uses its runtime's version.
     """
+    if model.gguf_files:
+        # GGUF files: one row per file, as published. llama.cpp runs them.
+        return [
+            fit_at(label, size / GB, model, hardware, context, True, "gguf", kv_cache)
+            for label, size in model.gguf_files
+        ]
     if model.is_quantized:
         # Already quantized: only the files as they are. Re-quantizing would stack the errors.
         if model.original_gb is None:
@@ -1242,7 +1435,7 @@ def fit_at(
     experts_ram_layers, experts_ram_gb = 0, 0.0
     offload = None
     if vram and required > vram and not hardware.unified_memory and row_kind == "gguf":
-        offload = experts_to_ram(model, label, required - vram, ram)
+        offload = experts_to_ram(model, label, required - vram, ram, weights_gb)
     if vram and required <= vram:
         run_mode, available = RunMode.GPU, vram
     elif offload:
@@ -1302,7 +1495,11 @@ def fit_at(
 
 
 def experts_to_ram(
-    model: ModelSnapshot, gguf_type: str, too_much_gb: float, ram_gb: float
+    model: ModelSnapshot,
+    gguf_type: str,
+    too_much_gb: float,
+    ram_gb: float,
+    weights_gb: float = 0.0,
 ) -> tuple[int, float] | None:
     """llama.cpp --n-cpu-moe N: the experts of the first N layers stay in RAM, everything else
     goes to VRAM. The smallest N that frees `too_much_gb` of VRAM, and the GB moved to RAM.
@@ -1313,8 +1510,13 @@ def experts_to_ram(
     """
     if not (model.experts and model.experts_per_token and model.tensors):
         return None
-    heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
-    sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
+    if model.gguf_tensor_bytes:
+        # A GGUF file: its own tensor sizes, scaled when the row is another file of the repo.
+        scale = weights_gb * GB / sum(model.gguf_tensor_bytes.values()) if weights_gb else 1.0
+        sizes = {name: size * scale for name, size in model.gguf_tensor_bytes.items()}
+    else:
+        heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
+        sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
     by_layer: dict[int, int] = {}
     for name, shape in model.tensors:
         if routed_expert(name, shape, model.experts):

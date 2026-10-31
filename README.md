@@ -92,6 +92,15 @@ uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b bnb --bits 4 --execute
 
 Gated models (Llama, Gemma, …): set **`HF_TOKEN`** or **`HUGGING_FACE_HUB_TOKEN`**.
 
+**GGUF files work too**, from a repo that only has GGUFs or from disk. QuantPilot reads one file's header (with range requests, not the weights) and lists **one row per file** in `feasibility`, so you see which one fits:
+
+```sh
+uv run ocq feasibility unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF
+uv run ocq inspect ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf     # a file, or a folder of GGUFs
+```
+
+The tensor table is checked against the file size, and the context memory computed from a GGUF header matches llama.cpp's own log (Gemma 2/3, LFM2, Granite 4.0-H, Falcon-H1, Jamba).
+
 **Already-quantized repos** (GPTQ, AWQ, bitsandbytes, FP8, W8A8, NVFP4, MXFP4) are recognised. `feasibility` shows them as stored, and `plan` / `optimize` refuse to quantize them again, since that would stack the rounding errors. They point you to the original instead:
 
 ```

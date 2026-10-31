@@ -489,6 +489,10 @@ class ModelSnapshot:
     facts: ModelFacts = field(default_factory=ModelFacts)
     # One entry per layer, from config.json. Empty when config.json does not describe them.
     kv_layers: tuple[KvLayer, ...] = field(default=(), repr=False)
+    # A GGUF model: (quantization, bytes of tensor data) of each file, and the exact bytes of
+    # each tensor in the file whose header was read (by Hugging Face style name).
+    gguf_files: tuple[tuple[str, int], ...] = ()
+    gguf_tensor_bytes: dict[str, int] = field(default_factory=dict, repr=False)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:

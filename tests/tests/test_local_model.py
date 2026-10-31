@@ -184,3 +184,46 @@ def test_inspect_prints_every_fact(tmp_path):
         assert line in result.output
     assert "1,543,714,304" in result.output
     assert "32,768" in result.output
+
+
+def test_a_local_gguf_file_is_inspected_and_not_quantized_again(tmp_path):
+    from test_gguf_file import gguf_bytes
+
+    from ocq.plan import generate_plan
+    from ocq.types import OptimizationGoal
+
+    q8 = 8  # GGML type Q8_0: 34 bytes per 32 values
+    hidden, layers = 256, 2
+    tensors = [("token_embd.weight", (hidden, 1000), q8, hidden * 1000 // 32 * 34)]
+    for layer in range(layers):
+        for name, rows in (
+            ("attn_q", hidden),
+            ("attn_k", 64),
+            ("attn_v", 64),
+            ("attn_output", hidden),
+        ):
+            tensors.append(
+                (f"blk.{layer}.{name}.weight", (hidden, rows), q8, hidden * rows // 32 * 34)
+            )
+    settings = {
+        "general.architecture": "llama",
+        "general.file_type": 7,
+        "llama.block_count": layers,
+        "llama.embedding_length": hidden,
+        "llama.attention.head_count": 4,
+        "llama.attention.head_count_kv": 1,
+        "llama.context_length": 2048,
+        "llama.vocab_size": 1000,
+    }
+    path = tmp_path / "tiny-Q8_0.gguf"
+    path.write_bytes(gguf_bytes(settings, tensors))
+
+    snap = resolve_model(str(path), make_hardware())
+    assert snap.facts.quantization.value == "GGUF Q8_0"
+    assert snap.facts.stored_bytes.kind == FactKind.CROSS_CHECKED  # tensor table + file size
+    assert snap.facts.parameters.source == "GGUF tensor table"
+    assert snap.facts.kv_cache.value == layers * 2 * 64 * 2  # 1 KV head of 64, keys + values
+    (row,) = quant_options(snap, make_hardware())
+    assert (row.label, row.row_kind) == ("Q8_0", "gguf")
+    with pytest.raises(OcqError, match="already GGUF"):
+        generate_plan(snap.model_id, make_hardware(), snap, OptimizationGoal.BALANCED, tmp_path)
