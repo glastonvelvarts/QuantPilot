@@ -28,6 +28,7 @@ from ocq.model_size import (
     experts_in_names,
     gguf_weights_bytes,
     kv_cache_bytes,
+    kv_value_bytes,
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
@@ -35,6 +36,7 @@ from ocq.model_size import (
     stored_bytes,
     weights_per_token,
 )
+from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM
 
 MIB = 1024**2
 
@@ -259,3 +261,21 @@ def test_a_dense_model_reads_all_but_its_input_embedding_rows():
     # Qwen2.5-1.5B ties the embedding to the output layer: read in full as the output.
     _, _, tensors, dtypes = real_model(QWEN)
     assert weights_per_token(tensors, dtypes, None) == (1_543_714_304, 0)
+
+
+@pytest.mark.parametrize(
+    ("cache", "runtime", "value_bytes"),
+    [
+        ("f16", LLAMA_CPP, 2),
+        # llama.cpp stores the cache in GGUF blocks: 32 values in 34 (q8_0) or 18 (q4_0) bytes.
+        ("q8_0", LLAMA_CPP, 34 / 32),
+        ("q4_0", LLAMA_CPP, 18 / 32),
+        # vLLM's quantized cache is fp8 (--kv-cache-dtype fp8) and it has no 4-bit one.
+        ("q8_0", VLLM, 1),
+        ("q4_0", VLLM, 1),
+        # transformers keeps 16 bits.
+        ("q4_0", TRANSFORMERS, 2),
+    ],
+)
+def test_a_cached_value_costs_what_its_runtime_stores(cache, runtime, value_bytes):
+    assert kv_value_bytes(cache, runtime) == value_bytes

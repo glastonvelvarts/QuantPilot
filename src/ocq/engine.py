@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ocq.model_size import group_size_that_fits
 from ocq.types import (
+    KV_CACHE_TYPES,
     HardwareProfile,
     ModelSnapshot,
     OcqError,
@@ -59,6 +60,9 @@ def decide_quant_config(
     choices: QuantChoices | None = None,
 ) -> QuantConfig:
     choices = choices or QuantChoices()
+    kv_cache = (choices.kv_cache or "f16").lower()
+    if kv_cache not in KV_CACHE_TYPES:
+        raise OcqError(f"Unknown --kv-cache {kv_cache!r}. Use one of: {', '.join(KV_CACHE_TYPES)}")
     algorithm = choices.algorithm
     asked_bits = choices.bits
     gguf_type = (choices.gguf_type or "").upper()
@@ -130,6 +134,7 @@ def decide_quant_config(
         target_quant_label=model.llmfit_best_quant,
         gguf_type=gguf_type if algorithm == QuantAlgorithm.GGUF else "",
         context=choices.context or 4096,
+        kv_cache=kv_cache,
         double_quant=double_quant,
         fp4_activations=fp4_activations,
     )

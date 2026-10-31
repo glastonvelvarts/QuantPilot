@@ -77,7 +77,15 @@ SLIDING_WINDOW_UBATCH = 512  # llama.cpp -ub
 KV_CELL_PADDING = 256
 CONVERSATIONS = 4  # llama-server's default (n_parallel auto = 4), the largest of the runtimes
 KV_BYTES_PER_VALUE = 2  # 16-bit keys and values (llama.cpp -ctk f16, vLLM kv-cache-dtype auto)
+
+# The runtime that serves a row: GGUF in llama.cpp, AWQ/GPTQ/NVFP4 in vLLM, the original weights
+# and bitsandbytes in transformers.
+LLAMA_CPP = "llama.cpp"
+VLLM = "vLLM"
 TRANSFORMERS = "transformers"
+
+# Cache types the user can ask for (--kv-cache), named as llama.cpp names them.
+KV_CACHE_TYPES = ("f16", "q8_0", "q4_0")
 
 
 @dataclass(frozen=True)
@@ -90,17 +98,23 @@ class KvLayer:
     transformers_bytes_per_token: int = 0
 
     def cache_bytes(
-        self, context: int, runtime: str = "", conversations: int = CONVERSATIONS
+        self,
+        context: int,
+        runtime: str = "",
+        conversations: int = CONVERSATIONS,
+        value_bytes: float = KV_BYTES_PER_VALUE,
     ) -> int:
+        """value_bytes: what one cached value takes, 2 at 16-bit, 1.0625 for llama.cpp's q8_0."""
         per_token = self.bytes_per_token
         if runtime == TRANSFORMERS and self.transformers_bytes_per_token:
             per_token = self.transformers_bytes_per_token
+        per_token = per_token * value_bytes / KV_BYTES_PER_VALUE
         tokens = context
         if self.window:
             wanted = self.window * conversations + SLIDING_WINDOW_UBATCH
             cells = -(-wanted // KV_CELL_PADDING) * KV_CELL_PADDING
             tokens = min(context, cells)
-        return per_token * tokens
+        return round(per_token * tokens)
 
 
 @dataclass(frozen=True)
@@ -492,7 +506,11 @@ class ModelSnapshot:
         return 1.0
 
     def kv_cache_bytes(
-        self, context: int, runtime: str = "", conversations: int = CONVERSATIONS
+        self,
+        context: int,
+        runtime: str = "",
+        conversations: int = CONVERSATIONS,
+        value_bytes: float = KV_BYTES_PER_VALUE,
     ) -> int | None:
         """Keys and values for `context` tokens. None when they could not be worked out.
 
@@ -502,12 +520,15 @@ class ModelSnapshot:
         """
         if self.kv_layers:
             return sum(
-                layer.cache_bytes(context, runtime, conversations) for layer in self.kv_layers
+                layer.cache_bytes(context, runtime, conversations, value_bytes)
+                for layer in self.kv_layers
             )
+        scale = value_bytes / KV_BYTES_PER_VALUE
         if self.facts.kv_cache.known:
-            return self.facts.kv_cache.value * context
+            return round(self.facts.kv_cache.value * context * scale)
         if self.architecture_known:
-            return 2 * self.num_layers * self.num_kv_heads * self.head_dim * 2 * context
+            per_token = 2 * self.num_layers * self.num_kv_heads * self.head_dim * KV_BYTES_PER_VALUE
+            return round(per_token * context * scale)
         return None
 
     @property
@@ -530,6 +551,7 @@ class QuantChoices:
     calibration_samples: int | None = None
     calibration_seq_len: int | None = None
     context: int | None = None
+    kv_cache: str | None = None
     double_quant: bool | None = None
     fp4_activations: bool | None = None
 
@@ -544,6 +566,7 @@ class QuantConfig:
     target_quant_label: str = "Q4_K_M"
     gguf_type: str = ""
     context: int = 4096
+    kv_cache: str = "f16"  # f16, q8_0 or q4_0 (KV_CACHE_TYPES)
     # bitsandbytes 4-bit only: also quantize the per-block scales.
     double_quant: bool = False
     # NVFP4 only: activations in FP4 too (Blackwell), or weights only.

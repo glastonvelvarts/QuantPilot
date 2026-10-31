@@ -92,6 +92,10 @@ class GGUFQuantizer(Quantizer):
 
     def benchmark(self, plan: OptimizationPlan, artifact_path: str) -> BenchmarkResult:
         workspace = plan.output_dir / "workspace"
+        # The cache type the plan was sized for (--kv-cache). Quantizing the V cache needs flash
+        # attention, which llama.cpp's default (-fa auto) switches on by itself.
+        cache = plan.quant_config.kv_cache
+        cache_flags = [] if cache == "f16" else ["-ctk", cache, "-ctv", cache]
 
         # One real answer: the sample text, the time to first token, and where the layers ran.
         text, log = run_tool(
@@ -111,6 +115,7 @@ class GGUFQuantizer(Quantizer):
                 "--no-display-prompt",
                 "--log-verbosity",
                 "4",
+                *cache_flags,
             ],
             log=workspace / "benchmark.log",
         )
@@ -140,6 +145,7 @@ class GGUFQuantizer(Quantizer):
                 str(gpu_layers),
                 "-o",
                 "json",
+                *cache_flags,
             ],
             log=workspace / "speed.log",
         )
