@@ -24,7 +24,6 @@ from ocq.model_size import (
     experts_in_names,
     gguf_weights_bytes,
     group_size_that_fits,
-    kv_cache_bytes,
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
@@ -33,16 +32,21 @@ from ocq.model_size import (
     weights_per_token,
 )
 from ocq.types import (
+    CONVERSATIONS,
     DTYPE_BITS,
     INTEGER_TYPES,
+    KV_BYTES_PER_VALUE,
     LAYER_SPLIT,
     ONE_GPU,
+    SLIDING_WINDOW_UBATCH,
     TENSOR_PARALLEL,
+    TRANSFORMERS,
     Fact,
     FactKind,
     FeasibilityEstimate,
     FitLevel,
     HardwareProfile,
+    KvLayer,
     ModelFacts,
     ModelSnapshot,
     OcqError,
@@ -298,6 +302,7 @@ def build_snapshot(
         tensors=tuple(tensors),
         catalog_source="huggingface",
         facts=facts,
+        kv_layers=kv_layers_from(config)[0],
         raw=meta,
         **(architecture_from(config) or vocabulary_from_tensors(tensors)),
     )
@@ -649,7 +654,7 @@ def layers_in_names(tensors: list[Tensor]) -> int | None:
 
 
 KV_PROJECTION = re.compile(
-    r"^(.*?)\.(?:layers|h|blocks)\.\d+\.(?:self_attn|attention|attn)\.[kv]_proj\.weight(?:_packed)?$"
+    r"^(.*?)\.(?:layers|h|blocks)\.\d+\.(?:self_attn|attention|attn|mixer)\.[kv]_proj\.weight(?:_packed)?$"
 )
 
 
@@ -681,35 +686,193 @@ def vocabulary_from_tensors(tensors: list[Tensor]) -> dict:
     return {"vocab_size": shapes[2]} if shapes else {}
 
 
-def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
-    """Bytes of keys and values per token of context, from config.json and the tensor shapes."""
-    found = architecture_from(config)
-    from_config = None
-    if found:
-        head_dim = (
-            found["attention_head_dim"] or found["hidden_size"] // found["num_attention_heads"]
+# What a layer keeps for the context. Only attention layers keep keys and values for every token;
+# Mamba, linear-attention and convolution layers keep a small state of fixed size instead.
+FULL, SLIDING, CHUNKED, NO_CACHE = "full", "sliding", "chunked", "no cache"
+LAYER_TYPE_KINDS = {
+    "full_attention": FULL,
+    "attention": FULL,
+    "sliding_attention": SLIDING,
+    "chunked_attention": CHUNKED,
+}
+
+
+def layer_kinds(text: dict, layers: int) -> tuple[list[str], str]:
+    """The kind of every layer and which config.json key said so. Families write it differently:
+
+    layer_types               one name per layer (Gemma 3, gpt-oss, Granite 4.0-H, ...)
+    full_attn_idxs            the attention layers by number, the rest convolutions (LFM2)
+    full_attention_interval   every Nth layer attention, the rest linear attention (Qwen3-Next)
+    hybrid_override_pattern   a letter per layer, * attention, M Mamba, - MLP (Nemotron-H)
+    attn_layer_period/offset  attention at offset, offset + period, ... (Jamba)
+    no_rope_layers            1 chunked attention, 0 full (Llama 4)
+    sliding_window_pattern    every Nth layer full, the rest sliding (Gemma 3, Cohere2)
+    Gemma 2 alternates sliding and full layers without saying so (as transformers does).
+    """
+    types = text.get("layer_types")
+    if isinstance(types, list) and len(types) == layers:
+        return [LAYER_TYPE_KINDS.get(kind, NO_CACHE) for kind in types], "layer_types"
+    if isinstance(text.get("full_attn_idxs"), list):
+        attention = set(text["full_attn_idxs"])
+        kinds = [FULL if index in attention else NO_CACHE for index in range(layers)]
+        return kinds, "full_attn_idxs"
+    if text.get("full_attention_interval"):
+        interval = text["full_attention_interval"]
+        kinds = [NO_CACHE if (index + 1) % interval else FULL for index in range(layers)]
+        return kinds, "full_attention_interval"
+    pattern = text.get("hybrid_override_pattern")
+    if isinstance(pattern, str) and len(pattern) == layers:
+        return [
+            FULL if letter == "*" else NO_CACHE for letter in pattern
+        ], "hybrid_override_pattern"
+    if text.get("attn_layer_period"):
+        period, offset = text["attn_layer_period"], text.get("attn_layer_offset", 0)
+        kinds = [FULL if index % period == offset else NO_CACHE for index in range(layers)]
+        return kinds, "attn_layer_period"
+    no_rope = text.get("no_rope_layers")
+    if text.get("attention_chunk_size") and isinstance(no_rope, list) and len(no_rope) >= layers:
+        return [CHUNKED if no_rope[index] else FULL for index in range(layers)], "no_rope_layers"
+    if text.get("sliding_window_pattern"):
+        every = text["sliding_window_pattern"]
+        kinds = [SLIDING if (index + 1) % every else FULL for index in range(layers)]
+        return kinds, "sliding_window_pattern"
+    if text.get("model_type") == "gemma2":
+        return [SLIDING if index % 2 == 0 else FULL for index in range(layers)], "Gemma 2"
+    if text.get("sliding_window"):
+        return [SLIDING] * layers, "sliding_window"
+    return [FULL] * layers, ""
+
+
+def layer_windows(text: dict, layers: int) -> tuple[list[int | None], str]:
+    """Tokens each layer keeps per conversation (0 = all, None = no cache) and a note.
+
+    llama.cpp only shrinks the cache of models that mix windowed and full layers (Gemma 2/3,
+    gpt-oss, Cohere2, Llama 4, ...). A window on every layer (Mistral 7B v0.1) is counted in full.
+    """
+    kinds, said_by = layer_kinds(text, layers)
+    window = text.get("sliding_window") or 0
+    if text.get("use_sliding_window") is False:
+        window = 0
+    chunk = text.get("attention_chunk_size") or 0
+    windows: list[int | None] = []
+    for kind in kinds:
+        if kind == NO_CACHE:
+            windows.append(None)
+        elif kind == SLIDING:
+            windows.append(window)
+        elif kind == CHUNKED:
+            windows.append(chunk)
+        else:
+            windows.append(0)
+
+    notes = []
+    attention = [w for w in windows if w is not None]
+    if attention and all(attention):
+        notes.append(f"a {attention[0]:,}-token window on every layer, counted in full")
+        windows = [None if w is None else 0 for w in windows]
+    sliding = sum(1 for kind, w in zip(kinds, windows, strict=True) if kind == SLIDING and w)
+    chunked = sum(1 for kind, w in zip(kinds, windows, strict=True) if kind == CHUNKED and w)
+    stateful = windows.count(None)
+    if sliding:
+        notes.append(f"{sliding} of {layers} layers keep only the last {window:,} tokens")
+    if chunked:
+        notes.append(f"{chunked} of {layers} layers attend within {chunk:,}-token chunks")
+    if stateful:
+        notes.append(
+            f"{stateful} of {layers} layers keep a fixed-size state instead of a cache "
+            f"(not counted), as {said_by} says"
         )
-        from_config = kv_cache_bytes(found["num_layers"], found["num_kv_heads"], head_dim, 1)
+    return windows, "; ".join(notes)
+
+
+def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
+    """What every layer caches per token, from config.json, and a note on anything unusual."""
+    found = architecture_from(config)
+    if not found:
+        return (), ""
+    text, _ = text_config(config)
+    windows, note = layer_windows(text, found["num_layers"])
+    if text.get("kv_lora_rank"):
+        # MLA (DeepSeek V2/V3, Kimi): one compressed vector plus the rotary part per token.
+        rope = text.get("qk_rope_head_dim", 0)
+        compressed = (text["kv_lora_rank"] + rope) * KV_BYTES_PER_VALUE
+        heads = found["num_attention_heads"]
+        expanded = heads * (text.get("qk_nope_head_dim", 0) + rope + text.get("v_head_dim", 0))
+        expanded *= KV_BYTES_PER_VALUE
+        mla = (
+            f"MLA: {compressed // KV_BYTES_PER_VALUE} compressed values per layer in llama.cpp "
+            f"and vLLM, {expanded // KV_BYTES_PER_VALUE} in transformers"
+        )
+        layers = tuple(
+            KvLayer(0) if window is None else KvLayer(compressed, window, expanded)
+            for window in windows
+        )
+        return layers, "; ".join(filter(None, [note, mla]))
+    head_dim = found["attention_head_dim"] or found["hidden_size"] // found["num_attention_heads"]
+    per_layer = 2 * found["num_kv_heads"] * head_dim * KV_BYTES_PER_VALUE  # keys and values
+    layers = tuple(
+        KvLayer(0) if window is None else KvLayer(per_layer, window) for window in windows
+    )
+    return layers, note
+
+
+MLA_PROJECTION = re.compile(
+    r"^(.*?)\.(?:layers|h|blocks)\.\d+\.self_attn\.kv_a_proj_with_mqa\.weight$"
+)
+
+
+def mla_width_from_tensors(tensors: list[Tensor]) -> int:
+    """Compressed values cached per token over all layers: kv_a_proj_with_mqa writes them."""
+    return sum(
+        shape[0]
+        for name, shape in tensors
+        if MLA_PROJECTION.match(name) and not NOT_LANGUAGE_MODEL.search(name) and len(shape) == 2
+    )
+
+
+def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
+    """Bytes of keys and values per token of context, from config.json and the tensor shapes.
+
+    The value is what every layer adds per token. Sliding-window layers stop adding at their
+    window, so the note gives the total at a long context too.
+    """
+    layers, layout = kv_layers_from(config)
+    from_config = sum(layer.bytes_per_token for layer in layers) or None
     shapes = attention_from_tensors(tensors)
-    from_shapes = shapes[0] * 2 if shapes else None
+    from_shapes = shapes[0] * 2 if shapes else (mla_width_from_tensors(tensors) * 2 or None)
     _, key = text_config(config)
     config_source = f"config.json {key}".strip()
 
+    notes = [layout] if layout else []
+    if layers:
+        text, _ = text_config(config)
+        longest = text.get("max_position_embeddings") or 0
+        windowed = any(layer.window for layer in layers)
+        for tokens in sorted({DEFAULT_CONTEXT, longest} - {0}):
+            size = sum(layer.cache_bytes(tokens) for layer in layers)
+            line = f"{size / 2**20:,.0f} MiB at {tokens:,} tokens"
+            alone = sum(layer.cache_bytes(tokens, conversations=1) for layer in layers)
+            if windowed and alone != size:
+                line += f" ({alone / 2**20:,.0f} MiB for 1 conversation)"
+            notes.append(line)
+        # Say which numbers come from runtime settings rather than from the model.
+        assumed = [f"{KV_BYTES_PER_VALUE * 8}-bit cache (llama.cpp -ctk f16)"]
+        if windowed:
+            assumed.append(
+                f"windows sized for {CONVERSATIONS} conversations (llama-server's default) "
+                f"+ {SLIDING_WINDOW_UBATCH}-token micro-batch"
+            )
+        notes.append("assumes " + ", ".join(assumed))
     if from_config and from_shapes:
         if from_config == from_shapes:
-            note = f"{from_config * DEFAULT_CONTEXT / 2**20:,.0f} MiB at {DEFAULT_CONTEXT:,} tokens"
-            return Fact(
-                from_config, f"{config_source} + tensor shapes", FactKind.CROSS_CHECKED, note
-            )
-        note = f"tensor shapes give {from_shapes:,} bytes per token"
-        return Fact(from_config, config_source, FactKind.ESTIMATE, note)
+            source = f"{config_source} + tensor shapes"
+            return Fact(from_config, source, FactKind.CROSS_CHECKED, "; ".join(notes))
+        notes.append(f"tensor shapes give {from_shapes:,} bytes per token")
+        return Fact(from_config, config_source, FactKind.ESTIMATE, "; ".join(notes))
     if from_config:
-        return Fact(from_config, config_source, FactKind.EXACT, "standard attention assumed")
+        return Fact(from_config, config_source, FactKind.EXACT, "; ".join(notes))
     if from_shapes:
-        note = (
-            f"config.json has no layer or head counts; K+V projections of {shapes[1]} layers "
-            f"are {shapes[0]:,} values wide"
-        )
+        note = "config.json has no layer or head counts; from the K and V projection shapes"
         return Fact(from_shapes, "tensor shapes", FactKind.ESTIMATE, note)
     return Fact(note="no layer or head counts in config.json, no k_proj/v_proj tensors")
 
@@ -932,10 +1095,12 @@ def fit_at(
             f"headers and no count from HuggingFace{f' ({hint})' if hint else ''}. "
             "Its memory needs cannot be computed."
         )
-    per_token = model.kv_bytes_per_token
+    # transformers expands MLA's compressed cache; llama.cpp and vLLM keep it compressed.
+    runtime = TRANSFORMERS if row_kind in ("stored", QuantAlgorithm.BNB.value) else ""
+    kv_bytes = model.kv_cache_bytes(context, runtime)
     context_gb = 0.0
-    if per_token is not None:
-        context_gb = (per_token * context + output_buffer_bytes(model.vocab_size)) / GB
+    if kv_bytes is not None:
+        context_gb = (kv_bytes + output_buffer_bytes(model.vocab_size)) / GB
 
     required = weights_gb + context_gb
     # vLLM serves AWQ, GPTQ and NVFP4 with tensor parallel; llama.cpp and transformers split
@@ -968,7 +1133,7 @@ def fit_at(
         fit_level = FitLevel.GOOD
     else:
         fit_level = FitLevel.PERFECT
-    if per_token is None and fit_level in (FitLevel.PERFECT, FitLevel.GOOD):
+    if kv_bytes is None and fit_level in (FitLevel.PERFECT, FitLevel.GOOD):
         # The context memory is unknown, so the headroom these levels promise is not known.
         fit_level = FitLevel.MARGINAL
 
@@ -986,8 +1151,8 @@ def fit_at(
         bits=weights_gb * GB * 8 / (model.params_b * 1e9),
         weights_gb=weights_gb,
         context_gb=context_gb,
-        exact=bool(model.tensors) and per_token is not None,
-        context_known=per_token is not None,
+        exact=bool(model.tensors) and kv_bytes is not None,
+        context_known=kv_bytes is not None,
         memory_required_gb=required,
         memory_available_gb=available,
         fit_level=fit_level,

@@ -3,12 +3,22 @@
 import pytest
 from conftest import (
     DEEPSEEK_V2_LITE,
+    FALCON_H1,
+    GEMMA2_2B,
+    GEMMA3_1B,
     GPT_OSS,
+    GRANITE_H,
+    JAMBA,
+    LFM2,
+    LLAMA4_SCOUT,
+    MISTRAL_V01,
     MIXTRAL,
+    NEMOTRON_H,
     OCQ_NVFP4,
     QWEN,
     QWEN3_8B_NVFP4,
     QWEN3_MOE,
+    QWEN3_NEXT,
     QWEN_72B,
     QWEN_AWQ,
     QWEN_BNB,
@@ -34,6 +44,7 @@ from ocq.model_analyzer import (
 from ocq.types import (
     ONE_GPU,
     TENSOR_PARALLEL,
+    TRANSFORMERS,
     FactKind,
     FitLevel,
     GpuProfile,
@@ -526,3 +537,130 @@ def test_benchmark_runs_are_stored_as_what_one_token_reads():
     remember_speed(plan, run, SimpleNamespace(device="gpu", tokens_per_second=120.0))
     # A 17 GB MoE file that reads 1.7 GB per token must not look like a fast 17 GB dense model.
     assert measurements.load()[-1]["weights_gb"] == pytest.approx(17.0 * snap.read_fraction)
+
+
+# Context memory for sliding-window attention and MLA. Expected sizes are from llama.cpp's own
+# log (build b11429, -c N -v): "llama_kv_cache: size = ... MiB".
+
+MIB = 2**20
+
+
+@pytest.mark.parametrize(
+    ("repo", "context", "conversations", "llama_cpp_mib"),
+    [
+        # llama-completion (1 conversation). Gemma 3 1B: 4 full layers x 16 or 128 MiB, and a
+        # sliding cache of 1024 cells (512 window + 512 ubatch) for 22 layers: 22 MiB.
+        (GEMMA3_1B, 4096, 1, 16 + 22),
+        (GEMMA3_1B, 32768, 1, 128 + 22),
+        # Gemma 2 2B: 13 full layers 416 MiB, 13 sliding layers of 4608 cells 234 MiB.
+        (GEMMA2_2B, 8192, 1, 416 + 234),
+        # llama-server (n_parallel auto = 4): the sliding cache holds 4 windows, 2560 cells ...
+        (GEMMA3_1B, 32768, 4, 128 + 55),
+        # ... and for Gemma 2 that is more than the 8192-token context, so all of it.
+        (GEMMA2_2B, 8192, 4, 416 + 416),
+    ],
+)
+def test_sliding_window_cache_matches_llama_cpp(repo, context, conversations, llama_cpp_mib):
+    snap = real_snapshot(repo)
+    assert snap.kv_cache_bytes(context, conversations=conversations) == llama_cpp_mib * MIB
+
+
+def test_the_default_is_llama_servers_four_conversations():
+    snap = real_snapshot(GEMMA3_1B)
+    assert snap.kv_cache_bytes(32768) == snap.kv_cache_bytes(32768, conversations=4)
+
+
+def test_gpt_oss_keeps_a_small_cache_on_its_sliding_layers():
+    kv = real_snapshot(GPT_OSS).facts.kv_cache
+    assert kv.kind == FactKind.CROSS_CHECKED
+    assert "12 of 24 layers keep only the last 128 tokens" in kv.note
+    # 12 full layers x 32,768 tokens + 12 sliding layers x 1024 cells (4 x 128 + 512), 2,048
+    # bytes each
+    expected = 12 * 2048 * 32768 + 12 * 2048 * 1024
+    assert real_snapshot(GPT_OSS).kv_cache_bytes(32768) == expected
+
+
+def test_a_window_on_every_layer_is_counted_in_full():
+    # llama.cpp keeps Mistral 7B v0.1's whole cache: only models mixing layer kinds get less.
+    snap = real_snapshot(MISTRAL_V01)
+    assert snap.kv_cache_bytes(32768) == 32 * 4096 * 32768
+    assert "on every layer, counted in full" in snap.facts.kv_cache.note
+
+
+def test_a_disabled_window_is_ignored():
+    # Qwen2.5 configs carry sliding_window 32768 with use_sliding_window false.
+    assert real_snapshot(QWEN).kv_cache_bytes(32768) == 28 * 1024 * 32768
+
+
+def test_mla_caches_a_compressed_vector_and_transformers_expands_it():
+    snap = real_snapshot(DEEPSEEK_V2_LITE)
+    kv = snap.facts.kv_cache
+    # 27 layers x (kv_lora_rank 512 + rope 64) x 2 bytes, cross-checked with the width of
+    # kv_a_proj_with_mqa, the projection that writes it. It used to be 221,184 (full heads).
+    assert kv.value == 27 * 576 * 2
+    assert kv.kind == FactKind.CROSS_CHECKED
+    # transformers keeps 16 heads x (128 + 64) keys and 16 x 128 values per layer.
+    assert snap.kv_cache_bytes(4096, TRANSFORMERS) == 27 * 16 * (192 + 128) * 2 * 4096
+
+
+def test_fit_uses_the_cache_of_the_runtime_that_serves_the_row():
+    hardware = nvidia_pc(RTX_3090)
+    rows = options_by_label(real_snapshot(DEEPSEEK_V2_LITE, hardware), hardware)
+    # GGUF (llama.cpp) keeps the compressed MLA cache, bitsandbytes (transformers) expands it.
+    # The output buffer is the same for both, so the difference is the two caches.
+    compressed, expanded = 27 * 576 * 2, 27 * 16 * (192 + 128) * 2
+    difference = rows["BNB 4-bit double"].context_gb - rows["Q4_K_M"].context_gb
+    assert difference * 1024**3 == pytest.approx((expanded - compressed) * 4096)
+
+
+# Hybrids: only attention layers keep a cache that grows with the context. Reading the wrong
+# layers would not match the tensor shapes, since only attention layers have k_proj and v_proj.
+
+
+@pytest.mark.parametrize(
+    ("repo", "attention_layers", "layers", "bytes_per_layer", "was"),
+    [
+        (LFM2, 6, 16, 2048, 32_768),  # layers 2, 5, 8, 10, 12, 14
+        (JAMBA, 2, 28, 512, 14_336),  # layers 7 and 21
+        (GRANITE_H, 4, 40, 2048, 81_920),  # layers 5, 15, 25, 35
+        (NEMOTRON_H, 4, 56, 4096, 229_376),  # layers 14, 21, 30, 39
+    ],
+)
+def test_only_attention_layers_of_a_hybrid_keep_a_cache(
+    repo, attention_layers, layers, bytes_per_layer, was
+):
+    kv = real_snapshot(repo).facts.kv_cache
+    assert kv.value == attention_layers * bytes_per_layer
+    assert kv.value < was  # every layer used to be counted
+    assert kv.kind == FactKind.CROSS_CHECKED
+    stateful = layers - attention_layers
+    assert f"{stateful} of {layers} layers keep a fixed-size state" in kv.note
+
+
+def test_qwen3_next_has_attention_every_fourth_layer():
+    kv = real_snapshot(QWEN3_NEXT).facts.kv_cache
+    assert kv.value == 12 * 2 * 2 * 256 * 2  # 12 layers x keys and values x 2 heads x 256 x 2 B
+    assert "as full_attention_interval says" in kv.note
+
+
+def test_a_hybrid_with_attention_in_every_layer_keeps_it_all():
+    # Falcon-H1 runs attention and Mamba side by side, so every layer has a cache.
+    kv = real_snapshot(FALCON_H1).facts.kv_cache
+    assert kv.value == 36 * 2 * 2 * 64 * 2
+    assert "fixed-size state" not in kv.note
+
+
+def test_llama4_chunked_layers_keep_one_chunk():
+    snap = real_snapshot(LLAMA4_SCOUT)
+    assert "36 of 48 layers attend within 8,192-token chunks" in snap.facts.kv_cache.note
+    # 12 full layers keep every token, 36 chunked ones 8,192 + 512 cells for 1 conversation.
+    per_layer = 2 * 8 * 128 * 2
+    expected = 12 * per_layer * 65536 + 36 * per_layer * 8704
+    assert snap.kv_cache_bytes(65536, conversations=1) == expected
+
+
+def test_the_note_says_which_runtime_settings_are_assumed():
+    assert "assumes 16-bit cache" in real_snapshot(QWEN).facts.kv_cache.note
+    note = real_snapshot(GEMMA3_1B).facts.kv_cache.note
+    assert "windows sized for 4 conversations" in note
+    assert "183 MiB at 32,768 tokens (150 MiB for 1 conversation)" in note
