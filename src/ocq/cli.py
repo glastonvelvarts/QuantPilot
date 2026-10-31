@@ -233,6 +233,7 @@ def cmd_inspect(
         ("Architecture", facts.architecture),
         ("Context length", facts.context_length),
         ("KV bytes/token", facts.kv_cache),
+        ("Used per token", facts.active_parameters),
         ("Quantization", facts.quantization),
     )
     # Three columns: long sources and notes wrap inside the last one, the kinds line up.

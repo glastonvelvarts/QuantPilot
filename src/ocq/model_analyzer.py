@@ -16,10 +16,12 @@ from ocq.engine import default_group_size
 from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
 from ocq.local_model import fetch_local_model_files, parse_model_ref
 from ocq.model_size import (
+    EMBEDDING,
     QUANT_METADATA,
     Tensor,
     bnb_scale_bits,
     bnb_weights_bytes,
+    experts_in_names,
     gguf_weights_bytes,
     group_size_that_fits,
     kv_cache_bytes,
@@ -28,6 +30,7 @@ from ocq.model_size import (
     packed_weights_bytes,
     parameters_by_type,
     stored_bytes,
+    weights_per_token,
 )
 from ocq.types import (
     DTYPE_BITS,
@@ -291,7 +294,7 @@ def build_snapshot(
         params_b=parameters / 1e9,
         context_length=facts.context_length.value,
         use_case=str(meta.get("pipeline_tag") or "General"),
-        is_moe=is_moe(meta, model_id),
+        is_moe=bool(experts_in_names(tensors) or expert_settings(config)[0]),
         tensors=tuple(tensors),
         catalog_source="huggingface",
         facts=facts,
@@ -377,8 +380,10 @@ def model_facts(
     quantization, bits = quantization_fact(config, tensors, dtypes)
     by_type = parameters_by_type(tensors, dtypes, bits) if tensors else None
     copy = lm_head_copy(config, tensors)
+    parameters = parameter_fact(meta, model_id, tensors, by_type, bits, copy)
     return ModelFacts(
-        parameters=parameter_fact(meta, model_id, tensors, by_type, bits, copy),
+        parameters=parameters,
+        active_parameters=active_fact(config, tensors, dtypes, bits, parameters),
         precision=precision_fact(meta, by_type, bits),
         stored_bytes=stored_bytes_fact(meta, tensors, dtypes, bits),
         architecture=architecture_fact(config, tensors),
@@ -473,6 +478,53 @@ def quantization_fact(
     else:
         return Fact(), None
     return Fact("none", source, kind, "no quantization_config, plain weights"), None
+
+
+EXPERT_COUNT = ("num_experts", "num_local_experts", "n_routed_experts")
+EXPERTS_PER_TOKEN = ("num_experts_per_tok", "experts_per_token", "moe_topk")
+
+
+def expert_settings(config: dict) -> tuple[int, int]:
+    """(routed experts per layer, experts each token uses) as config.json states them."""
+    text, _ = text_config(config)
+    experts = next((text[key] for key in EXPERT_COUNT if text.get(key)), 0)
+    per_token = next((text[key] for key in EXPERTS_PER_TOKEN if text.get(key)), 0)
+    return experts, per_token
+
+
+def active_fact(
+    config: dict, tensors: list[Tensor], dtypes: dict[str, str], bits: int | None, total: Fact
+) -> Fact:
+    """Weights read for one token. The speed limit depends on this, not on the total.
+
+    A mixture-of-experts model holds every expert in memory but runs only a few per token.
+    """
+    configured, per_token = expert_settings(config)
+    named = experts_in_names(tensors)
+    if not tensors:
+        note = f"{configured} experts, but no tensor headers to count them" if configured else ""
+        return Fact(note=note)
+    experts = named or configured
+    if experts and not per_token:
+        return Fact(note=f"{experts} experts, but config.json does not say how many run per token")
+    counted = weights_per_token(tensors, dtypes, bits, experts, per_token)
+    if counted is None:
+        return Fact(note="packed tensors could not be unpacked")
+
+    read, embedding = counted
+    parts = [f"{per_token} of {experts} experts per token" if experts else "dense"]
+    if embedding:
+        parts.append(f"input embedding left out: {format_params(embedding / 1e9)}, one row read")
+    if total.value:
+        parts.append(f"{read / total.value:.0%} of the weights")
+
+    source, kind = "tensor names", FactKind.EXACT
+    if configured and named and configured != named:
+        kind = FactKind.ESTIMATE
+        parts.append(f"config.json says {configured} experts, the tensor names show {named}")
+    elif config and (configured == named):
+        source, kind = "config.json + tensor names", FactKind.CROSS_CHECKED
+    return Fact(read, source, kind, ", ".join(parts))
 
 
 def lm_head_copy(config: dict, tensors: list[Tensor]) -> int:
@@ -599,7 +651,6 @@ def layers_in_names(tensors: list[Tensor]) -> int | None:
 KV_PROJECTION = re.compile(
     r"^(.*?)\.(?:layers|h|blocks)\.\d+\.(?:self_attn|attention|attn)\.[kv]_proj\.weight(?:_packed)?$"
 )
-EMBEDDING = ("embed_tokens.weight", "wte.weight", "word_embeddings.weight")
 
 
 def attention_from_tensors(tensors: list[Tensor]) -> tuple[int, int, int] | None:
@@ -928,6 +979,7 @@ def fit_at(
         hardware,
         use_measurements,
         gpu_read_speed=pool.read_speed if pool else 0.0,
+        read_fraction=model.read_fraction,
     )
     return QuantOption(
         label=label,
@@ -981,10 +1033,3 @@ def format_params(params_b: float) -> str:
 def context_from_hf(meta: dict) -> int | None:
     context = (meta.get("gguf") or {}).get("context_length")
     return int(context) if context else None
-
-
-def is_moe(meta: dict, model_id: str) -> bool:
-    tags = [tag.lower() for tag in meta.get("tags") or []]
-    if any("moe" in tag for tag in tags):
-        return True
-    return "moe" in model_id.lower() or "mixtral" in model_id.lower()
