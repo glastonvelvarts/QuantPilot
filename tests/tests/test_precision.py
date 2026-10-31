@@ -98,4 +98,4 @@ def test_packed_counts_from_the_hub_are_not_turned_into_bytes():
     meta, config, _, _ = real_model(QWEN_GPTQ)
     snap = build_snapshot(QWEN_GPTQ, meta, config, [], None)
     assert snap.original_gb is None
-    assert snap.facts.precision.value == "packed 4-bit"
+    assert snap.facts.precision.value == "4-bit in I32"

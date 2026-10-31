@@ -7,6 +7,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -232,15 +233,18 @@ def cmd_inspect(
         ("Context length", facts.context_length),
         ("Quantization", facts.quantization),
     )
+    # Three columns: long sources and notes wrap inside the last one, the kinds line up.
+    grid = Table.grid(padding=(0, 2, 1, 0))
+    grid.add_column(no_wrap=True, style="bold")
+    grid.add_column(no_wrap=True)
+    grid.add_column()
     for name, fact in rows:
         color = KIND_COLORS[fact.kind]
-        source = f" [dim]from {fact.source}[/dim]" if fact.source else ""
-        console.print(
-            f"[bold]{name:<15}[/bold]{fact_value(fact)}  [{color}]{fact.kind}[/{color}]{source}",
-            highlight=False,
-        )
-        if fact.note:
-            console.print(f"{'':<15}[dim]{fact.note}[/dim]", highlight=False)
+        details = [f"[bold]{escape(fact_value(fact))}[/bold]"]
+        details += [f"[dim]from {escape(fact.source)}[/dim]"] if fact.source else []
+        details += [f"[dim]{escape(fact.note)}[/dim]"] if fact.note else []
+        grid.add_row(name, f"[{color}]{fact.kind}[/{color}]", "\n".join(details))
+    console.print(grid, highlight=False)
     if snapshot.catalog_source == "llmfit" and not facts.parameters.known:
         console.print("[dim]HuggingFace could not be reached: only llmfit's catalog entry.[/dim]")
 
