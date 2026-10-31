@@ -28,6 +28,7 @@ Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate
 | Step | Command | What it does |
 |------|---------|----------------|
 | 1 | `ocq profile` | CPU, RAM, GPU, bandwidth, free disk |
+| | `ocq models` | The models already on this PC: Ollama, LM Studio, Hugging Face cache, your folders |
 | 2 | `ocq backends` | Which backends are installed on this machine |
 | 3 | `ocq inspect <model>` | What QuantPilot knows about the model: every fact, its source, how sure it is |
 | 4 | `ocq feasibility <model>` | Table: original weights + GGUF + AWQ + GPTQ + BNB (+ NVFP4 on NVIDIA) — fit and speed |
@@ -362,6 +363,35 @@ Validation checks: file exists, smaller than original, loads, generates readable
 
 ---
 
+## Models already on your PC: `ocq models`
+
+`models` lists what you have downloaded, without loading anything or using the network:
+
+```sh
+uv run ocq models                    # Ollama, LM Studio, Hugging Face cache, llama.cpp cache
+uv run ocq models --dir ~/my-models  # also search your own folders (a few levels deep)
+uv run ocq models --all              # also partial downloads
+```
+
+```
+Model           Source              Format                Size     Use with ocq
+smollm2:135m    Ollama              GGUF F16              0.27 GB  ollama:smollm2:135m
+Qwen3-8B-GGUF/… LM Studio           GGUF Q4_K_M           5.03 GB  ~/.lmstudio/models/…
+org/name        Hugging Face cache  safetensors bfloat16  0.27 GB  org/name
+```
+
+The last column is what to pass to `inspect`, `feasibility` or `verify`, for example `ocq inspect ollama:smollm2:135m` (an Ollama model is a GGUF file under a hashed name; QuantPilot finds it from Ollama's manifest). Where it looks:
+
+| App | Folder | Moved with |
+|-----|--------|------------|
+| Ollama | `~/.ollama/models` (Linux service: `/usr/share/ollama/.ollama/models`) | `OLLAMA_MODELS` |
+| LM Studio | `~/.lmstudio/models` (older: `~/.cache/lm-studio/models`) | `~/.lmstudio-home-pointer`, *My Models → models directory* |
+| Hugging Face (and llama.cpp `-hf` downloads) | `~/.cache/huggingface/hub` | `HF_HUB_CACHE`, `HF_HOME`, `LLAMA_CACHE` |
+
+The quantization of a GGUF comes from its own header, not its file name. The Hugging Face cache often holds only `config.json` (QuantPilot and other tools fetch it to size a model without downloading it); those are hidden unless you pass `--all`. Newer Ollama versions can store a model for Apple's MLX instead of GGUF: it is listed, but QuantPilot cannot read that layout yet.
+
+---
+
 ## Check QuantPilot on your PC: `ocq verify`
 
 `verify` loads a local GGUF in llama.cpp once, reads llama.cpp's own memory numbers from its log, and puts them next to QuantPilot's prediction. It exits with an error when they differ beyond llama.cpp's rounding:
@@ -402,6 +432,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 |---------|-------------|
 | `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
 | `backends` | Installed quant backends and what’s missing |
+| `models` | The models already on this PC and the name to use for each |
 | `inspect` | Every fact about a model, its source and how sure it is |
 | `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
 | `recommend` | Suggested Hub models for this PC |
@@ -432,6 +463,7 @@ Size formulas are tested against real files: `tests/tests/data/` holds the `conf
 | `OCQ_LLMFIT_BIN` | Custom llmfit binary path |
 | `OCQ_LLAMA_CPP_BIN` | Your own `llama-quantize` / `llama-completion` folder |
 | `OCQ_LLAMA_CPP` | Your own llama.cpp source with `convert_hf_to_gguf.py` |
+| `OLLAMA_MODELS`, `HF_HUB_CACHE`, `HF_HOME`, `LLAMA_CACHE` | Where `ocq models` looks, the same variables those apps use |
 
 ---
 

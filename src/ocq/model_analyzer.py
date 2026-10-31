@@ -477,10 +477,14 @@ def local_gguf_snapshot(
     files = [path] if path.is_file() else gguf_files(path)
     if path.is_file() and SPLIT_PART.search(path.name):
         files = sorted(path.parent.glob(SPLIT_PART.sub("-*-of-*.gguf", path.name)))
-    chosen = Path(pick_gguf_file([str(f) for f in files]))
+    # An Ollama blob is a GGUF file without the .gguf name.
+    named = path.is_file() and path.suffix.lower() == ".gguf"
+    chosen = Path(pick_gguf_file([str(f) for f in files])) if named or path.is_dir() else path
     header = read_local(chosen)
     whole = not SPLIT_PART.search(chosen.name)
     variants = gguf_variants([(str(f), f.stat().st_size) for f in files], header.data_start)
+    if not variants:
+        variants = [(header.file_type or "GGUF", chosen.stat().st_size - header.data_start)]
     snapshot = gguf_snapshot(
         display_id, {"pipeline_tag": "local"}, header, variants, chosen.stat().st_size, whole
     )

@@ -292,7 +292,7 @@ def fact_summary(snapshot) -> str:
 
 @app.command("verify")
 def cmd_verify(
-    model: Annotated[Path, typer.Argument(help="A local .gguf file")],
+    model: Annotated[str, typer.Argument(help="A local .gguf file, or ollama:name:tag")],
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     n_cpu_moe: Annotated[
@@ -306,20 +306,22 @@ def cmd_verify(
     llmfit_bin: LlmfitBin = None,
 ) -> None:
     """Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction."""
+    from ocq.local_model import parse_model_ref
     from ocq.quantizers.llama_cpp import tool_path
     from ocq.verify import verify
 
     kv_cache = read_kv_cache(kv_cache)
     try:
         hw = detect_hardware(llmfit_bin)
-        snapshot = resolve_model(str(model), hw, llmfit_bin, context, kv_cache)
-        if not snapshot.gguf_files or not model.is_file():
-            raise OcqError("ocq verify takes one local .gguf file.")
+        snapshot = resolve_model(model, hw, llmfit_bin, context, kv_cache)
+        path = parse_model_ref(model)[1]
+        if not snapshot.gguf_files or path is None or not path.is_file():
+            raise OcqError("ocq verify takes one local .gguf file, or ollama:name:tag.")
         if n_cpu_moe is None:
             (row,) = quant_options(snapshot, hw, context, kv_cache)
             n_cpu_moe = row.experts_in_ram
         log, checks = verify(
-            snapshot, model, hw, tool_path("llama-completion", hw), context, kv_cache, n_cpu_moe
+            snapshot, path, hw, tool_path("llama-completion", hw), context, kv_cache, n_cpu_moe
         )
     except OcqError as exc:
         raise fail(exc) from exc
@@ -348,6 +350,53 @@ def cmd_verify(
         console.print("[dim]Not every layer is on the GPU, so the weights were not compared.[/dim]")
     if not all(check.ok for check in checks):
         raise typer.Exit(1)
+
+
+@app.command("models")
+def cmd_models(
+    show_all: Annotated[
+        bool, typer.Option("--all", help="Also list partial downloads (for example config only)")
+    ] = False,
+    folders: Annotated[
+        list[Path] | None,
+        typer.Option("--dir", "-d", help="Also search this folder (can be given more than once)"),
+    ] = None,
+) -> None:
+    """List the models already on this PC: Ollama, LM Studio, Hugging Face cache, folders."""
+    from ocq.discovery import SOURCES, find_models, searched_locations, tilde
+
+    try:
+        models = find_models(folders)
+    except OcqError as exc:
+        raise fail(exc) from exc
+    shown = [m for m in models if m.complete or show_all]
+    table = Table(title=f"Models on this PC ({len(shown)})")
+    table.add_column("Model", overflow="fold")
+    table.add_column("Source")
+    table.add_column("Format")
+    table.add_column("Size", justify="right", no_wrap=True)
+    table.add_column("Use with ocq", overflow="fold")
+    for model in sorted(shown, key=lambda m: (m.source, m.label.lower())):
+        size = f"{model.size_bytes / 1e9:.2f} GB" if model.size_bytes else "-"
+        label = escape(model.label)
+        if model.note:
+            color = "dim" if model.complete else "yellow"
+            label += f"\n[{color}]{escape(model.note)}[/{color}]"
+        kind = f"{model.format} {model.quantization}".strip()
+        table.add_row(label, model.source, escape(kind), size, escape(model.ref))
+    console.print(table)
+    hidden = len(models) - len(shown)
+    if hidden:
+        console.print(
+            f"[dim]{hidden} partial download(s) hidden, most with only config.json "
+            "(fetched to size a model, not to run it): ocq models --all[/dim]"
+        )
+    searched = searched_locations(folders)
+    places = ", ".join(f"{source} {tilde(path)}" for source, path in searched)
+    console.print(f"[dim]Searched: {escape(places) or 'no model folders found'}[/dim]")
+    missing = [s for s in SOURCES if s not in {source for source, _ in searched}]
+    if missing:
+        console.print(f"[dim]Not found on this PC: {', '.join(missing)}[/dim]")
 
 
 @app.command("backends")
