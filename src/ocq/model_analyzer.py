@@ -27,6 +27,7 @@ from ocq.local_model import fetch_local_model_files, gguf_files, parse_model_ref
 from ocq.model_size import (
     EMBEDDING,
     QUANT_METADATA,
+    LayerBits,
     Tensor,
     bnb_scale_bits,
     bnb_weights_bytes,
@@ -138,6 +139,8 @@ def resolve_model(
     kv_cache: str = "f16",
 ) -> ModelSnapshot:
     """Read a model's facts from its files. Without hardware, the fit is not computed."""
+    if model_ref.startswith("ollama:"):
+        return ollama_snapshot(model_ref.removeprefix("ollama:"), hardware, context, kv_cache)
     display_id, local_dir = parse_model_ref(model_ref)
     if local_dir is not None and (local_dir.is_file() or gguf_files(local_dir)):
         if local_dir.is_file() or not (local_dir / "config.json").is_file():
@@ -477,10 +480,14 @@ def local_gguf_snapshot(
     files = [path] if path.is_file() else gguf_files(path)
     if path.is_file() and SPLIT_PART.search(path.name):
         files = sorted(path.parent.glob(SPLIT_PART.sub("-*-of-*.gguf", path.name)))
-    chosen = Path(pick_gguf_file([str(f) for f in files]))
+    # An Ollama blob is a GGUF file without the .gguf name.
+    named = path.is_file() and path.suffix.lower() == ".gguf"
+    chosen = Path(pick_gguf_file([str(f) for f in files])) if named or path.is_dir() else path
     header = read_local(chosen)
     whole = not SPLIT_PART.search(chosen.name)
     variants = gguf_variants([(str(f), f.stat().st_size) for f in files], header.data_start)
+    if not variants:
+        variants = [(header.file_type or "GGUF", chosen.stat().st_size - header.data_start)]
     snapshot = gguf_snapshot(
         display_id, {"pipeline_tag": "local"}, header, variants, chosen.stat().st_size, whole
     )
@@ -495,6 +502,32 @@ def local_gguf_snapshot(
         with_fit(snapshot, hardware, context, kv_cache)
         if hardware and snapshot.params_b
         else snapshot
+    )
+
+
+def ollama_snapshot(
+    name: str, hardware: HardwareProfile | None, context: int, kv_cache: str
+) -> ModelSnapshot:
+    """An Ollama model: its GGUF blob, or the blobs of its MLX layout."""
+    from ocq.discovery import GGUF, find_ollama, ollama_mlx_files
+
+    _, found = find_ollama(name)
+    display_id = f"ollama/{found.label}"
+    if found.format == GGUF:
+        return local_gguf_snapshot(display_id, found.path, hardware, context, kv_cache)
+    config, tensors, dtypes = ollama_mlx_files(name)
+    snapshot = build_snapshot(
+        display_id, {"pipeline_tag": "local"}, config, tensors, hardware, context, dtypes, kv_cache
+    )
+    quantization = snapshot.facts.quantization
+    if quantization.source.startswith("config.json quantization_config"):
+        source = quantization.source.replace(
+            "config.json quantization_config", "Ollama blob metadata"
+        )
+        quantization = replace(quantization, source=source)
+    facts = replace(snapshot.facts, quantization=quantization)
+    return replace(
+        snapshot, facts=facts, provider="local", use_case="Ollama (MLX)", catalog_source="local"
     )
 
 
@@ -581,12 +614,13 @@ def model_facts(
 ) -> ModelFacts:
     """Everything known about the model, each fact with its source and how sure it is."""
     quantization, bits = quantization_fact(config, tensors, dtypes)
-    by_type = parameters_by_type(tensors, dtypes, bits) if tensors else None
+    mixed = layer_bits(config)
+    by_type = parameters_by_type(tensors, dtypes, bits, mixed) if tensors else None
     copy = lm_head_copy(config, tensors)
     parameters = parameter_fact(meta, model_id, tensors, by_type, bits, copy)
     return ModelFacts(
         parameters=parameters,
-        active_parameters=active_fact(config, tensors, dtypes, bits, parameters),
+        active_parameters=active_fact(config, tensors, dtypes, bits, parameters, mixed),
         precision=precision_fact(meta, by_type, bits),
         stored_bytes=stored_bytes_fact(meta, tensors, dtypes, bits),
         architecture=architecture_fact(config, tensors),
@@ -598,7 +632,23 @@ def model_facts(
 
 def quantization_config(config: dict) -> dict:
     text, _ = text_config(config)
-    return text.get("quantization_config") or text.get("compression_config") or {}
+    settings = text.get("quantization_config") or text.get("compression_config") or {}
+    # MLX writes "quantization" (newer versions copy it to quantization_config, without a
+    # method): {"bits": 4, "group_size": 64, "mode": "mxfp4", "<layer>": {"bits": 8, ...}}
+    mlx = text.get("quantization")
+    if isinstance(mlx, dict) and "bits" in mlx and not settings.get("quant_method"):
+        return {**mlx, "quant_method": "mlx"}
+    return settings
+
+
+def layer_bits(config: dict) -> LayerBits:
+    """The layers MLX quantized at another bit width than the rest."""
+    settings = quantization_config(config)
+    return {
+        layer: value["bits"]
+        for layer, value in settings.items()
+        if isinstance(value, dict) and isinstance(value.get("bits"), int)
+    }
 
 
 def quantized_bits(settings: dict) -> int:
@@ -625,6 +675,7 @@ METHOD_NAMES = {
     "fp8": "FP8",
     "mxfp4": "MXFP4",
     "compressed-tensors": "compressed-tensors",
+    "mlx": "MLX",
 }
 
 
@@ -633,6 +684,8 @@ def quantization_label(settings: dict, bits: int) -> str:
     name = METHOD_NAMES.get(method.lower(), method or "unknown method")
     if name in ("FP8", "MXFP4"):
         return f"{name} {settings.get('fmt', '')}".strip()
+    if name == "MLX" and str(settings.get("mode", "affine")) != "affine":
+        return f"MLX {str(settings['mode']).upper()}"
     if settings.get("quant_algo"):
         return f"{name} {settings['quant_algo']}"
     if name == "compressed-tensors" and settings.get("format"):
@@ -662,6 +715,10 @@ def quantization_fact(
         bits = quantized_bits(settings)
         label = quantization_label(settings, bits)
         note = f"group size {settings['group_size']}" if settings.get("group_size") else ""
+        mixed = layer_bits(config)
+        if mixed:
+            widths = sorted(set(mixed.values()))
+            note += f"; {len(mixed)} layers at {'/'.join(map(str, widths))}-bit"
         if settings.get("weight_block_size"):
             note = "blocks of " + " x ".join(map(str, settings["weight_block_size"])) + " weights"
         source = "config.json quantization_config"
@@ -696,7 +753,12 @@ def expert_settings(config: dict) -> tuple[int, int]:
 
 
 def active_fact(
-    config: dict, tensors: list[Tensor], dtypes: dict[str, str], bits: int | None, total: Fact
+    config: dict,
+    tensors: list[Tensor],
+    dtypes: dict[str, str],
+    bits: int | None,
+    total: Fact,
+    mixed: LayerBits | None = None,
 ) -> Fact:
     """Weights read for one token. The speed limit depends on this, not on the total.
 
@@ -710,7 +772,7 @@ def active_fact(
     experts = named or configured
     if experts and not per_token:
         return Fact(note=f"{experts} experts, but config.json does not say how many run per token")
-    counted = weights_per_token(tensors, dtypes, bits, experts, per_token)
+    counted = weights_per_token(tensors, dtypes, bits, experts, per_token, mixed)
     if counted is None:
         return Fact(note="packed tensors could not be unpacked")
 

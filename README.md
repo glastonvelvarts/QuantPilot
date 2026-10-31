@@ -28,6 +28,7 @@ Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate
 | Step | Command | What it does |
 |------|---------|----------------|
 | 1 | `ocq profile` | CPU, RAM, GPU, bandwidth, free disk |
+| | `ocq models` | The models already on this PC: Ollama, LM Studio, Hugging Face cache, your folders |
 | 2 | `ocq backends` | Which backends are installed on this machine |
 | 3 | `ocq inspect <model>` | What QuantPilot knows about the model: every fact, its source, how sure it is |
 | 4 | `ocq feasibility <model>` | Table: original weights + GGUF + AWQ + GPTQ + BNB (+ NVFP4 on NVIDIA) — fit and speed |
@@ -101,13 +102,15 @@ uv run ocq inspect ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf     # a file, or a f
 
 The tensor table is checked against the file size, and the context memory computed from a GGUF header matches llama.cpp's own log (Gemma 2/3, LFM2, Granite 4.0-H, Falcon-H1, Jamba).
 
-**Already-quantized repos** (GPTQ, AWQ, bitsandbytes, FP8, W8A8, NVFP4, MXFP4) are recognised. `feasibility` shows them as stored, and `plan` / `optimize` refuse to quantize them again, since that would stack the rounding errors. They point you to the original instead:
+**Already-quantized repos** (GPTQ, AWQ, bitsandbytes, FP8, W8A8, NVFP4, MXFP4, MLX) are recognised. `feasibility` shows them as stored, and `plan` / `optimize` refuse to quantize them again, since that would stack the rounding errors. They point you to the original instead:
 
 ```
 Error: Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int4 is already quantized (GPTQ 4-bit). Quantizing it
 again would stack the rounding errors; quantize the original instead: ocq optimize
 Qwen/Qwen2.5-1.5B-Instruct
 ```
+
+**MLX models** (mlx-community, LM Studio's MLX downloads) are read from MLX's own `quantization` settings, including layers it stored at another bit width (for example the 8-bit layers of `gpt-oss-20b-MXFP4-Q8`, whose count then matches the original gpt-oss to the weight). MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio); on any other PC `feasibility` says so.
 
 Optional: `ocq recommend` suggests models from the [llmfit](https://github.com/AlexsJones/llmfit) catalog when available.
 
@@ -362,6 +365,38 @@ Validation checks: file exists, smaller than original, loads, generates readable
 
 ---
 
+## Models already on your PC: `ocq models`
+
+`models` lists what you have downloaded and how each one fits this PC **as it is on disk**, without loading anything or using the network:
+
+```sh
+uv run ocq models                    # Ollama, LM Studio, Hugging Face cache, llama.cpp cache
+uv run ocq models -c 32768           # the fit at another context size (--kv-cache too)
+uv run ocq models --dir ~/my-models  # also search your own folders (a few levels deep)
+uv run ocq models --all              # also partial downloads
+```
+
+```
+Model           Source              Format                Size     Fit      Runs on  tok/s   Use with ocq
+smollm2:135m    Ollama              GGUF F16              0.27 GB  Perfect  gpu      <= 253  ollama:smollm2:135m
+Qwen3-8B-GGUF/… LM Studio           GGUF Q4_K_M           5.03 GB  Good     gpu      <= 21   ~/.lmstudio/models/…
+org/name        Hugging Face cache  safetensors bfloat16  0.27 GB  Perfect  gpu      <= 253  org/name
+```
+
+Fit, runs on and tok/s mean the same as in `feasibility`, for the one format you have; `ocq feasibility <model>` shows the others. They are read from the local files (for a Hugging Face model, its snapshot folder, not the Hub). An MLX model on a PC that is not an Apple Silicon Mac says *needs a Mac*; a file QuantPilot cannot read gets `?` with the reason, and the rest of the list is still rated.
+
+The last column is what to pass to `inspect`, `feasibility` or `verify`, for example `ocq inspect ollama:smollm2:135m` (an Ollama model is a GGUF file under a hashed name; QuantPilot finds it from Ollama's manifest). Where it looks:
+
+| App | Folder | Moved with |
+|-----|--------|------------|
+| Ollama | `~/.ollama/models` (Linux service: `/usr/share/ollama/.ollama/models`) | `OLLAMA_MODELS` |
+| LM Studio | `~/.lmstudio/models` (older: `~/.cache/lm-studio/models`) | `~/.lmstudio-home-pointer`, *My Models → models directory* |
+| Hugging Face (and llama.cpp `-hf` downloads) | `~/.cache/huggingface/hub` | `HF_HUB_CACHE`, `HF_HOME`, `LLAMA_CACHE` |
+
+The quantization of a GGUF comes from its own header, not its file name. The Hugging Face cache often holds only `config.json` (QuantPilot and other tools fetch it to size a model without downloading it); those are hidden unless you pass `--all`. Newer Ollama versions can store a model for Apple's MLX instead of GGUF (one small safetensors file per tensor, the quantization in each file's metadata): `inspect` and `feasibility` read that too; `verify` and `optimize` need a GGUF.
+
+---
+
 ## Check QuantPilot on your PC: `ocq verify`
 
 `verify` loads a local GGUF in llama.cpp once, reads llama.cpp's own memory numbers from its log, and puts them next to QuantPilot's prediction. It exits with an error when they differ beyond llama.cpp's rounding:
@@ -402,6 +437,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 |---------|-------------|
 | `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
 | `backends` | Installed quant backends and what’s missing |
+| `models` | The models already on this PC, how each fits, and the name to use for it |
 | `inspect` | Every fact about a model, its source and how sure it is |
 | `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
 | `recommend` | Suggested Hub models for this PC |
@@ -432,6 +468,7 @@ Size formulas are tested against real files: `tests/tests/data/` holds the `conf
 | `OCQ_LLMFIT_BIN` | Custom llmfit binary path |
 | `OCQ_LLAMA_CPP_BIN` | Your own `llama-quantize` / `llama-completion` folder |
 | `OCQ_LLAMA_CPP` | Your own llama.cpp source with `convert_hf_to_gguf.py` |
+| `OLLAMA_MODELS`, `HF_HUB_CACHE`, `HF_HOME`, `LLAMA_CACHE` | Where `ocq models` looks, the same variables those apps use |
 
 ---
 

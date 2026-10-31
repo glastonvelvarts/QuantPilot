@@ -16,6 +16,11 @@ from ocq.types import OcqError
 
 def parse_model_ref(ref: str) -> tuple[str, Path | None]:
     """Return (display_id, local_dir). HuggingFace ids pass through with local_dir=None."""
+    if ref.startswith("ollama:"):
+        from ocq.discovery import ollama_blob  # discovery imports this module
+
+        name = ref.removeprefix("ollama:")
+        return f"ollama/{name}", ollama_blob(name)
     path = Path(ref).expanduser()
     if path.is_file() and path.suffix.lower() == ".gguf":
         resolved = path.resolve()

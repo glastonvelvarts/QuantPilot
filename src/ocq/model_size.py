@@ -285,16 +285,32 @@ def output_buffer_bytes(vocab_size: int) -> int:
 # Tensors a quantized checkpoint stores next to its weights: scales, zero points, group
 # indexes, packed shapes. They are not weights of the model, so they are not counted as such.
 # weight_scale_2 is NVIDIA ModelOpt's per-tensor NVFP4 scale; MXFP4 (gpt-oss) stores
-# down_proj_blocks next to down_proj_scales.
+# down_proj_blocks next to down_proj_scales; MLX stores its zero points as .biases (a layer's
+# own bias is .bias), Ollama's MLX layout x.weight.scale and x.weight.bias.
 QUANT_METADATA = re.compile(
-    r"\.(qzeros|scales|g_idx|SCB|absmax|quant_map|nested_absmax|nested_quant_map|weight_scale"
+    r"\.(qzeros|scales|biases|g_idx|SCB|absmax|quant_map|nested_absmax|nested_quant_map|weight_scale"
     r"|weight_scale_2|weight_scale_inv|weight_zero_point|weight_global_scale|weight_shape|input_scale"
     r"|input_global_scale|input_zero_point|k_scale|v_scale)$|_scales$|quant_state"
+    r"|\.weight\.(scale|bias)$"
 )
 
 
+# The bit width of the layers quantized differently from the rest, by layer name, when a
+# checkpoint mixes several (MLX lists them in config.json): {"model.embed_tokens": 8}.
+LayerBits = dict[str, int]
+
+
+def bits_of(name: str, quantized_bits: int | None, layer_bits: LayerBits | None) -> int | None:
+    if quantized_bits is None or not layer_bits:
+        return quantized_bits
+    return layer_bits.get(name.rsplit(".", 1)[0], quantized_bits)
+
+
 def parameters_by_type(
-    tensors: list[Tensor], dtypes: dict[str, str], quantized_bits: int | None = None
+    tensors: list[Tensor],
+    dtypes: dict[str, str],
+    quantized_bits: int | None = None,
+    layer_bits: LayerBits | None = None,
 ) -> dict[str, int] | None:
     """Weights per stored type, counted the way the original model counts them.
 
@@ -307,7 +323,8 @@ def parameters_by_type(
     """
     counts: dict[str, int] = {}
     for name, shape in tensors:
-        held = tensor_weights(name, shape, dtypes.get(name, ""), quantized_bits)
+        bits = bits_of(name, quantized_bits, layer_bits)
+        held = tensor_weights(name, shape, dtypes.get(name, ""), bits)
         if held is None:
             return None
         label, weights = held
@@ -383,6 +400,7 @@ def weights_per_token(
     quantized_bits: int | None,
     experts: int = 0,
     experts_per_token: int = 0,
+    layer_bits: LayerBits | None = None,
 ) -> tuple[int, int] | None:
     """(weights read for one token, input embedding weights left out of that).
 
@@ -394,7 +412,8 @@ def weights_per_token(
     separate_output = any(name.endswith(OUTPUT) for name, _ in tensors)
     read, embedding = 0.0, 0
     for name, shape in tensors:
-        held = tensor_weights(name, shape, dtypes.get(name, ""), quantized_bits)
+        bits = bits_of(name, quantized_bits, layer_bits)
+        held = tensor_weights(name, shape, dtypes.get(name, ""), bits)
         if held is None:
             return None
         weights = held[1]
