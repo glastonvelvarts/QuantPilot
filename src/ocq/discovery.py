@@ -364,7 +364,11 @@ def gguf_models(folder: Path, label: str, source: str) -> list[LocalModel]:
                 quant,
                 sum(f.stat().st_size for f in files),
                 complete and quant != "unreadable",
-                "" if complete else f"{len(files)} of {int(split.group(2))} parts",
+                "header unreadable"
+                if quant == "unreadable"
+                else ""
+                if complete
+                else f"{len(files)} of {int(split.group(2))} parts",
             )
         )
     return models

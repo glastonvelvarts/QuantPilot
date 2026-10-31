@@ -367,20 +367,23 @@ Validation checks: file exists, smaller than original, loads, generates readable
 
 ## Models already on your PC: `ocq models`
 
-`models` lists what you have downloaded, without loading anything or using the network:
+`models` lists what you have downloaded and how each one fits this PC **as it is on disk**, without loading anything or using the network:
 
 ```sh
 uv run ocq models                    # Ollama, LM Studio, Hugging Face cache, llama.cpp cache
+uv run ocq models -c 32768           # the fit at another context size (--kv-cache too)
 uv run ocq models --dir ~/my-models  # also search your own folders (a few levels deep)
 uv run ocq models --all              # also partial downloads
 ```
 
 ```
-Model           Source              Format                Size     Use with ocq
-smollm2:135m    Ollama              GGUF F16              0.27 GB  ollama:smollm2:135m
-Qwen3-8B-GGUF/… LM Studio           GGUF Q4_K_M           5.03 GB  ~/.lmstudio/models/…
-org/name        Hugging Face cache  safetensors bfloat16  0.27 GB  org/name
+Model           Source              Format                Size     Fit      Runs on  tok/s   Use with ocq
+smollm2:135m    Ollama              GGUF F16              0.27 GB  Perfect  gpu      <= 253  ollama:smollm2:135m
+Qwen3-8B-GGUF/… LM Studio           GGUF Q4_K_M           5.03 GB  Good     gpu      <= 21   ~/.lmstudio/models/…
+org/name        Hugging Face cache  safetensors bfloat16  0.27 GB  Perfect  gpu      <= 253  org/name
 ```
+
+Fit, runs on and tok/s mean the same as in `feasibility`, for the one format you have; `ocq feasibility <model>` shows the others. They are read from the local files (for a Hugging Face model, its snapshot folder, not the Hub). An MLX model on a PC that is not an Apple Silicon Mac says *needs a Mac*; a file QuantPilot cannot read gets `?` with the reason, and the rest of the list is still rated.
 
 The last column is what to pass to `inspect`, `feasibility` or `verify`, for example `ocq inspect ollama:smollm2:135m` (an Ollama model is a GGUF file under a hashed name; QuantPilot finds it from Ollama's manifest). Where it looks:
 
@@ -434,7 +437,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 |---------|-------------|
 | `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
 | `backends` | Installed quant backends and what’s missing |
-| `models` | The models already on this PC and the name to use for each |
+| `models` | The models already on this PC, how each fits, and the name to use for it |
 | `inspect` | Every fact about a model, its source and how sure it is |
 | `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
 | `recommend` | Suggested Hub models for this PC |
