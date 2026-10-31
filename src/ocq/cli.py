@@ -290,6 +290,66 @@ def fact_summary(snapshot) -> str:
     return f"{quantized}, {params}, {size} of weights"
 
 
+@app.command("verify")
+def cmd_verify(
+    model: Annotated[Path, typer.Argument(help="A local .gguf file")],
+    context: Context = DEFAULT_CONTEXT,
+    kv_cache: KvCache = "f16",
+    n_cpu_moe: Annotated[
+        int | None,
+        typer.Option(
+            "--n-cpu-moe",
+            help="Experts of the first N layers in RAM (default: what QuantPilot plans for this "
+            "PC)",
+        ),
+    ] = None,
+    llmfit_bin: LlmfitBin = None,
+) -> None:
+    """Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction."""
+    from ocq.quantizers.llama_cpp import tool_path
+    from ocq.verify import verify
+
+    kv_cache = read_kv_cache(kv_cache)
+    try:
+        hw = detect_hardware(llmfit_bin)
+        snapshot = resolve_model(str(model), hw, llmfit_bin, context, kv_cache)
+        if not snapshot.gguf_files or not model.is_file():
+            raise OcqError("ocq verify takes one local .gguf file.")
+        if n_cpu_moe is None:
+            (row,) = quant_options(snapshot, hw, context, kv_cache)
+            n_cpu_moe = row.experts_in_ram
+        log, checks = verify(
+            snapshot, model, hw, tool_path("llama-completion", hw), context, kv_cache, n_cpu_moe
+        )
+    except OcqError as exc:
+        raise fail(exc) from exc
+
+    offloaded, total = log.layers_on_gpu
+    console.print(
+        f"[bold]{snapshot.model_id}[/bold] in llama.cpp: {log.context:,} tokens, "
+        f"{log.conversations} conversation(s), {offloaded}/{total} layers on the GPU"
+        + (f", experts of {n_cpu_moe} layers in RAM" if n_cpu_moe else "")
+        + (f", cache {log.cache_types}" if log.cache_types else "")
+    )
+    table = Table(title="QuantPilot's prediction vs llama.cpp's own log (MiB)")
+    for column in ("Memory", "QuantPilot", "llama.cpp", "Difference", ""):
+        table.add_column(column, justify="right" if column != "Memory" else "left")
+    for check in checks:
+        mark = "[green]ok[/green]" if check.ok else "[red]differs[/red]"
+        table.add_row(
+            check.name,
+            f"{check.predicted_mib:,.2f}",
+            f"{check.actual_mib:,.2f}",
+            f"{check.predicted_mib - check.actual_mib:+,.2f}",
+            mark,
+        )
+    console.print(table)
+    if offloaded != total:
+        console.print("[dim]Not every layer is on the GPU, so the weights were not compared.[/dim]")
+    if not all(check.ok for check in checks):
+        raise typer.Exit(1)
+
+
 @app.command("backends")
 def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     """Show which quantization backends can run on this PC."""
@@ -359,7 +419,12 @@ def cmd_feasibility(
         sizes = "exact, computed from the model's tensor shapes"
     else:
         sizes = "weights exact from the tensor shapes, context memory unknown"
-    if snapshot.is_quantized:
+    if snapshot.gguf_files:
+        sizes = (
+            f"the {len(snapshot.gguf_files)} GGUF files as published (file sizes; settings and "
+            "tensor table from one file's header)"
+        )
+    elif snapshot.is_quantized:
         sizes = (
             f"already quantized ({snapshot.facts.quantization.value}), shown as stored. "
             "Quantize the original model to compare formats"
@@ -370,6 +435,7 @@ def cmd_feasibility(
             f"[bold]{snapshot.model_id}[/bold]\n"
             f"Params: {snapshot.parameter_count} | Use case: {snapshot.use_case}\n"
             f"Sizes: {sizes}\n"
+            f"Facts: {snapshot.facts_summary()}\n"
             f"Context: {context} tokens\n"
             f"Free right now: {hw.free_vram_gb:.2f} GB VRAM{gpu_note(hw)}, "
             f"{hw.available_ram_gb:.2f} GB RAM\n"
@@ -381,10 +447,12 @@ def cmd_feasibility(
         )
     )
 
-    table = Table(
-        title="By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same "
-        "tensor math)"
+    title = (
+        "By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same tensor math)"
     )
+    if snapshot.gguf_files:
+        title = "The repo's GGUF files, sizes in GB (run with llama.cpp, Ollama or LM Studio)"
+    table = Table(title=title)
     table.add_column("Level", no_wrap=True)
     table.add_column("Backend", no_wrap=True)
     for column in ("Bits", "Weights", "Context", "Needs"):

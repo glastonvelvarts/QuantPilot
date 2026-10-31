@@ -1,0 +1,16 @@
+0.00.249.873 I load_tensors: loading model tensors, this can take a while... (load_mode = none)
+0.00.256.721 I load_tensors: offloaded 33/33 layers to GPU
+0.00.256.722 I load_tensors:          CPU model buffer size =     0.00 MiB
+0.00.256.722 I load_tensors:         MTL0 model buffer size =     0.00 MiB
+0.00.257.327 I llama_context: n_seq_max             = 1
+0.00.257.328 I llama_context: n_ctx                 = 4096
+0.00.258.211 I llama_kv_cache: size =   16.00 MiB (  4096 cells,   4 layers,  1/1 seqs), K (f16):    8.00 MiB, V (f16):    8.00 MiB
+0.00.260.796 I llama_memory_recurrent: size =   21.57 MiB (     1 cells,  32 layers,  1 seqs  0 rs_seq), R (f32):    0.57 MiB, S (f32):   21.00 MiB, P (f32):    0.00 MiB
+0.00.367.528 I load_tensors: loading model tensors, this can take a while... (load_mode = mmap)
+0.00.494.360 I load_tensors: offloaded 33/33 layers to GPU
+0.00.494.361 I load_tensors:   CPU_Mapped model buffer size =    60.29 MiB
+0.00.494.361 I load_tensors:  MTL0_Mapped model buffer size =   149.07 MiB
+0.00.496.191 I llama_context: n_seq_max             = 1
+0.00.496.191 I llama_context: n_ctx                 = 4096
+0.00.498.006 I llama_kv_cache: size =   16.00 MiB (  4096 cells,   4 layers,  1/1 seqs), K (f16):    8.00 MiB, V (f16):    8.00 MiB
+0.00.500.049 I llama_memory_recurrent: size =   21.57 MiB (     1 cells,  32 layers,  1 seqs  0 rs_seq), R (f32):    0.57 MiB, S (f32):   21.00 MiB, P (f32):    0.00 MiB
