@@ -140,3 +140,23 @@ def test_plan_says_how_the_gpus_are_used():
     gguf = QuantChoices(algorithm=QuantAlgorithm.GGUF)
     plan = generate_plan(model.model_id, two, model, OptimizationGoal.BALANCED, Path("/tmp"), gguf)
     assert any("layers split over 2 GPUs" in line for line in plan.rationale)
+
+
+def test_plan_gives_the_cache_flags_of_the_runtime():
+    model, hardware = make_model(), make_hardware()
+
+    def cache_line(**choices):
+        plan = generate_plan(
+            model.model_id,
+            hardware,
+            model,
+            OptimizationGoal.BALANCED,
+            Path("/tmp"),
+            QuantChoices(**choices),
+        )
+        return next(line for line in plan.rationale if line.startswith("Context cache"))
+
+    assert "-ctk q8_0 -ctv q8_0" in cache_line(algorithm=QuantAlgorithm.GGUF, kv_cache="q8_0")
+    awq = cache_line(algorithm=QuantAlgorithm.AWQ, kv_cache="q4_0")
+    assert "--kv-cache-dtype fp8" in awq
+    assert "no 4-bit cache" in awq

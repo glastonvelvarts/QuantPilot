@@ -13,11 +13,14 @@ from ocq.engine import (
     decide_quant_config,
 )
 from ocq.local_model import NO_TOKENIZER, has_tokenizer
-from ocq.model_analyzer import predict_for_config
+from ocq.model_analyzer import predict_for_config, runtime_of
+from ocq.model_size import kv_value_bytes
 from ocq.quantizers import get_quantizer
 from ocq.types import (
     LAYER_SPLIT,
+    LLAMA_CPP,
     TENSOR_PARALLEL,
+    VLLM,
     HardwareProfile,
     ModelSnapshot,
     OcqError,
@@ -58,6 +61,8 @@ def generate_plan(
     gpus = gpu_setup(predicted, hardware)
     if gpus:
         rationale.append(gpus)
+    if config.kv_cache != "f16":
+        rationale.append(kv_cache_note(config))
     rationale.append(f"Speed: {describe_speed(predicted, config)}")
     if config.algorithm == QuantAlgorithm.BNB and config.bits == 4:
         rationale.append(double_quant_note(model, hardware, config, predicted))
@@ -112,6 +117,27 @@ def already_quantized(model: ModelSnapshot) -> str:
     if base:
         return f"{message}; quantize the original instead: ocq optimize {base}"
     return f"{message}. Quantize the original model instead. (ocq feasibility shows if it fits.)"
+
+
+def kv_cache_note(config: QuantConfig) -> str:
+    """What --kv-cache means for the runtime that serves this backend, and the flags to pass."""
+    cache = config.kv_cache
+    runtime = runtime_of(
+        "gguf" if config.algorithm == QuantAlgorithm.GGUF else config.algorithm.value
+    )
+    bits = kv_value_bytes(cache, runtime) * 8
+    if runtime == LLAMA_CPP:
+        loss = "almost no quality loss" if cache == "q8_0" else "some quality loss on long contexts"
+        return (
+            f"Context cache: {cache}, {bits:.1f} bits per value instead of 16 ({loss}). Run "
+            f"llama.cpp with -ctk {cache} -ctv {cache}; it turns on flash attention for it."
+        )
+    if runtime == VLLM:
+        extra = " (vLLM has no 4-bit cache)" if cache == "q4_0" else ""
+        return f"Context cache: fp8, 8 bits per value{extra}. Serve with --kv-cache-dtype fp8."
+    return (
+        "Context cache: transformers keeps it at 16 bits; --kv-cache applies to llama.cpp and vLLM."
+    )
 
 
 def gpu_setup(option: QuantOption, hardware: HardwareProfile) -> str:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 
-from ocq.types import DTYPE_BITS, INTEGER_TYPES
+from ocq.types import DTYPE_BITS, INTEGER_TYPES, KV_BYTES_PER_VALUE, TRANSFORMERS, VLLM
 
 Tensor = tuple[str, tuple[int, ...]]
 
@@ -388,3 +388,19 @@ def stored_bytes(tensors: list[Tensor], dtypes: dict[str, str]) -> int | None:
             return None
         total_bits += math.prod(shape) * bits
     return -(-total_bits // 8)
+
+
+def kv_value_bytes(cache_type: str, runtime: str) -> float:
+    """Bytes one cached key or value takes with --kv-cache cache_type in this runtime.
+
+    llama.cpp stores q8_0 and q4_0 in the same blocks as GGUF weights: 32 values in 34 or 18
+    bytes (its log for Gemma 3 1B at 32k: f16 128 MiB, q8_0 68 MiB, q4_0 36 MiB). vLLM's
+    quantized cache is fp8, 1 byte (--kv-cache-dtype fp8), and it has no 4-bit one.
+    transformers keeps 16 bits.
+    """
+    if cache_type == "f16" or runtime == TRANSFORMERS:
+        return KV_BYTES_PER_VALUE
+    if runtime == VLLM:
+        return 1.0
+    block_bytes, values = BLOCKS[cache_type.upper()]
+    return block_bytes / values
