@@ -419,11 +419,11 @@ def cmd_models(
 def local_fit(model, hw, context: int, kv_cache: str) -> tuple[str, str, str]:
     """(fit, runs on, tok/s) of a found model as it is on disk, read offline from its files.
     "? reason" when it cannot be worked out."""
-    from ocq.discovery import GGUF, SAFETENSORS
+    from ocq.discovery import GGUF, MLX_LAYOUT, SAFETENSORS
 
     if not model.complete:
         return "", "", ""
-    if model.format not in (GGUF, SAFETENSORS):
+    if model.format not in (GGUF, SAFETENSORS, MLX_LAYOUT):
         return "?", "", ""
     # The local copy, not the Hub: no network, and exactly the files on this PC.
     ref = model.ref if model.ref.startswith("ollama:") else str(model.path)

@@ -20,11 +20,13 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ocq.gguf_file import SPLIT_PART, read_local
 from ocq.local_model import gguf_files, weight_files
+from ocq.model_size import Tensor
 from ocq.types import OcqError
 
 OLLAMA = "Ollama"
@@ -36,6 +38,7 @@ SOURCES = (OLLAMA, LM_STUDIO, HF_CACHE, LLAMA_CPP_CACHE)
 
 GGUF = "GGUF"
 SAFETENSORS = "safetensors"
+MLX_LAYOUT = "MLX safetensors"  # Ollama's: one blob per tensor
 
 
 @dataclass(frozen=True)
@@ -155,17 +158,9 @@ def ollama_model(root: Path, name: str, manifest_file: Path) -> LocalModel:
         quant = gguf_quantization(blob) if complete else ""
         return LocalModel(name, f"ollama:{name}", OLLAMA, blob, GGUF, quant, size, complete, note)
     if tensors:
-        mlx = "MLX " if manifest.get("runner") == "mlx" else ""
+        quant = ollama_mlx_label(root, tensors) if complete else ""
         return LocalModel(
-            name,
-            f"ollama:{name}",
-            OLLAMA,
-            manifest_file,
-            f"{mlx}{SAFETENSORS}",
-            "",
-            size,
-            complete,
-            note or "QuantPilot cannot read this layout yet",
+            name, f"ollama:{name}", OLLAMA, manifest_file, MLX_LAYOUT, quant, size, complete, note
         )
     return LocalModel(
         name, f"ollama:{name}", OLLAMA, manifest_file, "?", "", 0, False, "no weights"
@@ -180,17 +175,146 @@ def ollama_models(roots: list[Path] | None = None) -> list[LocalModel]:
     return models
 
 
-def ollama_blob(name: str) -> Path:
-    """The GGUF file behind an Ollama name, for example qwen3:0.6b or qwen3 (tag latest)."""
+def find_ollama(name: str) -> tuple[Path, LocalModel]:
+    """(store folder, model) of an Ollama name, for example qwen3:0.6b or qwen3 (tag latest)."""
     wanted = name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
-    for model in ollama_models():
-        if model.label == wanted:
-            if model.format != GGUF:
-                raise OcqError(f"Ollama's {wanted} is {model.format}; QuantPilot reads GGUF.")
+    for root in ollama_dirs():
+        manifests = ollama_manifests(root)
+        if wanted in manifests:
+            model = ollama_model(root, wanted, manifests[wanted])
             if not model.complete:
                 raise OcqError(f"Ollama's {wanted} is not fully downloaded: ollama pull {wanted}")
-            return model.path
+            return root, model
     raise OcqError(f"Ollama has no model {wanted}. ocq models lists the ones on this PC.")
+
+
+def ollama_blob(name: str) -> Path:
+    """The GGUF file behind an Ollama name."""
+    _, model = find_ollama(name)
+    if model.format != GGUF:
+        raise OcqError(
+            f"Ollama stores {model.label} for MLX (one file per tensor), not as GGUF: ocq inspect "
+            "and feasibility read it, verify and optimize need a GGUF."
+        )
+    return model.path
+
+
+# Ollama's MLX layout: every tensor blob is a small safetensors file. Its __metadata__ names
+# the quantization, for the whole blob ({"quant_type": "mxfp8", "group_size": "32"}) or per
+# tensor ("<name>.quant_type"); the scales are <weight>.scale, affine zero points <weight>.bias.
+# (bits, group size, mode) per type, and the aliases, as Ollama's mlx/quant/quant.go has them.
+OLLAMA_QUANT_TYPES = {
+    "nvfp4": (4, 16, "nvfp4"),
+    "mxfp4": (4, 32, "mxfp4"),
+    "int4": (4, 64, "affine"),
+    "mxfp8": (8, 32, "mxfp8"),
+    "int8": (8, 64, "affine"),
+}
+OLLAMA_QUANT_ALIASES = {"fp4": "int4", "q4": "int4", "fp8": "int8", "q8": "int8"}
+
+
+def ollama_quant_type(value: str) -> str:
+    lowered = value.strip().lower()
+    return OLLAMA_QUANT_ALIASES.get(lowered, lowered)
+
+
+def read_blob_header(blob: Path) -> dict:
+    """A safetensors header with its __metadata__ (read_safetensors_header drops it)."""
+    try:
+        with open(blob, "rb") as handle:
+            length = int.from_bytes(handle.read(8), "little")
+            if not 0 < length < 100_000_000:
+                raise ValueError("bad header length")
+            header = json.loads(handle.read(length))
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise OcqError(f"Could not read Ollama blob {blob}") from exc
+    if not isinstance(header, dict):
+        raise OcqError(f"Could not read Ollama blob {blob}")
+    return header
+
+
+def mlx_blob_tensors(root: Path, layers: list[dict]) -> tuple[list[Tensor], dict, dict]:
+    """(tensors, stored types, quantization type of each quantized weight) of the blobs."""
+    tensors: list[Tensor] = []
+    dtypes: dict[str, str] = {}
+    quant: dict[str, str] = {}
+    for digest in dict.fromkeys(layer.get("digest", "") for layer in layers):
+        blob = blob_path(root, digest)
+        if blob is None:
+            raise OcqError(f"Bad blob name in an Ollama manifest: {digest}")
+        header = read_blob_header(blob)
+        meta = header.pop("__metadata__", None) or {}
+        for name, info in header.items():
+            tensors.append((name, tuple(info["shape"])))
+            dtypes[name] = info["dtype"]
+        for name in header:
+            if f"{name}.scale" in header:
+                kind = meta.get(f"{name}.quant_type") or meta.get("quant_type") or ""
+                quant[name] = str(kind)
+    return tensors, dtypes, quant
+
+
+def mlx_quantization(quant: dict[str, str]) -> dict:
+    """The quantization as MLX's config.json states it: the main type, and the layers that
+    differ with their own (QuantPilot reads that already)."""
+    if not quant:
+        return {}
+    quant = {name: ollama_quant_type(kind) for name, kind in quant.items()}
+    unknown = sorted({kind for kind in quant.values() if kind not in OLLAMA_QUANT_TYPES})
+    if unknown:
+        raise OcqError(f"Unknown Ollama quantization type {', '.join(unknown) or '(none)'}")
+    main = Counter(quant.values()).most_common(1)[0][0]
+    bits, group, mode = OLLAMA_QUANT_TYPES[main]
+    settings: dict = {"bits": bits, "group_size": group, "mode": mode}
+    for name, kind in quant.items():
+        if kind != main:
+            bits, group, mode = OLLAMA_QUANT_TYPES[kind]
+            settings[name.removesuffix(".weight")] = {
+                "bits": bits,
+                "group_size": group,
+                "mode": mode,
+            }
+    return settings
+
+
+def ollama_mlx_files(name: str) -> tuple[dict, list[Tensor], dict[str, str]]:
+    """config.json, tensors and stored types of an Ollama model kept in the MLX layout, with
+    the quantization the blobs name added to config.json under "quantization" as MLX does."""
+    root, model = find_ollama(name)
+    manifest = runnable_manifest(root, read_json(model.path)) or {}
+    layers = manifest.get("layers", [])
+    config_layer = next(
+        (
+            lay
+            for lay in layers
+            if lay.get("mediaType") == CONFIG_LAYER and lay.get("name") == "config.json"
+        ),
+        None,
+    )
+    blob = blob_path(root, (config_layer or {}).get("digest", ""))
+    if blob is None:
+        raise OcqError(f"Ollama's {model.label} has no config.json layer.")
+    config = read_json(blob)
+    tensors, dtypes, quant = mlx_blob_tensors(
+        root, [lay for lay in layers if lay.get("mediaType") == TENSOR_LAYER]
+    )
+    settings = mlx_quantization(quant)
+    if settings:
+        config = {**config, "quantization": settings}
+    return config, tensors, dtypes
+
+
+def ollama_mlx_label(root: Path, layers: list[dict]) -> str:
+    try:
+        _, dtypes, quant = mlx_blob_tensors(root, layers)
+        settings = mlx_quantization(quant)
+    except OcqError:
+        return "unreadable"
+    if settings:
+        mode = settings["mode"]
+        return f"{settings['bits']}-bit" if mode == "affine" else mode.upper()
+    common = Counter(dtypes.values()).most_common(1)
+    return common[0][0] if common else "?"
 
 
 # LM Studio ---------------------------------------------------------------------------------

@@ -157,24 +157,59 @@ def test_a_manifest_list_gives_the_llama_cpp_child(tmp_path):
     assert model.note == "also draft model, vision projector"
 
 
-def test_an_mlx_only_ollama_model_is_listed_but_not_read(tmp_path):
-    root = tmp_path / "ollama"
-    ollama_store(
-        root, "manifests-v2", "qwen3.5:0.8b", (OLLAMA_DATA / "qwen3.5-0.8b-list.json").read_bytes()
-    )
+def qwen35_mlx_store(root: Path) -> None:
+    """qwen3.5:0.8b as Ollama keeps it for MLX: a manifest list, the MLX child, config.json and
+    473 tensor blobs, each with its real safetensors header and as long as the manifest says."""
+    listing = (OLLAMA_DATA / "qwen3.5-0.8b-list.json").read_bytes()
+    ollama_store(root, "manifests-v2", "qwen3.5:0.8b", listing)
     mlx = gzip.decompress((OLLAMA_DATA / "qwen3.5-0.8b-mlx.json.gz").read_bytes())
-    listing = json.loads((OLLAMA_DATA / "qwen3.5-0.8b-list.json").read_bytes())
-    write_blob(root, next(c["digest"] for c in listing["manifests"] if c["runner"] == "mlx"), mlx)
-
-    (model,) = discovery.ollama_models([root])
-    assert model.format == "MLX safetensors"
-    assert model.size_bytes == sum(
-        lay["size"]
-        for lay in json.loads(mlx)["layers"]
-        if lay["mediaType"] == discovery.TENSOR_LAYER
+    child = next(c for c in json.loads(listing)["manifests"] if c["runner"] == "mlx")
+    write_blob(root, child["digest"], mlx)
+    saved = json.loads(
+        gzip.decompress((OLLAMA_DATA / "qwen3.5-0.8b-mlx-headers.json.gz").read_bytes())
     )
-    assert not model.complete  # the tensor blobs are not there
-    assert "cannot read" in model.note
+    for layer in json.loads(mlx)["layers"]:
+        if layer["mediaType"] == discovery.TENSOR_LAYER:
+            header = json.dumps(saved["headers"][layer["digest"]]).encode()
+            data = len(header).to_bytes(8, "little") + header
+            write_blob(root, layer["digest"], data, layer["size"])
+        elif layer.get("name") == "config.json":
+            write_blob(root, layer["digest"], json.dumps(saved["config"]).encode())
+        else:
+            write_blob(root, layer["digest"], b"x", layer["size"])
+
+
+def test_an_ollama_model_kept_for_mlx_is_read_from_its_blobs(tmp_path, monkeypatch):
+    root = tmp_path / "ollama"
+    qwen35_mlx_store(root)
+    monkeypatch.setenv("OLLAMA_MODELS", str(root))
+
+    (model,) = discovery.ollama_models()
+    assert (model.format, model.quantization, model.complete) == ("MLX safetensors", "MXFP8", True)
+
+    snap = resolve_model("ollama:qwen3.5:0.8b", None)
+    assert snap.facts.quantization.value == "MLX MXFP8"
+    assert snap.facts.quantization.source == "Ollama blob metadata + tensor names"
+    # Qwen/Qwen3.5-0.8B counts 873,438,784 on the Hub; Ollama's copy leaves out the 15 mtp.*
+    # tensors (multi-token prediction, 20,452,864 weights). The 150 .scale tensors are not weights.
+    assert snap.facts.parameters.value == 873_438_784 - 20_452_864
+    assert "8-bit in U32" in snap.facts.precision.note
+    with pytest.raises(OcqError, match="for MLX"):
+        discovery.ollama_blob("qwen3.5:0.8b")  # verify and optimize need a GGUF
+
+
+def test_an_unknown_ollama_quantization_type_is_not_guessed():
+    with pytest.raises(OcqError, match="Unknown Ollama quantization type q3"):
+        discovery.mlx_quantization({"a.weight": "q3"})
+    settings = discovery.mlx_quantization(
+        {"a.weight": "mxfp4", "b.weight": "mxfp4", "c.weight": "Q8"}  # Q8 is Ollama's int8
+    )
+    assert settings == {
+        "bits": 4,
+        "group_size": 32,
+        "mode": "mxfp4",
+        "c": {"bits": 8, "group_size": 64, "mode": "affine"},
+    }
 
 
 @pytest.mark.parametrize(

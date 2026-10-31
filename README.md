@@ -393,7 +393,7 @@ The last column is what to pass to `inspect`, `feasibility` or `verify`, for exa
 | LM Studio | `~/.lmstudio/models` (older: `~/.cache/lm-studio/models`) | `~/.lmstudio-home-pointer`, *My Models → models directory* |
 | Hugging Face (and llama.cpp `-hf` downloads) | `~/.cache/huggingface/hub` | `HF_HUB_CACHE`, `HF_HOME`, `LLAMA_CACHE` |
 
-The quantization of a GGUF comes from its own header, not its file name. The Hugging Face cache often holds only `config.json` (QuantPilot and other tools fetch it to size a model without downloading it); those are hidden unless you pass `--all`. Newer Ollama versions can store a model for Apple's MLX instead of GGUF: it is listed, but QuantPilot cannot read that layout yet.
+The quantization of a GGUF comes from its own header, not its file name. The Hugging Face cache often holds only `config.json` (QuantPilot and other tools fetch it to size a model without downloading it); those are hidden unless you pass `--all`. Newer Ollama versions can store a model for Apple's MLX instead of GGUF (one small safetensors file per tensor, the quantization in each file's metadata): `inspect` and `feasibility` read that too; `verify` and `optimize` need a GGUF.
 
 ---
 
