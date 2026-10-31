@@ -139,6 +139,18 @@ QWEN3_MOE = "Qwen/Qwen3-30B-A3B"  # 128 experts, 8 per token, one tensor per exp
 DEEPSEEK_V2_LITE = "deepseek-ai/DeepSeek-V2-Lite-Chat"  # + 2 shared experts, layer 0 dense
 MIXTRAL = "mistralai/Mixtral-8x7B-Instruct-v0.1"  # 8 experts, 2 per token
 GPT_OSS = "openai/gpt-oss-20b"  # 32 experts fused in one tensor, MXFP4 quantized
+# Sliding-window attention (Google's own Gemma repos are gated; unsloth's carry the same config).
+GEMMA3_1B = "unsloth/gemma-3-1b-it"  # 22 of 26 layers keep the last 512 tokens
+GEMMA2_2B = "unsloth/gemma-2-2b-it"  # every other layer keeps the last 4,096 tokens
+MISTRAL_V01 = "mistralai/Mistral-7B-Instruct-v0.1"  # a 4,096 window on every layer
+# Hybrids: only some layers have attention, the others keep a fixed-size state.
+LFM2 = "LiquidAI/LFM2-1.2B"  # full_attn_idxs, convolutions elsewhere
+JAMBA = "ai21labs/AI21-Jamba-Reasoning-3B"  # attn_layer_period/offset, Mamba elsewhere
+GRANITE_H = "ibm-granite/granite-4.0-h-tiny"  # layer_types "mamba" / "attention"
+NEMOTRON_H = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"  # hybrid_override_pattern, mixer.k_proj
+FALCON_H1 = "tiiuae/Falcon-H1-0.5B-Instruct"  # attention and Mamba side by side in every layer
+LLAMA4_SCOUT = "unsloth/Llama-4-Scout-17B-16E-Instruct"  # 3 of 4 layers chunked attention
+QWEN3_NEXT = "Qwen/Qwen3-Next-80B-A3B-Instruct"  # config.json only: every 4th layer attention
 
 # Lines as `nvidia-smi --query-gpu=name,memory.total,memory.free,compute_cap` prints them.
 RTX_3090 = "NVIDIA GeForce RTX 3090, 24576, 24000, 8.6"

@@ -67,6 +67,42 @@ class Fact:
         return self.kind != FactKind.UNKNOWN
 
 
+# Runtime defaults the context memory depends on. They come from llama.cpp (build b11429), and
+# its logs confirm them: Gemma 3 1B (window 512) at -c 32768 gets a sliding cache of
+# "1024 cells" in llama-completion (1 conversation) and "2560 cells" in llama-server (4).
+#   cells of a sliding layer = window x conversations + n_ubatch, padded to 256 cells
+# Full layers share one cache of `context` cells between all conversations (kv_unified).
+# vLLM and transformers keep no more than this.
+SLIDING_WINDOW_UBATCH = 512  # llama.cpp -ub
+KV_CELL_PADDING = 256
+CONVERSATIONS = 4  # llama-server's default (n_parallel auto = 4), the largest of the runtimes
+KV_BYTES_PER_VALUE = 2  # 16-bit keys and values (llama.cpp -ctk f16, vLLM kv-cache-dtype auto)
+TRANSFORMERS = "transformers"
+
+
+@dataclass(frozen=True)
+class KvLayer:
+    """What one layer caches for every token of context."""
+
+    bytes_per_token: int  # keys and values (16-bit), as llama.cpp and vLLM store them
+    window: int = 0  # a sliding-window layer keeps only this many recent tokens; 0 = all
+    # transformers expands MLA's compressed cache into full keys and values. 0 = same as above.
+    transformers_bytes_per_token: int = 0
+
+    def cache_bytes(
+        self, context: int, runtime: str = "", conversations: int = CONVERSATIONS
+    ) -> int:
+        per_token = self.bytes_per_token
+        if runtime == TRANSFORMERS and self.transformers_bytes_per_token:
+            per_token = self.transformers_bytes_per_token
+        tokens = context
+        if self.window:
+            wanted = self.window * conversations + SLIDING_WINDOW_UBATCH
+            cells = -(-wanted // KV_CELL_PADDING) * KV_CELL_PADDING
+            tokens = min(context, cells)
+        return per_token * tokens
+
+
 @dataclass(frozen=True)
 class ModelFacts:
     parameters: Fact = Fact()  # int: weights as the model counts them, packed ones unpacked
@@ -413,6 +449,8 @@ class ModelSnapshot:
     catalog_source: str = "llmfit"  # llmfit | huggingface | local
     weights_dir: Path | None = None  # local HuggingFace-format folder; skip Hub download
     facts: ModelFacts = field(default_factory=ModelFacts)
+    # One entry per layer, from config.json. Empty when config.json does not describe them.
+    kv_layers: tuple[KvLayer, ...] = field(default=(), repr=False)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -453,13 +491,23 @@ class ModelSnapshot:
             return min(active.value / total.value, 1.0)
         return 1.0
 
-    @property
-    def kv_bytes_per_token(self) -> int | None:
-        """Keys and values one token of context needs. None when it could not be worked out."""
+    def kv_cache_bytes(
+        self, context: int, runtime: str = "", conversations: int = CONVERSATIONS
+    ) -> int | None:
+        """Keys and values for `context` tokens. None when they could not be worked out.
+
+        Sliding-window layers stop growing at their window (per conversation), and MLA caches a
+        compressed vector (expanded by transformers). runtime is TRANSFORMERS or "" for
+        llama.cpp and vLLM.
+        """
+        if self.kv_layers:
+            return sum(
+                layer.cache_bytes(context, runtime, conversations) for layer in self.kv_layers
+            )
         if self.facts.kv_cache.known:
-            return self.facts.kv_cache.value
+            return self.facts.kv_cache.value * context
         if self.architecture_known:
-            return 2 * self.num_layers * self.num_kv_heads * self.head_dim * 2
+            return 2 * self.num_layers * self.num_kv_heads * self.head_dim * 2 * context
         return None
 
     @property
