@@ -158,8 +158,13 @@ QWEN3_NEXT = "Qwen/Qwen3-Next-80B-A3B-Instruct"  # config.json only: every 4th l
 RTX_3090 = "NVIDIA GeForce RTX 3090, 24576, 24000, 8.6"
 RTX_3090_BUSY = "NVIDIA GeForce RTX 3090, 24576, 23000, 8.6"
 RTX_3060 = "NVIDIA GeForce RTX 3060, 12288, 12000, 8.6"
+RTX_4090 = "NVIDIA GeForce RTX 4090, 24564, 24000, 8.9"
 # Memory bandwidth from NVIDIA's specifications, GB/s.
-SPEC_BANDWIDTH = {"NVIDIA GeForce RTX 3090": 936.0, "NVIDIA GeForce RTX 3060": 360.0}
+SPEC_BANDWIDTH = {
+    "NVIDIA GeForce RTX 3090": 936.0,
+    "NVIDIA GeForce RTX 3060": 360.0,
+    "NVIDIA GeForce RTX 4090": 1008.0,
+}
 
 
 def nvidia_pc(*lines: str, ram_gb: float = 60):

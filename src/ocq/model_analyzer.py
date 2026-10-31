@@ -701,7 +701,9 @@ def vocabulary_from_tensors(tensors: list[Tensor]) -> dict:
 
 # What a layer keeps for the context. Only attention layers keep keys and values for every token;
 # Mamba, linear-attention and convolution layers keep a small state of fixed size instead.
-FULL, SLIDING, CHUNKED, NO_CACHE = "full", "sliding", "chunked", "no cache"
+FULL, SLIDING, CHUNKED = "full", "sliding", "chunked"
+STATE = "state"  # Mamba, linear-attention or convolution layer: a fixed-size state, no cache
+NO_CACHE = "no cache"  # a plain MLP layer (Nemotron-H "-"): neither
 LAYER_TYPE_KINDS = {
     "full_attention": FULL,
     "attention": FULL,
@@ -724,23 +726,22 @@ def layer_kinds(text: dict, layers: int) -> tuple[list[str], str]:
     """
     types = text.get("layer_types")
     if isinstance(types, list) and len(types) == layers:
-        return [LAYER_TYPE_KINDS.get(kind, NO_CACHE) for kind in types], "layer_types"
+        return [LAYER_TYPE_KINDS.get(kind, STATE) for kind in types], "layer_types"
     if isinstance(text.get("full_attn_idxs"), list):
         attention = set(text["full_attn_idxs"])
-        kinds = [FULL if index in attention else NO_CACHE for index in range(layers)]
+        kinds = [FULL if index in attention else STATE for index in range(layers)]
         return kinds, "full_attn_idxs"
     if text.get("full_attention_interval"):
         interval = text["full_attention_interval"]
-        kinds = [NO_CACHE if (index + 1) % interval else FULL for index in range(layers)]
+        kinds = [STATE if (index + 1) % interval else FULL for index in range(layers)]
         return kinds, "full_attention_interval"
     pattern = text.get("hybrid_override_pattern")
     if isinstance(pattern, str) and len(pattern) == layers:
-        return [
-            FULL if letter == "*" else NO_CACHE for letter in pattern
-        ], "hybrid_override_pattern"
+        letters = {"*": FULL, "M": STATE}
+        return [letters.get(letter, NO_CACHE) for letter in pattern], "hybrid_override_pattern"
     if text.get("attn_layer_period"):
         period, offset = text["attn_layer_period"], text.get("attn_layer_offset", 0)
-        kinds = [FULL if index % period == offset else NO_CACHE for index in range(layers)]
+        kinds = [FULL if index % period == offset else STATE for index in range(layers)]
         return kinds, "attn_layer_period"
     no_rope = text.get("no_rope_layers")
     if text.get("attention_chunk_size") and isinstance(no_rope, list) and len(no_rope) >= layers:
@@ -756,11 +757,13 @@ def layer_kinds(text: dict, layers: int) -> tuple[list[str], str]:
     return [FULL] * layers, ""
 
 
-def layer_windows(text: dict, layers: int) -> tuple[list[int | None], str]:
+def layer_windows(text: dict, layers: int) -> tuple[list[int | None], list[str], str]:
     """Tokens each layer keeps per conversation (0 = all, None = no cache) and a note.
 
     llama.cpp only shrinks the cache of models that mix windowed and full layers (Gemma 2/3,
-    gpt-oss, Cohere2, Llama 4, ...). A window on every layer (Mistral 7B v0.1) is counted in full.
+    gpt-oss, Cohere2, Llama 4, ...). A window on every layer is counted in full: llama.cpp keeps
+    Mistral 7B v0.1's whole cache, and for Phi-3 it sets swa_type NONE ("Phi SWA is currently
+    disabled", src/models/phi3.cpp).
     """
     kinds, said_by = layer_kinds(text, layers)
     window = text.get("sliding_window") or 0
@@ -769,7 +772,7 @@ def layer_windows(text: dict, layers: int) -> tuple[list[int | None], str]:
     chunk = text.get("attention_chunk_size") or 0
     windows: list[int | None] = []
     for kind in kinds:
-        if kind == NO_CACHE:
+        if kind in (STATE, NO_CACHE):
             windows.append(None)
         elif kind == SLIDING:
             windows.append(window)
@@ -785,17 +788,44 @@ def layer_windows(text: dict, layers: int) -> tuple[list[int | None], str]:
         windows = [None if w is None else 0 for w in windows]
     sliding = sum(1 for kind, w in zip(kinds, windows, strict=True) if kind == SLIDING and w)
     chunked = sum(1 for kind, w in zip(kinds, windows, strict=True) if kind == CHUNKED and w)
-    stateful = windows.count(None)
     if sliding:
         notes.append(f"{sliding} of {layers} layers keep only the last {window:,} tokens")
     if chunked:
         notes.append(f"{chunked} of {layers} layers attend within {chunk:,}-token chunks")
-    if stateful:
-        notes.append(
-            f"{stateful} of {layers} layers keep a fixed-size state instead of a cache "
-            f"(not counted), as {said_by} says"
-        )
-    return windows, "; ".join(notes)
+    if said_by and any(kind in (STATE, NO_CACHE) for kind in kinds):
+        notes.append(f"attention layers from {said_by}")
+    return windows, kinds, "; ".join(notes)
+
+
+def state_per_layer(text: dict) -> tuple[int, str]:
+    """Bytes of the fixed-size state one Mamba or convolution layer keeps per conversation, and
+    which kind. (0, "") when config.json does not describe one we know.
+
+    As llama.cpp keeps it, in 32 bits (checked against its "llama_memory_recurrent" log for
+    Granite 4.0-H, Falcon-H1, Jamba and LFM2):
+      Mamba-2   conv (d_conv - 1) x (d_inner + 2 x groups x d_state) + ssm d_state x d_inner
+      Mamba-1   conv (d_conv - 1) x d_inner                          + ssm d_state x d_inner
+      LFM2 conv (L_cache - 1) x hidden
+    Linear attention (Qwen3-Next) is not covered.
+    """
+
+    def first(*keys, default=0):
+        return next((text[key] for key in keys if text.get(key)), default)
+
+    if text.get("conv_L_cache"):
+        return (text["conv_L_cache"] - 1) * text["hidden_size"] * 4, "convolution"
+    d_state = first("mamba_d_state", "ssm_state_size", "mamba_state_dim")
+    if not d_state:
+        return 0, ""
+    d_conv = first("mamba_d_conv", "conv_kernel", default=4)
+    heads = first("mamba_n_heads", "mamba_num_heads")
+    if heads:
+        d_inner = first("mamba_d_ssm") or heads * first("mamba_d_head", "mamba_head_dim")
+        groups = first("mamba_n_groups", "n_groups", "mamba_num_groups", default=1)
+        conv = (d_conv - 1) * (d_inner + 2 * groups * d_state)
+        return (conv + d_state * d_inner) * 4, "Mamba-2"
+    d_inner = first("mamba_expand", default=2) * text["hidden_size"]
+    return ((d_conv - 1) * d_inner + d_state * d_inner) * 4, "Mamba-1"
 
 
 def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
@@ -804,7 +834,21 @@ def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
     if not found:
         return (), ""
     text, _ = text_config(config)
-    windows, note = layer_windows(text, found["num_layers"])
+    layers_count = found["num_layers"]
+    windows, kinds, note = layer_windows(text, layers_count)
+    state, state_kind = state_per_layer(text)
+    stateful = [kind == STATE for kind in kinds]
+    if state_kind.startswith("Mamba") and not any(stateful):
+        # Falcon-H1: attention and Mamba side by side, so every layer has a cache and a state.
+        stateful = [True] * layers_count
+    states = [state if has_state else 0 for has_state in stateful]
+    if any(stateful):
+        count = f"{sum(stateful)} of {layers_count} layers"
+        if state:
+            kept = f"{count} keep a {state_kind} state of {state / 2**20:.2f} MiB per conversation"
+        else:
+            kept = f"{count} keep a fixed-size state of unknown size instead (not counted)"
+        note = "; ".join(filter(None, [note, kept]))
     if text.get("kv_lora_rank"):
         # MLA (DeepSeek V2/V3, Kimi): one compressed vector plus the rotary part per token.
         rope = text.get("qk_rope_head_dim", 0)
@@ -817,14 +861,19 @@ def kv_layers_from(config: dict) -> tuple[tuple[KvLayer, ...], str]:
             f"and vLLM, {expanded // KV_BYTES_PER_VALUE} in transformers"
         )
         layers = tuple(
-            KvLayer(0) if window is None else KvLayer(compressed, window, expanded)
-            for window in windows
+            KvLayer(0, state_bytes=extra)
+            if window is None
+            else KvLayer(compressed, window, expanded, extra)
+            for window, extra in zip(windows, states, strict=True)
         )
         return layers, "; ".join(filter(None, [note, mla]))
     head_dim = found["attention_head_dim"] or found["hidden_size"] // found["num_attention_heads"]
     per_layer = 2 * found["num_kv_heads"] * head_dim * KV_BYTES_PER_VALUE  # keys and values
     layers = tuple(
-        KvLayer(0) if window is None else KvLayer(per_layer, window) for window in windows
+        KvLayer(0, state_bytes=extra)
+        if window is None
+        else KvLayer(per_layer, window, state_bytes=extra)
+        for window, extra in zip(windows, states, strict=True)
     )
     return layers, note
 
@@ -1145,7 +1194,7 @@ def fit_at(
     # transformers expands MLA's compressed cache and keeps 16 bits; llama.cpp and vLLM keep it
     # compressed, and store the cache type asked for in their own format.
     runtime = runtime_of(row_kind)
-    value_bytes = kv_value_bytes(kv_cache, runtime)
+    value_bytes = kv_value_bytes(kv_cache, runtime, hardware.vllm_fp8_kv_cache)
     kv_bytes = model.kv_cache_bytes(context, runtime, value_bytes=value_bytes)
     context_gb = 0.0
     if kv_bytes is not None:

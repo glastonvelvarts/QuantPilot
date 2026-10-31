@@ -96,6 +96,9 @@ class KvLayer:
     window: int = 0  # a sliding-window layer keeps only this many recent tokens; 0 = all
     # transformers expands MLA's compressed cache into full keys and values. 0 = same as above.
     transformers_bytes_per_token: int = 0
+    # Mamba and convolution layers keep a fixed-size state per conversation instead of a cache
+    # that grows (32-bit, llama.cpp's "llama_memory_recurrent").
+    state_bytes: int = 0
 
     def cache_bytes(
         self,
@@ -114,7 +117,7 @@ class KvLayer:
             wanted = self.window * conversations + SLIDING_WINDOW_UBATCH
             cells = -(-wanted // KV_CELL_PADDING) * KV_CELL_PADDING
             tokens = min(context, cells)
-        return round(per_token * tokens)
+        return round(per_token * tokens) + self.state_bytes * conversations
 
 
 @dataclass(frozen=True)
@@ -278,6 +281,20 @@ class HardwareProfile:
     def primary_gpu(self) -> GpuProfile | None:
         with_vram = [g for g in self.gpus if g.vram_gb is not None]
         return max(with_vram, key=lambda g: g.vram_gb) if with_vram else None
+
+    @property
+    def vllm_fp8_kv_cache(self) -> bool:
+        """vLLM rejects --kv-cache-dtype fp8 below compute capability 8.9 (Ada, Hopper and
+        Blackwell have it; Ampere and older do not). Unknown counts as no."""
+        cards = [card for card in self.cards if "cuda" in card.backend.lower()]
+        return (
+            self.has_cuda
+            and bool(cards)
+            and all(
+                card.compute_capability is not None and card.compute_capability >= 8.9
+                for card in cards
+            )
+        )
 
     @property
     def has_fp4_tensor_cores(self) -> bool:
