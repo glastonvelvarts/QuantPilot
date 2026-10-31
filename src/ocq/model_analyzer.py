@@ -22,13 +22,16 @@ from ocq.model_size import (
     bnb_scale_bits,
     bnb_weights_bytes,
     experts_in_names,
+    gguf_tensor_bytes,
     gguf_weights_bytes,
     group_size_that_fits,
     kv_value_bytes,
+    layer_index,
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
     parameters_by_type,
+    routed_expert,
     stored_bytes,
     weights_per_token,
 )
@@ -306,6 +309,8 @@ def build_snapshot(
         context_length=facts.context_length.value,
         use_case=str(meta.get("pipeline_tag") or "General"),
         is_moe=bool(experts_in_names(tensors) or expert_settings(config)[0]),
+        experts=experts_in_names(tensors) or expert_settings(config)[0],
+        experts_per_token=expert_settings(config)[1],
         tensors=tuple(tensors),
         catalog_source="huggingface",
         facts=facts,
@@ -531,9 +536,10 @@ def active_fact(
         parts.append(f"{read / total.value:.0%} of the weights")
 
     source, kind = "tensor names", FactKind.EXACT
-    if configured and named and configured != named:
+    if configured and configured != named:
         kind = FactKind.ESTIMATE
-        parts.append(f"config.json says {configured} experts, the tensor names show {named}")
+        shown = named or "none"
+        parts.append(f"config.json says {configured} experts, the tensor names show {shown}")
     elif config and (configured == named):
         source, kind = "config.json + tensor names", FactKind.CROSS_CHECKED
     return Fact(read, source, kind, ", ".join(parts))
@@ -1160,8 +1166,15 @@ def fit_at(
     vram = pool.free_gb if pool else 0.0
     ram = hardware.available_ram_gb
 
+    experts_ram_layers, experts_ram_gb = 0, 0.0
+    offload = None
+    if vram and required > vram and not hardware.unified_memory and row_kind == "gguf":
+        offload = experts_to_ram(model, label, required - vram, ram)
     if vram and required <= vram:
         run_mode, available = RunMode.GPU, vram
+    elif offload:
+        run_mode, available = RunMode.GPU_EXPERTS_RAM, vram + ram
+        experts_ram_layers, experts_ram_gb = offload
     elif vram and not hardware.unified_memory and required <= vram + ram:
         run_mode, available = RunMode.GPU_OFFLOAD, vram + ram
     else:
@@ -1172,6 +1185,9 @@ def fit_at(
         fit_level, run_mode = FitLevel.TOO_TIGHT, RunMode.UNFIT
     elif run_mode == RunMode.GPU_OFFLOAD or utilization > 85:
         fit_level = FitLevel.MARGINAL
+    elif run_mode == RunMode.GPU_EXPERTS_RAM:
+        # Part of every token is read from RAM, so it is never the roomy fit Perfect promises.
+        fit_level = FitLevel.GOOD
     elif utilization > 60:
         fit_level = FitLevel.GOOD
     else:
@@ -1188,6 +1204,7 @@ def fit_at(
         use_measurements,
         gpu_read_speed=pool.read_speed if pool else 0.0,
         read_fraction=model.read_fraction,
+        ram_read_gb=experts_ram_gb * model.experts_per_token / model.experts if offload else 0.0,
     )
     return QuantOption(
         label=label,
@@ -1207,7 +1224,35 @@ def fit_at(
         if pool and run_mode != RunMode.CPU
         else (),
         gpu_split=pool.split if pool else "",
+        experts_in_ram=experts_ram_layers,
     )
+
+
+def experts_to_ram(
+    model: ModelSnapshot, gguf_type: str, too_much_gb: float, ram_gb: float
+) -> tuple[int, float] | None:
+    """llama.cpp --n-cpu-moe N: the experts of the first N layers stay in RAM, everything else
+    goes to VRAM. The smallest N that frees `too_much_gb` of VRAM, and the GB moved to RAM.
+
+    A token reads only a few experts, so this runs much faster than moving whole layers to
+    RAM. None for a dense model, or when even all experts in RAM free too little VRAM, or the
+    experts do not fit in RAM.
+    """
+    if not (model.experts and model.experts_per_token and model.tensors):
+        return None
+    heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
+    sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
+    by_layer: dict[int, int] = {}
+    for name, shape in model.tensors:
+        if routed_expert(name, shape, model.experts):
+            by_layer[layer_index(name)] = by_layer.get(layer_index(name), 0) + sizes[name]
+    moved = 0.0
+    for layer in sorted(by_layer):
+        moved += by_layer[layer] / GB
+        if moved >= too_much_gb:
+            # --n-cpu-moe counts layers from the first one, dense ones too (DeepSeek layer 0).
+            return (layer + 1, moved) if moved <= ram_gb else None
+    return None
 
 
 def parameters_from_hf(meta: dict) -> int | None:

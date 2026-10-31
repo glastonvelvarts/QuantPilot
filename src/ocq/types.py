@@ -148,6 +148,8 @@ class RunMode(str, Enum):
     GPU = "gpu"
     GPU_FULL = "gpu_full"
     GPU_OFFLOAD = "gpu_offload"
+    # Mixture of experts in llama.cpp: experts of some layers in RAM, everything else in VRAM.
+    GPU_EXPERTS_RAM = "gpu_experts_ram"
     CPU = "cpu"
     CPU_ONLY = "cpu_only"
     UNFIT = "unfit"
@@ -407,6 +409,8 @@ class QuantOption:
     # tensor parallel.
     gpu_names: tuple[str, ...] = ()
     gpu_split: str = ""
+    # GPU_EXPERTS_RAM: the experts of this many layers (the first ones) are kept in RAM.
+    experts_in_ram: int = 0
 
     @property
     def runnable(self) -> bool:
@@ -432,6 +436,9 @@ class ModelSnapshot:
     context_length: int | None = 4096
     use_case: str = "General"
     is_moe: bool = False
+    # Mixture of experts: routed experts per layer, and how many run for each token.
+    experts: int = 0
+    experts_per_token: int = 0
     llmfit_best_quant: str = "Q4_K_M"
     feasibility: FeasibilityEstimate = field(
         default_factory=lambda: FeasibilityEstimate(
