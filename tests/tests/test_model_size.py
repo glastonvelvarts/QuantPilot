@@ -5,7 +5,18 @@ and by llama.cpp's load log for the real models.
 """
 
 import pytest
-from conftest import QWEN, QWEN3_FP8, QWEN_AWQ, QWEN_GPTQ, SMOLVLM, real_model
+from conftest import (
+    OCQ_NVFP4,
+    QWEN,
+    QWEN3_8B_NVFP4,
+    QWEN3_FP8,
+    QWEN_AWQ,
+    QWEN_BNB,
+    QWEN_GPTQ,
+    QWEN_W8A8,
+    SMOLVLM,
+    real_model,
+)
 
 from ocq.model_size import (
     bnb_scale_bits,
@@ -142,7 +153,7 @@ def test_weight_count_matches_the_huggingface_api(repo, quantized_bits):
 def test_packed_weights_are_counted_apart_from_plain_ones():
     _, _, tensors, dtypes = real_model(QWEN_GPTQ)
     assert parameters_by_type(tensors, dtypes, 4) == {
-        "packed 4-bit": 1_310_195_712,
+        "4-bit in I32": 1_310_195_712,
         "F16": 233_518_592,
     }
 
@@ -170,3 +181,31 @@ def test_stored_bytes_are_unknown_for_a_type_we_do_not_know():
     assert stored_bytes([("w", (4, 4))], {"w": "F3_NEW"}) is None
     assert stored_bytes([("w", (4, 4))], {}) is None
     assert stored_bytes([("w", (4, 4))], {"w": "F4"}) == 8
+
+
+@pytest.mark.parametrize(
+    ("repo", "quantized_bits", "expected"),
+    [
+        # 2 weights per byte; absmax, quant_map and quant_state are scales. The HF API counts
+        # those too and says 1,584,858,476.
+        (QWEN_BNB, 4, 1_543_714_304),
+        # 2 FP4 weights per byte, FP8 scales per 16, F32 weight_scale_2 per tensor. The HF API
+        # does not unpack and says 4,717,851,648. Qwen/Qwen3-8B has 8,190,735,360.
+        (QWEN3_8B_NVFP4, 4, 8_190_735_360),
+        # 1 weight per int8. 1.54B plus the lm_head copy this repo stores. The HF API counts
+        # the 645,120 per-channel scales too.
+        (QWEN_W8A8, 8, 1_777_088_000),
+        # Our own NVFP4 output: weight_packed, 2 per byte. HuggingFaceTB/SmolLM2-135M-Instruct
+        # has 134,515,008.
+        (OCQ_NVFP4, 4, 134_515_008),
+    ],
+)
+def test_weight_count_where_the_huggingface_api_is_wrong(repo, quantized_bits, expected):
+    _, _, tensors, dtypes = real_model(repo)
+    assert sum(parameters_by_type(tensors, dtypes, quantized_bits).values()) == expected
+
+
+def test_quantized_weights_are_named_by_their_container():
+    for repo, bits, label in [(QWEN_BNB, 4, "4-bit in U8"), (QWEN_W8A8, 8, "8-bit in I8")]:
+        _, _, tensors, dtypes = real_model(repo)
+        assert label in parameters_by_type(tensors, dtypes, bits)

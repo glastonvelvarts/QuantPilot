@@ -107,10 +107,12 @@ def real_model(repo: str):
     """(meta, config, tensors, dtypes) of a saved repo, meta shaped like the HF API answer."""
     saved = json.loads((DATA / f"{repo.replace('/', '--')}.json").read_text())
     meta = {
-        "safetensors": saved["hf_safetensors"],
+        "safetensors": saved["hf_safetensors"] or {},
         "cardData": {"base_model": saved["hf_base_model"]},
         "sha": saved["hf_sha"],
     }
+    if saved.get("hf_base_model_parameters"):
+        meta["base_model_parameters"] = tuple(saved["hf_base_model_parameters"])
     tensors = [(name, tuple(shape)) for name, (_, shape) in saved["tensors"].items()]
     dtypes = {name: dtype for name, (dtype, _) in saved["tensors"].items()}
     return meta, saved["config"], tensors, dtypes
@@ -121,3 +123,8 @@ QWEN_GPTQ = "Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int4"
 QWEN_AWQ = "Qwen/Qwen2.5-1.5B-Instruct-AWQ"
 QWEN3_FP8 = "Qwen/Qwen3-1.7B-FP8"
 SMOLVLM = "HuggingFaceTB/SmolVLM-256M-Instruct"
+QWEN_BNB = "unsloth/Qwen2.5-1.5B-Instruct-bnb-4bit"
+QWEN_W8A8 = "RedHatAI/Qwen2.5-1.5B-Instruct-quantized.w8a8"
+QWEN3_8B_NVFP4 = "nvidia/Qwen3-8B-NVFP4"
+# Written by `ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct -b nvfp4 --execute` (llm-compressor).
+OCQ_NVFP4 = "ocq/SmolLM2-135M-Instruct-nvfp4a16"

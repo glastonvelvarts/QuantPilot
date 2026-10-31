@@ -134,6 +134,8 @@ def resolve_model(
         raise
 
     config, tensors, dtypes = fetch_model_files(model_id, meta.get("sha", ""))
+    if quantization_config(config):
+        meta = meta | {"base_model_parameters": base_model_parameters(meta)}
     snapshot = build_snapshot(model_id, meta, config, tensors, hardware, context, dtypes)
     if catalog:
         snapshot = replace(
@@ -143,6 +145,24 @@ def resolve_model(
             catalog_source="llmfit",
         )
     return snapshot
+
+
+def base_model_parameters(meta: dict) -> tuple[str, int] | None:
+    """(repo, count) of the model a quantized repo was made from, as the HF API reports it.
+
+    A second source for the count of a quantized repo: the HF API cannot be trusted there,
+    it counts bitsandbytes scales as weights and does not unpack NVFP4 weights.
+    """
+    base = (meta.get("cardData") or {}).get("base_model")
+    if isinstance(base, list):
+        base = base[0] if len(base) == 1 else None
+    if not isinstance(base, str):
+        return None
+    try:
+        total = parameters_from_hf(fetch_hf_model(base))
+    except OcqError:
+        return None
+    return (base, total) if total else None
 
 
 def catalog_entry(model_id: str, llmfit_bin: str | None) -> ModelSnapshot | None:
@@ -352,8 +372,9 @@ def model_facts(
     """Everything known about the model, each fact with its source and how sure it is."""
     quantization, bits = quantization_fact(config, tensors, dtypes)
     by_type = parameters_by_type(tensors, dtypes, bits) if tensors else None
+    copy = lm_head_copy(config, tensors)
     return ModelFacts(
-        parameters=parameter_fact(meta, model_id, tensors, by_type, bits),
+        parameters=parameter_fact(meta, model_id, tensors, by_type, bits, copy),
         precision=precision_fact(meta, by_type, bits),
         stored_bytes=stored_bytes_fact(meta, tensors, dtypes, bits),
         architecture=architecture_fact(config, tensors),
@@ -384,6 +405,7 @@ def quantized_bits(settings: dict) -> int:
 
 
 METHOD_NAMES = {
+    "modelopt": "ModelOpt",
     "gptq": "GPTQ",
     "awq": "AWQ",
     "bitsandbytes": "BNB",
@@ -398,6 +420,8 @@ def quantization_label(settings: dict, bits: int) -> str:
     name = METHOD_NAMES.get(method.lower(), method or "unknown method")
     if name in ("FP8", "MXFP4"):
         return f"{name} {settings.get('fmt', '')}".strip()
+    if settings.get("quant_algo"):
+        return f"{name} {settings['quant_algo']}"
     if name == "compressed-tensors" and settings.get("format"):
         name += f" {settings['format']}"
     return f"{name} {bits}-bit" if bits else name
@@ -446,37 +470,59 @@ def quantization_fact(
     return Fact("none", source, kind, "no quantization_config, plain weights"), None
 
 
+def lm_head_copy(config: dict, tensors: list[Tensor]) -> int:
+    """Weights of an lm_head the files store although config.json ties it to the embeddings."""
+    text, _ = text_config(config)
+    if not text.get("tie_word_embeddings", True):
+        return 0
+    return sum(math.prod(shape) for name, shape in tensors if name.endswith("lm_head.weight"))
+
+
 def parameter_fact(
     meta: dict,
     model_id: str,
     tensors: list[Tensor],
     by_type: dict[str, int] | None,
     bits: int | None,
+    copy: int = 0,
 ) -> Fact:
-    """Our count from the tensor headers, checked against the count the HuggingFace API reports."""
+    """Our count from the tensor headers, checked against the HF API and, for a quantized repo,
+    against the count of the model it was made from."""
     hf_total = parameters_from_hf(meta)
-    if by_type:
-        counted = sum(by_type.values())
-        detail = f"{len(tensors)} tensors"
-        if bits is not None:
-            stored = sum(math.prod(shape) for _, shape in tensors)
-            unpacked = any(dtype.startswith("packed") for dtype in by_type)
-            what = "packed weights unpacked, scales left out" if unpacked else "scales left out"
-            detail += f", {what} ({stored:,} stored values)"
-        # Unpacking quantized weights is our own reading, so on its own it is an estimate.
-        alone = FactKind.EXACT if bits is None else FactKind.ESTIMATE
-        if hf_total == counted:
-            source = "safetensors headers + HF API"
-            return Fact(counted, source, FactKind.CROSS_CHECKED, f"{detail}, matches HF API total")
+    base = meta.get("base_model_parameters")
+    if not by_type:
         if hf_total:
-            note = f"{detail}; HF API says {int(hf_total):,}"
-            return Fact(counted, "safetensors headers", alone, note)
-        return Fact(counted, "safetensors headers", alone, detail)
-    if hf_total:
-        return Fact(int(hf_total), "HF API", FactKind.EXACT, "tensor headers not readable")
-    hint = parse_params_from_name(model_id)
-    note = f"name says {format_params(hint)}, not used" if hint else ""
-    return Fact(note=note)
+            return Fact(hf_total, "HF API", FactKind.EXACT, "tensor headers not readable")
+        hint = parse_params_from_name(model_id)
+        return Fact(note=f"name says {format_params(hint)}, not used" if hint else "")
+
+    counted = sum(by_type.values())
+    notes = [f"{len(tensors)} tensors"]
+    if bits is not None:
+        stored = sum(math.prod(shape) for _, shape in tensors)
+        unpacked = any("-bit in " in dtype for dtype in by_type)
+        what = "packed weights unpacked, scales left out" if unpacked else "scales left out"
+        notes[0] += f", {what} ({stored:,} stored values)"
+
+    sources = []
+    if hf_total == counted:
+        sources.append("HF API")
+        notes.append("matches HF API total")
+    elif hf_total:
+        notes.append(f"HF API says {hf_total:,}")
+    if base and base[1] in (counted, counted - copy):
+        sources.append("base model")
+        extra = f" plus a stored lm_head copy of {copy:,}" if base[1] != counted else ""
+        notes.append(f"matches base model {base[0]}{extra}")
+    elif base:
+        notes.append(f"base model {base[0]} has {base[1]:,}")
+
+    if sources:
+        source = " + ".join(["safetensors headers", *sources])
+        return Fact(counted, source, FactKind.CROSS_CHECKED, "; ".join(notes))
+    # Unpacking quantized weights is our own reading, so on its own it is an estimate.
+    kind = FactKind.EXACT if bits is None else FactKind.ESTIMATE
+    return Fact(counted, "safetensors headers", kind, "; ".join(notes))
 
 
 def precision_fact(meta: dict, by_type: dict[str, int] | None, bits: int | None) -> Fact:
@@ -485,7 +531,7 @@ def precision_fact(meta: dict, by_type: dict[str, int] | None, bits: int | None)
     if bits is not None:
         # The HF API counts packed weights unpacked, under their integer type.
         hf_counts = {
-            f"packed {bits}-bit" if dtype in INTEGER_TYPES else dtype: count
+            f"{bits}-bit in {dtype}" if dtype in INTEGER_TYPES else dtype: count
             for dtype, count in hf_counts.items()
         }
     if by_type and "" not in by_type:
@@ -528,6 +574,23 @@ def stored_bytes_fact(
     return Fact(total, "HF API parameter counts", kind, f"{total / GB:.2f} GiB")
 
 
+LAYER_NAME = re.compile(r"^(.*?)\.(?:layers|h|blocks)\.(\d+)\.")
+NOT_LANGUAGE_MODEL = re.compile(r"vision|visual|audio|image|speech|mm_projector")
+
+
+def layers_in_names(tensors: list[Tensor]) -> int | None:
+    """Layers of the language model, counted from tensor names such as model.layers.27.mlp.
+
+    None when the names show no single language-model stack (vision towers are left out).
+    """
+    stacks: dict[str, set[int]] = {}
+    for name, _ in tensors:
+        match = LAYER_NAME.match(name)
+        if match and not NOT_LANGUAGE_MODEL.search(match.group(1)):
+            stacks.setdefault(match.group(1), set()).add(int(match.group(2)))
+    return len(next(iter(stacks.values()))) if len(stacks) == 1 else None
+
+
 def architecture_fact(config: dict, tensors: list[Tensor]) -> Fact:
     text, key = text_config(config)
     found = architecture_from(config)
@@ -550,7 +613,15 @@ def architecture_fact(config: dict, tensors: list[Tensor]) -> Fact:
         parts.append("lm_head stored although config.json ties it to the embeddings")
     else:
         parts.append("tied embeddings" if tied else "separate lm_head")
-    return Fact(config.get("model_type"), source, FactKind.EXACT, ", ".join(parts))
+
+    kind = FactKind.EXACT
+    named = layers_in_names(tensors)
+    if named == found["num_layers"]:
+        kind, source = FactKind.CROSS_CHECKED, f"{source} + tensor names"
+    elif named:
+        kind = FactKind.ESTIMATE
+        parts.append(f"but the tensor names show {named} layers")
+    return Fact(config.get("model_type"), source, kind, ", ".join(parts))
 
 
 def context_fact(config: dict, meta: dict) -> Fact:
@@ -804,6 +875,8 @@ def parse_params_from_name(model_id: str) -> float | None:
 
 
 def format_params(params_b: float) -> str:
+    if params_b < 0.001:
+        return f"{params_b * 1e9:,.0f}"
     if params_b >= 1:
         return f"{params_b:.2f}B"
     return f"{params_b * 1000:.0f}M"
