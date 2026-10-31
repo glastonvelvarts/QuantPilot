@@ -1,5 +1,6 @@
 """Shared test setup."""
 
+import gzip
 import json
 import math
 from pathlib import Path
@@ -105,7 +106,11 @@ def write_safetensors(path, tensors, dtype: str | dict[str, str] = "BF16") -> No
 
 def real_model(repo: str):
     """(meta, config, tensors, dtypes) of a saved repo, meta shaped like the HF API answer."""
-    saved = json.loads((DATA / f"{repo.replace('/', '--')}.json").read_text())
+    path = DATA / f"{repo.replace('/', '--')}.json"
+    if path.exists():
+        saved = json.loads(path.read_text())
+    else:  # big headers (thousands of expert tensors) are stored gzipped
+        saved = json.loads(gzip.decompress(path.with_suffix(".json.gz").read_bytes()))
     meta = {
         "safetensors": saved["hf_safetensors"] or {},
         "cardData": {"base_model": saved["hf_base_model"]},
@@ -129,6 +134,11 @@ QWEN3_8B_NVFP4 = "nvidia/Qwen3-8B-NVFP4"
 # Written by `ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct -b nvfp4 --execute` (llm-compressor).
 OCQ_NVFP4 = "ocq/SmolLM2-135M-Instruct-nvfp4a16"
 QWEN_72B = "Qwen/Qwen2.5-72B-Instruct"
+# Mixtures of experts, each laying its experts out differently.
+QWEN3_MOE = "Qwen/Qwen3-30B-A3B"  # 128 experts, 8 per token, one tensor per expert
+DEEPSEEK_V2_LITE = "deepseek-ai/DeepSeek-V2-Lite-Chat"  # + 2 shared experts, layer 0 dense
+MIXTRAL = "mistralai/Mixtral-8x7B-Instruct-v0.1"  # 8 experts, 2 per token
+GPT_OSS = "openai/gpt-oss-20b"  # 32 experts fused in one tensor, MXFP4 quantized
 
 # Lines as `nvidia-smi --query-gpu=name,memory.total,memory.free,compute_cap` prints them.
 RTX_3090 = "NVIDIA GeForce RTX 3090, 24576, 24000, 8.6"

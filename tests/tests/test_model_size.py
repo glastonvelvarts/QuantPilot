@@ -6,10 +6,14 @@ and by llama.cpp's load log for the real models.
 
 import pytest
 from conftest import (
+    DEEPSEEK_V2_LITE,
+    GPT_OSS,
+    MIXTRAL,
     OCQ_NVFP4,
     QWEN,
     QWEN3_8B_NVFP4,
     QWEN3_FP8,
+    QWEN3_MOE,
     QWEN_AWQ,
     QWEN_BNB,
     QWEN_GPTQ,
@@ -21,6 +25,7 @@ from conftest import (
 from ocq.model_size import (
     bnb_scale_bits,
     bnb_weights_bytes,
+    experts_in_names,
     gguf_weights_bytes,
     kv_cache_bytes,
     nvfp4_weights_bytes,
@@ -28,6 +33,7 @@ from ocq.model_size import (
     packed_weights_bytes,
     parameters_by_type,
     stored_bytes,
+    weights_per_token,
 )
 
 MIB = 1024**2
@@ -209,3 +215,47 @@ def test_quantized_weights_are_named_by_their_container():
     for repo, bits, label in [(QWEN_BNB, 4, "4-bit in U8"), (QWEN_W8A8, 8, "8-bit in I8")]:
         _, _, tensors, dtypes = real_model(repo)
         assert label in parameters_by_type(tensors, dtypes, bits)
+
+
+def test_mxfp4_scales_are_not_counted_as_weights():
+    # gpt-oss stores down_proj_blocks (2 FP4 weights per byte) next to down_proj_scales.
+    # The scales used to be counted as weights: 22,109,150,784 instead of 20,914,757,184.
+    meta, _, tensors, dtypes = real_model(GPT_OSS)
+    assert sum(parameters_by_type(tensors, dtypes, 4).values()) == meta["safetensors"]["total"]
+
+
+@pytest.mark.parametrize(
+    ("repo", "experts"),
+    [(QWEN3_MOE, 128), (DEEPSEEK_V2_LITE, 64), (MIXTRAL, 8), (GPT_OSS, 32), (QWEN, 0)],
+)
+def test_experts_are_counted_from_the_tensor_names(repo, experts):
+    # One tensor per expert (experts.127.up_proj), or all in one (gpt-oss: first dimension).
+    # DeepSeek's 2 shared experts run for every token and are not routed experts.
+    _, _, tensors, _ = real_model(repo)
+    assert experts_in_names(tensors) == experts
+
+
+@pytest.mark.parametrize(
+    ("repo", "bits", "experts", "per_token", "card_says", "card_counts_embedding"),
+    [
+        # Model cards: "3.3B activated", "2.4B activated", "12.9B active", "3.61B active".
+        # Qwen and Mistral count the input embedding table, DeepSeek and OpenAI do not.
+        (QWEN3_MOE, None, 128, 8, 3.3e9, True),
+        (DEEPSEEK_V2_LITE, None, 64, 6, 2.4e9, False),
+        (MIXTRAL, None, 8, 2, 12.9e9, True),
+        (GPT_OSS, 4, 32, 4, 3.61e9, False),
+    ],
+)
+def test_weights_used_per_token_match_the_model_cards(
+    repo, bits, experts, per_token, card_says, card_counts_embedding
+):
+    _, _, tensors, dtypes = real_model(repo)
+    read, embedding = weights_per_token(tensors, dtypes, bits, experts, per_token)
+    active = read + embedding if card_counts_embedding else read
+    assert active == pytest.approx(card_says, rel=0.03)
+
+
+def test_a_dense_model_reads_all_but_its_input_embedding_rows():
+    # Qwen2.5-1.5B ties the embedding to the output layer: read in full as the output.
+    _, _, tensors, dtypes = real_model(QWEN)
+    assert weights_per_token(tensors, dtypes, None) == (1_543_714_304, 0)

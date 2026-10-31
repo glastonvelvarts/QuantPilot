@@ -271,11 +271,12 @@ def output_buffer_bytes(vocab_size: int) -> int:
 
 # Tensors a quantized checkpoint stores next to its weights: scales, zero points, group
 # indexes, packed shapes. They are not weights of the model, so they are not counted as such.
-# weight_scale_2 is NVIDIA ModelOpt's per-tensor NVFP4 scale.
+# weight_scale_2 is NVIDIA ModelOpt's per-tensor NVFP4 scale; MXFP4 (gpt-oss) stores
+# down_proj_blocks next to down_proj_scales.
 QUANT_METADATA = re.compile(
     r"\.(qzeros|scales|g_idx|SCB|absmax|quant_map|nested_absmax|nested_quant_map|weight_scale"
     r"|weight_scale_2|weight_scale_inv|weight_zero_point|weight_global_scale|weight_shape|input_scale"
-    r"|input_global_scale|input_zero_point|k_scale|v_scale)$|quant_state"
+    r"|input_global_scale|input_zero_point|k_scale|v_scale)$|_scales$|quant_state"
 )
 
 
@@ -293,17 +294,83 @@ def parameters_by_type(
     """
     counts: dict[str, int] = {}
     for name, shape in tensors:
-        dtype = dtypes.get(name, "")
-        elements = math.prod(shape)
-        if quantized_bits is not None and QUANT_METADATA.search(name):
-            continue
-        if quantized_bits is not None and (not dtype or dtype in INTEGER_TYPES):
-            if not (dtype and quantized_bits):
-                return None
-            elements = elements * DTYPE_BITS[dtype] // quantized_bits
-            dtype = f"{quantized_bits}-bit in {dtype}"
-        counts[dtype] = counts.get(dtype, 0) + elements
+        held = tensor_weights(name, shape, dtypes.get(name, ""), quantized_bits)
+        if held is None:
+            return None
+        label, weights = held
+        if weights:
+            counts[label] = counts.get(label, 0) + weights
     return counts
+
+
+def tensor_weights(
+    name: str, shape: tuple[int, ...], dtype: str, quantized_bits: int | None
+) -> tuple[str, int] | None:
+    """(type, weights) one tensor holds, as parameters_by_type counts them. A scale holds 0.
+
+    None when a packed tensor cannot be unpacked.
+    """
+    elements = math.prod(shape)
+    if quantized_bits is None:
+        return dtype, elements
+    if QUANT_METADATA.search(name):
+        return dtype, 0
+    if not dtype or dtype in INTEGER_TYPES:
+        if not (dtype and quantized_bits):
+            return None
+        return f"{quantized_bits}-bit in {dtype}", elements * DTYPE_BITS[dtype] // quantized_bits
+    return dtype, elements
+
+
+# Mixture of experts: each layer has many experts, and a router picks a few for every token.
+# One tensor per expert (Qwen3-MoE, DeepSeek, Mixtral: mlp.experts.7.up_proj.weight), or all
+# experts in one tensor whose first dimension is the expert count (gpt-oss: mlp.experts.*).
+EXPERT_INDEX = re.compile(r"\.experts\.(\d+)\.")
+EMBEDDING = ("embed_tokens.weight", "wte.weight", "word_embeddings.weight")
+OUTPUT = ("lm_head.weight", "output.weight")
+
+
+def experts_in_names(tensors: list[Tensor]) -> int:
+    """Routed experts per layer as the tensor names show them. 0 for a dense model.
+
+    Shared experts (shared_experts, shared_expert) run for every token and are not counted.
+    """
+    indexed = {match.group(1) for name, _ in tensors if (match := EXPERT_INDEX.search(name))}
+    if indexed:
+        return len(indexed)
+    fused = {shape[0] for name, shape in tensors if ".experts." in name and len(shape) >= 2}
+    return fused.pop() if len(fused) == 1 else 0
+
+
+def weights_per_token(
+    tensors: list[Tensor],
+    dtypes: dict[str, str],
+    quantized_bits: int | None,
+    experts: int = 0,
+    experts_per_token: int = 0,
+) -> tuple[int, int] | None:
+    """(weights read for one token, input embedding weights left out of that).
+
+    A routed expert counts experts_per_token / experts of its weights: that share of the
+    experts runs for each token. The input embedding table is a lookup, one row per token, so
+    it is left out, unless no separate output layer is stored and it doubles as that.
+    None when a packed tensor cannot be unpacked.
+    """
+    separate_output = any(name.endswith(OUTPUT) for name, _ in tensors)
+    read, embedding = 0.0, 0
+    for name, shape in tensors:
+        held = tensor_weights(name, shape, dtypes.get(name, ""), quantized_bits)
+        if held is None:
+            return None
+        weights = held[1]
+        routed = EXPERT_INDEX.search(name) or (".experts." in name and shape[0] == experts)
+        if experts and experts_per_token and routed:
+            read += weights * experts_per_token / experts
+        elif separate_output and name.endswith(EMBEDDING) and "vision" not in name:
+            embedding += weights
+        else:
+            read += weights
+    return round(read), embedding
 
 
 def stored_bytes(tensors: list[Tensor], dtypes: dict[str, str]) -> int | None:

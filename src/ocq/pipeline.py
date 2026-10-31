@@ -29,9 +29,8 @@ def remember_speed(
         return
     if benchmark.device not in ("gpu", "cpu"):
         return
-    measurements.record(
-        benchmark.device, quantization.artifact_size_gb, benchmark.tokens_per_second
-    )
+    read_gb = quantization.artifact_size_gb * plan.model.read_fraction
+    measurements.record(benchmark.device, read_gb, benchmark.tokens_per_second)
 
 
 def run_optimize(

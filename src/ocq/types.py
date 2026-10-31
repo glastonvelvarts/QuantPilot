@@ -75,6 +75,7 @@ class ModelFacts:
     architecture: Fact = Fact()  # str: model_type
     context_length: Fact = Fact()  # int: tokens
     kv_cache: Fact = Fact()  # int: bytes of keys and values (16-bit) per token of context
+    active_parameters: Fact = Fact()  # int: weights read for one token (all of them when dense)
     quantization: Fact = Fact()  # str: "none", or a label such as "GPTQ 4-bit"
 
 
@@ -442,6 +443,15 @@ class ModelSnapshot:
     def is_quantized(self) -> bool:
         quantization = self.facts.quantization
         return quantization.known and quantization.value != "none"
+
+    @property
+    def read_fraction(self) -> float:
+        """Share of the weights read for each token: below 1 for mixture-of-experts models,
+        and for models with a separate input embedding table, of which one row is read."""
+        active, total = self.facts.active_parameters, self.facts.parameters
+        if active.known and total.value:
+            return min(active.value / total.value, 1.0)
+        return 1.0
 
     @property
     def kv_bytes_per_token(self) -> int | None:
