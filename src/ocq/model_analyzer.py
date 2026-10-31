@@ -292,7 +292,7 @@ def build_snapshot(
         catalog_source="huggingface",
         facts=facts,
         raw=meta,
-        **architecture_from(config),
+        **(architecture_from(config) or vocabulary_from_tensors(tensors)),
     )
     if not parameters:
         # No real count, so no fit verdict.
@@ -379,6 +379,7 @@ def model_facts(
         stored_bytes=stored_bytes_fact(meta, tensors, dtypes, bits),
         architecture=architecture_fact(config, tensors),
         context_length=context_fact(config, meta),
+        kv_cache=kv_cache_fact(config, tensors),
         quantization=quantization,
     )
 
@@ -589,6 +590,73 @@ def layers_in_names(tensors: list[Tensor]) -> int | None:
         if match and not NOT_LANGUAGE_MODEL.search(match.group(1)):
             stacks.setdefault(match.group(1), set()).add(int(match.group(2)))
     return len(next(iter(stacks.values()))) if len(stacks) == 1 else None
+
+
+KV_PROJECTION = re.compile(
+    r"^(.*?)\.(?:layers|h|blocks)\.\d+\.(?:self_attn|attention|attn)\.[kv]_proj\.weight(?:_packed)?$"
+)
+EMBEDDING = ("embed_tokens.weight", "wte.weight", "word_embeddings.weight")
+
+
+def attention_from_tensors(tensors: list[Tensor]) -> tuple[int, int, int] | None:
+    """(K+V values per token over all layers, layers with attention, vocabulary) from shapes.
+
+    The K and V projections write keys and values, so their output width (first dimension,
+    also in llm-compressor's weight_packed) is what each layer caches per token. Summed over
+    every layer, so models where only some layers have attention come out right too.
+    None when the names do not show separate k_proj and v_proj (fused qkv, MLA, Mamba) or
+    bitsandbytes flattened them.
+    """
+    flattened = {name.split(".weight.")[0] + ".weight" for name, _ in tensors if ".weight." in name}
+    width, layers, vocab = 0, set(), None
+    for name, shape in tensors:
+        match = KV_PROJECTION.match(name)
+        if match and not NOT_LANGUAGE_MODEL.search(match.group(1)):
+            if len(shape) != 2 or name in flattened:
+                return None
+            width += shape[0]
+            layers.add(LAYER_NAME.match(name).group(2))
+        elif name.endswith(EMBEDDING) and not NOT_LANGUAGE_MODEL.search(name) and len(shape) == 2:
+            vocab = shape[0]
+    return (width, len(layers), vocab) if width and vocab else None
+
+
+def vocabulary_from_tensors(tensors: list[Tensor]) -> dict:
+    shapes = attention_from_tensors(tensors)
+    return {"vocab_size": shapes[2]} if shapes else {}
+
+
+def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
+    """Bytes of keys and values per token of context, from config.json and the tensor shapes."""
+    found = architecture_from(config)
+    from_config = None
+    if found:
+        head_dim = (
+            found["attention_head_dim"] or found["hidden_size"] // found["num_attention_heads"]
+        )
+        from_config = kv_cache_bytes(found["num_layers"], found["num_kv_heads"], head_dim, 1)
+    shapes = attention_from_tensors(tensors)
+    from_shapes = shapes[0] * 2 if shapes else None
+    _, key = text_config(config)
+    config_source = f"config.json {key}".strip()
+
+    if from_config and from_shapes:
+        if from_config == from_shapes:
+            note = f"{from_config * DEFAULT_CONTEXT / 2**20:,.0f} MiB at {DEFAULT_CONTEXT:,} tokens"
+            return Fact(
+                from_config, f"{config_source} + tensor shapes", FactKind.CROSS_CHECKED, note
+            )
+        note = f"tensor shapes give {from_shapes:,} bytes per token"
+        return Fact(from_config, config_source, FactKind.ESTIMATE, note)
+    if from_config:
+        return Fact(from_config, config_source, FactKind.EXACT, "standard attention assumed")
+    if from_shapes:
+        note = (
+            f"config.json has no layer or head counts; K+V projections of {shapes[1]} layers "
+            f"are {shapes[0]:,} values wide"
+        )
+        return Fact(from_shapes, "tensor shapes", FactKind.ESTIMATE, note)
+    return Fact(note="no layer or head counts in config.json, no k_proj/v_proj tensors")
 
 
 def architecture_fact(config: dict, tensors: list[Tensor]) -> Fact:
@@ -809,10 +877,10 @@ def fit_at(
             f"headers and no count from HuggingFace{f' ({hint})' if hint else ''}. "
             "Its memory needs cannot be computed."
         )
+    per_token = model.kv_bytes_per_token
     context_gb = 0.0
-    if model.architecture_known:
-        kv_cache = kv_cache_bytes(model.num_layers, model.num_kv_heads, model.head_dim, context)
-        context_gb = (kv_cache + output_buffer_bytes(model.vocab_size)) / GB
+    if per_token is not None:
+        context_gb = (per_token * context + output_buffer_bytes(model.vocab_size)) / GB
 
     required = weights_gb + context_gb
     vram = hardware.free_vram_gb
@@ -834,6 +902,9 @@ def fit_at(
         fit_level = FitLevel.GOOD
     else:
         fit_level = FitLevel.PERFECT
+    if per_token is None and fit_level in (FitLevel.PERFECT, FitLevel.GOOD):
+        # The context memory is unknown, so the headroom these levels promise is not known.
+        fit_level = FitLevel.MARGINAL
 
     speed, speed_basis = measurements.predict_speed(
         weights_gb, run_mode, vram, hardware, use_measurements
@@ -843,7 +914,8 @@ def fit_at(
         bits=weights_gb * GB * 8 / (model.params_b * 1e9),
         weights_gb=weights_gb,
         context_gb=context_gb,
-        exact=bool(model.tensors) and model.architecture_known,
+        exact=bool(model.tensors) and per_token is not None,
+        context_known=per_token is not None,
         memory_required_gb=required,
         memory_available_gb=available,
         fit_level=fit_level,
