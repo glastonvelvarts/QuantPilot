@@ -39,16 +39,15 @@ Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate
 
 ### The full-screen app
 
-Run **`ocq`** with no command (or **`ocq tui`**) to do all of the above from menus instead of flags:
+Run **`ocq`** with no command (or **`ocq tui`**) for the app: arrow keys and Enter, no flags to remember.
 
-- **Up / Down** move through the menu, **Enter** opens a page, **Tab** moves between fields, and every fixed choice (context, cache type, goal, backend, bits...) is a dropdown.
-- **Pick** lists the models already on this PC; typing a model name suggests them too.
-- In **My models** and **Suggestions**, Enter on a row opens "what fits", "inspect", "plan" or "verify" for that model.
-- Each page shows the `ocq` command it ran (`Same as: ocq feasibility ... -c 8192`), so you can copy it into a script.
-- **Settings**: theme (21 themes, including `ansi-dark` / `ansi-light`, which use your terminal's own colors), default context, cache type and goal, extra model folders, and **plain ASCII borders** for old consoles that show question marks instead of lines. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
-- **?** shows every key, **Ctrl+P** jumps to any page or changes the theme, **q** quits.
+- **Check a model**: type or browse to a model and QuantPilot recommends the version that suits this PC, with every other format and how it fits.
+- **Quantize**: review what will be made, then start it, with progress and the result in one place.
+- **Discover** suggests models for this PC; **My models** lists the ones already downloaded (Ollama, LM Studio, Hugging Face).
+- **Settings**: theme (including your terminal's own colors), default context, extra model folders, simple borders for old consoles. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
+- **?** shows the keys, **Ctrl+P** jumps anywhere, **q** quits.
 
-The banner uses only plain ASCII characters, so it looks the same on Windows, macOS and Linux. Piped or redirected, `ocq` still prints the help text, and every command and flag works as before.
+The banner uses plain ASCII only, so it looks the same on Windows, macOS and Linux. Piped or in scripts, `ocq` prints the help and every command works as before.
 
 ---
 

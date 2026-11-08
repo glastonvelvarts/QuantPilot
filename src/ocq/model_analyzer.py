@@ -113,7 +113,9 @@ AVERAGE_BITS = {
     "Q2_K": 3.16,
 }
 
-ALREADY_QUANTIZED = re.compile(r"awq|gptq|gguf|int4|int8|4bit|8bit|bnb|mlx|exl2|fp8", re.IGNORECASE)
+ALREADY_QUANTIZED = re.compile(
+    r"awq|gptq|gguf|int4|int8|4bit|8bit|bnb|mlx|exl2|fp8|fp4|w4a16|w8a8|w4a4", re.IGNORECASE
+)
 
 # Open, ungated models used for recommendations when llmfit is not available.
 STARTER_MODELS = {
