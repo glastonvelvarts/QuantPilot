@@ -105,14 +105,12 @@ def test_working_memory_is_read_from_the_real_load():
 def test_a_partly_offloaded_model_is_compared_layer_by_layer():
     # Qwen2.5-7B Q4_K_M at 131k on the RTX 4060 Laptop (llama-completion b11429, --fit): 14/29
     # layers on the GPU. The file is the one QuantPilot converted there; bartowski's Q4_K_M has
-    # the same tensors (its sizes give llama.cpp's 2,172.17 and 2,288.28 MiB).
-    import gzip
-
+    # the same tensors (its sizes give llama.cpp's 2,172.17 and 2,288.28 MiB). The log is trimmed
+    # to the lines parse_log reads.
     from ocq.model_analyzer import gguf_snapshot
 
-    results = Path(__file__).parents[2] / "results" / "windows-nvidia-geforce-rtx-4060-laptop-gpu"
-    log = gzip.decompress((results / "retest" / "qwen7b-131k-verify.log.gz").read_bytes())
-    parsed = parse_log(log.decode("utf-8", errors="replace"))
+    log = Path(__file__).parent / "data" / "gguf" / "llama-completion-qwen2.5-7b-131k-cuda.log"
+    parsed = parse_log(log.read_text(encoding="utf-8"))
     assert (parsed.layers_on_gpu, parsed.free_mib, parsed.gpus) == ((14, 29), 7106, 1)
 
     header, file_size = real_header("Qwen2.5-7B-Instruct-Q4_K_M")
@@ -145,13 +143,10 @@ def test_a_partly_offloaded_model_is_compared_layer_by_layer():
     ],
 )
 def test_saved_nvidia_logs_match_layer_by_layer(stem, log_name, layers):
-    import gzip
-
     from ocq.model_analyzer import gguf_snapshot
 
-    results = Path(__file__).parents[2] / "results" / "windows-nvidia-geforce-rtx-4060-laptop-gpu"
-    log = gzip.decompress((results / "verify" / f"{log_name}.log.gz").read_bytes())
-    parsed = parse_log(log.decode("utf-8", errors="replace"))
+    log = Path(__file__).parent / "data" / "gguf" / f"llama-completion-{log_name}-cuda.log"
+    parsed = parse_log(log.read_text(encoding="utf-8"))
     assert parsed.layers_on_gpu == layers
     header, file_size = real_header(stem)
     snap = gguf_snapshot(stem, {}, header, [("x", header.data_bytes)], file_size, True)
@@ -254,7 +249,7 @@ def test_which_tensors_the_cpu_backend_repacks():
 def test_a_missing_library_is_named_with_the_package_to_install():
     from ocq.quantizers.llama_cpp import missing_library
 
-    # Linux without libgomp1 (WSL2, retest-5): both llama.cpp builds stop before any output.
+    # Linux without libgomp1 (WSL2): both llama.cpp builds stop before any output.
     linux = (
         "/home/u/.cache/ocq/llama.cpp/b11429/linux-cpu/llama-server: error while loading shared "
         "libraries: libgomp.so.1: cannot open shared object file: No such file or directory"

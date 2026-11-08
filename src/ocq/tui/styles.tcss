@@ -1,0 +1,374 @@
+/* QuantPilot. Colors come from the theme ($primary, $accent...), so every theme works. */
+
+Screen {
+    layout: vertical;
+    background: $background;
+}
+
+/* Banner ------------------------------------------------------------------------------- */
+
+#masthead {
+    height: auto;
+    padding: 0 2;
+    background: $panel;
+}
+
+#banner {
+    color: $accent;
+    text-style: bold;
+}
+
+/* Menu and pages ----------------------------------------------------------------------- */
+
+#main {
+    height: 1fr;
+}
+
+#nav {
+    width: 20;
+    height: 100%;
+    border: none;
+    border-right: solid $border;
+    background: $surface;
+    padding: 1 0;
+}
+
+#nav:focus {
+    border-right: solid $accent;
+}
+
+#pages {
+    width: 1fr;
+    height: 100%;
+}
+
+.page {
+    height: 100%;
+    padding: 1 3 0 3;
+}
+
+.page-title {
+    color: $text;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* Home */
+
+#home-box {
+    width: 100%;
+    height: 100%;
+    align: center middle;
+}
+
+#home-banner {
+    width: 100%;
+    text-align: center;
+    color: $accent;
+    text-style: bold;
+}
+
+#home-tagline {
+    width: 100%;
+    text-align: center;
+    color: $text-muted;
+    margin-top: 1;
+}
+
+#home-hw {
+    width: 100%;
+    text-align: center;
+    color: $text-muted;
+    margin: 2 0;
+}
+
+#home-actions {
+    width: 100%;
+    height: auto;
+    align-horizontal: center;
+}
+
+#home-actions Button {
+    margin: 0 1;
+    min-width: 18;
+}
+
+/* Forms -------------------------------------------------------------------------------- */
+
+.form {
+    height: auto;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 1 2;
+}
+
+Screen.-narrow .form {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+}
+
+.field {
+    height: auto;
+}
+
+ListPage > .form {
+    margin-bottom: 1;
+}
+
+.field-label {
+    color: $text-muted;
+}
+
+.wide {
+    column-span: 3;
+}
+
+Screen.-narrow .wide {
+    column-span: 2;
+}
+
+.model-field {
+    height: auto;
+}
+
+.model-field Input {
+    width: 1fr;
+}
+
+.model-field Button {
+    width: auto;
+    min-width: 10;
+    margin-left: 1;
+}
+
+#model_folders {
+    height: 5;
+}
+
+.actions {
+    height: auto;
+    margin: 1 0;
+}
+
+.actions Button {
+    margin-right: 2;
+    min-width: 12;
+}
+
+/* Results ------------------------------------------------------------------------------ */
+
+.results {
+    height: 1fr;
+}
+
+.busy {
+    height: 3;
+    display: none;
+    color: $accent;
+}
+
+.card {
+    height: auto;
+    border: round $accent;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+.card.bad {
+    border: round $error;
+}
+
+.card Button {
+    margin-top: 1;
+}
+
+.results DataTable {
+    height: auto;
+    max-height: 24;
+    margin-bottom: 1;
+}
+
+ListPage > DataTable {
+    height: 1fr;
+}
+
+.empty {
+    color: $text-muted;
+    padding: 1 0;
+    display: none;
+}
+
+.problem {
+    color: $error;
+    padding: 1 0;
+}
+
+#running {
+    height: auto;
+}
+
+#stage {
+    margin-bottom: 1;
+}
+
+#progress {
+    height: 12;
+    border: round $border;
+    background: $surface;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+Collapsible {
+    height: auto;
+    border: none;
+    padding: 0;
+    background: transparent;
+}
+
+/* This PC: quantization tools */
+
+.section {
+    text-style: bold;
+    margin: 1 0 1 0;
+}
+
+#tools {
+    height: auto;
+}
+
+.tool {
+    height: 1;
+}
+
+.tool-name {
+    width: 21;
+    color: $text-muted;
+}
+
+.tool-state {
+    width: 22;
+}
+
+.tool-state.ok {
+    color: $success;
+}
+
+.tool-state.off {
+    color: $text-muted;
+}
+
+.tool Button {
+    min-width: 11;
+}
+
+#install-log {
+    height: 10;
+    margin-top: 1;
+    border: round $border;
+    background: $surface;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+/* Status bar --------------------------------------------------------------------------- */
+
+#status {
+    height: 1;
+    background: $panel;
+    padding: 0 1;
+}
+
+#spinner {
+    width: 6;
+    height: 1;
+    display: none;
+    color: $accent;
+}
+
+#status.running #spinner {
+    display: block;
+}
+
+#status-text {
+    width: 1fr;
+}
+
+#status-hw {
+    width: auto;
+    color: $text-muted;
+}
+
+/* Pop-ups ------------------------------------------------------------------------------ */
+
+ModalScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+.dialog {
+    width: 64;
+    max-width: 95%;
+    height: auto;
+    max-height: 85%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+.dialog.keys {
+    width: 44;
+}
+
+.dialog-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.dialog-body {
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+.dialog-buttons {
+    height: auto;
+}
+
+.dialog-buttons Button {
+    margin-right: 2;
+    min-width: 10;
+}
+
+.dialog OptionList {
+    height: auto;
+    max-height: 20;
+    border: none;
+    background: transparent;
+}
+
+/* Simple borders, for consoles that cannot draw lines (Settings) ----------------------- */
+
+App.-ascii .card,
+App.-ascii .dialog,
+App.-ascii #progress,
+App.-ascii #install-log,
+App.-ascii TextArea {
+    border: ascii $border;
+}
+
+App.-ascii .card {
+    border: ascii $accent;
+}
+
+App.-ascii .card.bad {
+    border: ascii $error;
+}
+
+App.-ascii #nav {
+    border-right: ascii $border;
+}
+
+App.-ascii SelectCurrent .arrow {
+    display: none;
+}

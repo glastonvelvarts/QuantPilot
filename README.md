@@ -37,6 +37,18 @@ Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate
 
 `optimize` defaults to **dry run**. Add **`--execute`** to really quantize.
 
+### The full-screen app
+
+Run **`ocq`** with no command (or **`ocq tui`**) for the app: arrow keys and Enter, no flags to remember.
+
+- **Check a model**: type or browse to a model and QuantPilot recommends the version that suits this PC, with every other format and how it fits.
+- **Quantize**: review what will be made, then start it, with progress and the result in one place.
+- **Discover** suggests models for this PC; **My models** lists the ones already downloaded (Ollama, LM Studio, Hugging Face).
+- **Settings**: theme (including your terminal's own colors), default context, extra model folders, simple borders for old consoles. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
+- **?** shows the keys, **Ctrl+P** jumps anywhere, **q** quits.
+
+The banner uses plain ASCII only, so it looks the same on Windows, macOS and Linux. Piped or in scripts, `ocq` prints the help and every command works as before.
+
 ---
 
 ## Install

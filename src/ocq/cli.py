@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -34,10 +35,30 @@ from ocq.types import (
 
 app = typer.Typer(
     name="ocq",
-    help="One-Click Quantizer: inspect this PC, see which models it can run, quantize them.",
-    no_args_is_help=True,
+    help="One-Click Quantizer: inspect this PC, see which models it can run, quantize them. "
+    "Run ocq alone for the full-screen app.",
 )
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def start(ctx: typer.Context) -> None:
+    """ocq with no command: the full-screen app in a terminal, the help text anywhere else."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        cmd_tui()
+    else:
+        console.print(ctx.get_help())
+
+
+@app.command("tui")
+def cmd_tui() -> None:
+    """Open the full-screen app: arrow keys and menus instead of flags."""
+    from ocq.tui.app import run_tui
+
+    run_tui()
+
 
 KIND_COLORS = {
     FactKind.EXACT: "green",

@@ -139,7 +139,7 @@ def test_benchmark_runs_llama_cpp_with_the_planned_cache(tmp_path, monkeypatch):
     assert envs == [{}, {}]
 
     # Granite 3.x MoE stops in llama.cpp b11429 with a quantized cache unless its rotation is
-    # off (results/windows-nvidia-.../verify/granite-3.1-1b-a400m-instruct-Q2_K-16k-q8_0).
+    # off (granite-3.1-1b-a400m-instruct Q2_K, 16k tokens, q8_0 cache, on CUDA).
     commands.clear(), envs.clear()
     plan.model = SimpleNamespace(architecture="granitemoe")
     gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
@@ -160,7 +160,7 @@ def test_benchmark_runs_llama_cpp_with_the_planned_cache(tmp_path, monkeypatch):
 
 def test_a_benchmark_without_a_gpu_runs_on_the_cpu_and_is_recorded_so(tmp_path, monkeypatch):
     # llama.cpp's CPU build also logs "offloaded 17/17 layers to GPU" (ocq verify on Linux
-    # without a GPU, retest-5); only the buffers show where the weights went.
+    # without a GPU); only the buffers show where the weights went.
     import json
     from types import SimpleNamespace
 

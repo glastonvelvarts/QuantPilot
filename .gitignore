@@ -15,3 +15,5 @@ ocq-output/
 # Downloaded models / dumps at repo root only. Do not ignore tests/tests/data/.
 /data/
 .env
+# Measurements from test runs on other PCs: kept out of the repo.
+/results/

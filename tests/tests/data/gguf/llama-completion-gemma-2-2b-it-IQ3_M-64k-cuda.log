@@ -1,0 +1,148 @@
+0.00.478.144 I llama_prepare_model_devices: using device CUDA0 (NVIDIA GeForce RTX 4060 Laptop GPU) (0000:01:00.0) - 7106 MiB free
+0.00.712.302 I load_tensors: loading model tensors, this can take a while... (load_mode = none)
+0.00.716.916 I load_tensors: offloaded 27/27 layers to GPU
+0.00.716.918 I load_tensors:        CUDA0 model buffer size =     0.00 MiB
+0.00.716.919 I load_tensors:    CUDA_Host model buffer size =     0.00 MiB
+0.00.718.665 I llama_context: n_seq_max             = 1
+0.00.718.666 I llama_context: n_ctx                 = 65536
+0.00.719.366 I llama_context:  CUDA_Host  output buffer size =     0.98 MiB
+0.00.719.378 I llama_kv_cache_iswa: creating non-SWA KV cache, size = 65536 cells
+0.00.720.157 D llama_kv_cache: layer   0: filtered
+0.00.720.162 D llama_kv_cache: layer   1: dev = CUDA0
+0.00.720.171 D llama_kv_cache: layer   2: filtered
+0.00.720.171 D llama_kv_cache: layer   3: dev = CUDA0
+0.00.720.173 D llama_kv_cache: layer   4: filtered
+0.00.720.174 D llama_kv_cache: layer   5: dev = CUDA0
+0.00.720.175 D llama_kv_cache: layer   6: filtered
+0.00.720.176 D llama_kv_cache: layer   7: dev = CUDA0
+0.00.720.177 D llama_kv_cache: layer   8: filtered
+0.00.720.178 D llama_kv_cache: layer   9: dev = CUDA0
+0.00.720.179 D llama_kv_cache: layer  10: filtered
+0.00.720.180 D llama_kv_cache: layer  11: dev = CUDA0
+0.00.720.181 D llama_kv_cache: layer  12: filtered
+0.00.720.181 D llama_kv_cache: layer  13: dev = CUDA0
+0.00.720.183 D llama_kv_cache: layer  14: filtered
+0.00.720.184 D llama_kv_cache: layer  15: dev = CUDA0
+0.00.720.185 D llama_kv_cache: layer  16: filtered
+0.00.720.185 D llama_kv_cache: layer  17: dev = CUDA0
+0.00.720.187 D llama_kv_cache: layer  18: filtered
+0.00.720.188 D llama_kv_cache: layer  19: dev = CUDA0
+0.00.720.189 D llama_kv_cache: layer  20: filtered
+0.00.720.190 D llama_kv_cache: layer  21: dev = CUDA0
+0.00.720.191 D llama_kv_cache: layer  22: filtered
+0.00.720.191 D llama_kv_cache: layer  23: dev = CUDA0
+0.00.720.192 D llama_kv_cache: layer  24: filtered
+0.00.720.192 D llama_kv_cache: layer  25: dev = CUDA0
+0.00.720.197 I llama_kv_cache:      CUDA0 KV buffer size =     0.00 MiB
+0.00.720.200 I llama_kv_cache: size = 3328.00 MiB ( 65536 cells,  13 layers,  1/1 seqs), K (f16): 1664.00 MiB, V (f16): 1664.00 MiB
+0.00.720.205 I llama_kv_cache: n_rot_k = 0, n_embd_head_k_all = 256
+0.00.720.205 I llama_kv_cache: n_rot_v = 0, n_embd_head_k_all = 256
+0.00.720.209 I llama_kv_cache_iswa: creating     SWA KV cache, size = 4608 cells
+0.00.720.269 D llama_kv_cache: layer   0: dev = CUDA0
+0.00.720.271 D llama_kv_cache: layer   1: filtered
+0.00.720.272 D llama_kv_cache: layer   2: dev = CUDA0
+0.00.720.273 D llama_kv_cache: layer   3: filtered
+0.00.720.273 D llama_kv_cache: layer   4: dev = CUDA0
+0.00.720.274 D llama_kv_cache: layer   5: filtered
+0.00.720.275 D llama_kv_cache: layer   6: dev = CUDA0
+0.00.720.276 D llama_kv_cache: layer   7: filtered
+0.00.720.276 D llama_kv_cache: layer   8: dev = CUDA0
+0.00.720.277 D llama_kv_cache: layer   9: filtered
+0.00.720.278 D llama_kv_cache: layer  10: dev = CUDA0
+0.00.720.279 D llama_kv_cache: layer  11: filtered
+0.00.720.279 D llama_kv_cache: layer  12: dev = CUDA0
+0.00.720.281 D llama_kv_cache: layer  13: filtered
+0.00.720.282 D llama_kv_cache: layer  14: dev = CUDA0
+0.00.720.282 D llama_kv_cache: layer  15: filtered
+0.00.720.283 D llama_kv_cache: layer  16: dev = CUDA0
+0.00.720.284 D llama_kv_cache: layer  17: filtered
+0.00.720.285 D llama_kv_cache: layer  18: dev = CUDA0
+0.00.720.286 D llama_kv_cache: layer  19: filtered
+0.00.720.287 D llama_kv_cache: layer  20: dev = CUDA0
+0.00.720.288 D llama_kv_cache: layer  21: filtered
+0.00.720.288 D llama_kv_cache: layer  22: dev = CUDA0
+0.00.720.289 D llama_kv_cache: layer  23: filtered
+0.00.720.289 D llama_kv_cache: layer  24: dev = CUDA0
+0.00.720.290 D llama_kv_cache: layer  25: filtered
+0.00.720.295 I llama_kv_cache:      CUDA0 KV buffer size =     0.00 MiB
+0.00.720.298 I llama_kv_cache: size =  234.00 MiB (  4608 cells,  13 layers,  1/1 seqs), K (f16):  117.00 MiB, V (f16):  117.00 MiB
+0.00.720.301 I llama_kv_cache: n_rot_k = 0, n_embd_head_k_all = 256
+0.00.720.302 I llama_kv_cache: n_rot_v = 0, n_embd_head_k_all = 256
+0.00.726.920 I sched_reserve:      CUDA0 compute buffer size =   586.52 MiB
+0.00.726.921 I sched_reserve:  CUDA_Host compute buffer size =    86.53 MiB
+0.00.985.715 I llama_prepare_model_devices: using device CUDA0 (NVIDIA GeForce RTX 4060 Laptop GPU) (0000:01:00.0) - 7106 MiB free
+0.01.169.319 I load_tensors: loading model tensors, this can take a while... (load_mode = mmap)
+0.01.287.147 I load_tensors: offloaded 27/27 layers to GPU
+0.01.287.152 I load_tensors:   CPU_Mapped model buffer size =   461.43 MiB
+0.01.287.154 I load_tensors:        CUDA0 model buffer size =  1323.26 MiB
+0.02.010.515 I llama_context: n_seq_max             = 1
+0.02.010.515 I llama_context: n_ctx                 = 65536
+0.02.010.982 I llama_context:  CUDA_Host  output buffer size =     0.98 MiB
+0.02.010.989 I llama_kv_cache_iswa: creating non-SWA KV cache, size = 65536 cells
+0.02.011.601 D llama_kv_cache: layer   0: filtered
+0.02.011.608 D llama_kv_cache: layer   1: dev = CUDA0
+0.02.011.616 D llama_kv_cache: layer   2: filtered
+0.02.011.616 D llama_kv_cache: layer   3: dev = CUDA0
+0.02.011.625 D llama_kv_cache: layer   4: filtered
+0.02.011.625 D llama_kv_cache: layer   5: dev = CUDA0
+0.02.011.628 D llama_kv_cache: layer   6: filtered
+0.02.011.629 D llama_kv_cache: layer   7: dev = CUDA0
+0.02.011.631 D llama_kv_cache: layer   8: filtered
+0.02.011.632 D llama_kv_cache: layer   9: dev = CUDA0
+0.02.011.637 D llama_kv_cache: layer  10: filtered
+0.02.011.637 D llama_kv_cache: layer  11: dev = CUDA0
+0.02.011.639 D llama_kv_cache: layer  12: filtered
+0.02.011.639 D llama_kv_cache: layer  13: dev = CUDA0
+0.02.011.643 D llama_kv_cache: layer  14: filtered
+0.02.011.643 D llama_kv_cache: layer  15: dev = CUDA0
+0.02.011.648 D llama_kv_cache: layer  16: filtered
+0.02.011.649 D llama_kv_cache: layer  17: dev = CUDA0
+0.02.011.651 D llama_kv_cache: layer  18: filtered
+0.02.011.652 D llama_kv_cache: layer  19: dev = CUDA0
+0.02.011.655 D llama_kv_cache: layer  20: filtered
+0.02.011.655 D llama_kv_cache: layer  21: dev = CUDA0
+0.02.011.659 D llama_kv_cache: layer  22: filtered
+0.02.011.660 D llama_kv_cache: layer  23: dev = CUDA0
+0.02.011.661 D llama_kv_cache: layer  24: filtered
+0.02.011.662 D llama_kv_cache: layer  25: dev = CUDA0
+0.02.019.016 I llama_kv_cache:      CUDA0 KV buffer size =  3328.00 MiB
+0.02.185.332 I llama_kv_cache: size = 3328.00 MiB ( 65536 cells,  13 layers,  1/1 seqs), K (f16): 1664.00 MiB, V (f16): 1664.00 MiB
+0.02.185.356 I llama_kv_cache: n_rot_k = 0, n_embd_head_k_all = 256
+0.02.185.357 I llama_kv_cache: n_rot_v = 0, n_embd_head_k_all = 256
+0.02.185.367 I llama_kv_cache_iswa: creating     SWA KV cache, size = 4608 cells
+0.02.185.477 D llama_kv_cache: layer   0: dev = CUDA0
+0.02.185.489 D llama_kv_cache: layer   1: filtered
+0.02.185.490 D llama_kv_cache: layer   2: dev = CUDA0
+0.02.185.493 D llama_kv_cache: layer   3: filtered
+0.02.185.494 D llama_kv_cache: layer   4: dev = CUDA0
+0.02.185.498 D llama_kv_cache: layer   5: filtered
+0.02.185.498 D llama_kv_cache: layer   6: dev = CUDA0
+0.02.185.501 D llama_kv_cache: layer   7: filtered
+0.02.185.501 D llama_kv_cache: layer   8: dev = CUDA0
+0.02.185.503 D llama_kv_cache: layer   9: filtered
+0.02.185.504 D llama_kv_cache: layer  10: dev = CUDA0
+0.02.185.507 D llama_kv_cache: layer  11: filtered
+0.02.185.508 D llama_kv_cache: layer  12: dev = CUDA0
+0.02.185.510 D llama_kv_cache: layer  13: filtered
+0.02.185.511 D llama_kv_cache: layer  14: dev = CUDA0
+0.02.185.512 D llama_kv_cache: layer  15: filtered
+0.02.185.513 D llama_kv_cache: layer  16: dev = CUDA0
+0.02.185.516 D llama_kv_cache: layer  17: filtered
+0.02.185.517 D llama_kv_cache: layer  18: dev = CUDA0
+0.02.185.520 D llama_kv_cache: layer  19: filtered
+0.02.185.520 D llama_kv_cache: layer  20: dev = CUDA0
+0.02.185.522 D llama_kv_cache: layer  21: filtered
+0.02.185.522 D llama_kv_cache: layer  22: dev = CUDA0
+0.02.185.526 D llama_kv_cache: layer  23: filtered
+0.02.185.526 D llama_kv_cache: layer  24: dev = CUDA0
+0.02.185.528 D llama_kv_cache: layer  25: filtered
+0.02.186.838 I llama_kv_cache:      CUDA0 KV buffer size =   234.00 MiB
+0.02.200.326 I llama_kv_cache: size =  234.00 MiB (  4608 cells,  13 layers,  1/1 seqs), K (f16):  117.00 MiB, V (f16):  117.00 MiB
+0.02.200.347 I llama_kv_cache: n_rot_k = 0, n_embd_head_k_all = 256
+0.02.200.348 I llama_kv_cache: n_rot_v = 0, n_embd_head_k_all = 256
+0.02.216.237 I sched_reserve:      CUDA0 compute buffer size =   586.52 MiB
+0.02.216.238 I sched_reserve:  CUDA_Host compute buffer size =    86.53 MiB
+0.02.218.202 I system_info: n_threads = 8 (n_threads_batch = 8) / 16 | CUDA : ARCHS = 500,610,700,750,800,860,890,900 | USE_GRAPHS = 1 | FA_QUANTS = q4_0-q4_0,q8_0-q8_0,f16-f16,bf16-bf16 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | AVX512_BF16 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.02.218.359 I generate: n_ctx = 65536, n_batch = 2048, n_predict = 1, n_keep = 1
+0.02.303.594 D ~llama_context:      CUDA0 compute buffer size is 586.5234 MiB, matches expectation of 586.5234 MiB
+0.02.303.599 D ~llama_context:  CUDA_Host compute buffer size is  86.5273 MiB, matches expectation of  86.5273 MiB
