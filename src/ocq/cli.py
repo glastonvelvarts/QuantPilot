@@ -327,7 +327,7 @@ def cmd_verify(
             snapshot,
             path,
             hw,
-            tool_path("llama-completion", hw),
+            tool_path("llama-server", hw),
             context,
             kv_cache,
             n_cpu_moe,
@@ -339,9 +339,10 @@ def cmd_verify(
         raise fail(exc) from exc
 
     offloaded, total = log.layers_on_gpu
+    where = "on the CPU, no GPU" if log.cpu_only else f"{offloaded}/{total} layers on the GPU"
     console.print(
         f"[bold]{snapshot.model_id}[/bold] in llama.cpp: {log.context:,} tokens, "
-        f"{log.conversations} conversation(s), {offloaded}/{total} layers on the GPU"
+        f"{log.conversations} conversation(s), {where}"
         + (f", experts of {n_cpu_moe} layers in RAM" if n_cpu_moe else "")
         + (f", cache {log.cache_types}" if log.cache_types else "")
     )
@@ -350,24 +351,27 @@ def cmd_verify(
         table.add_column(column, justify="right" if column != "Memory" else "left")
     for check in checks:
         mark = "[green]ok[/green]" if check.ok else "[red]differs[/red]"
+        number = "{:,.0f}" if check.unit == "layers" else "{:,.2f}"
         table.add_row(
             check.name,
-            f"{check.predicted_mib:,.2f}",
-            f"{check.actual_mib:,.2f}",
-            f"{check.predicted_mib - check.actual_mib:+,.2f}",
+            number.format(check.predicted_mib),
+            number.format(check.actual_mib),
+            ("{:+,.0f}" if check.unit == "layers" else "{:+,.2f}").format(
+                check.predicted_mib - check.actual_mib
+            ),
             mark,
         )
     console.print(table)
     console.print(
-        f"Working memory llama.cpp reserved: {log.gpu_compute_mib:,.2f} MiB on the GPU, "
+        f"Working memory llama-server reserved: {log.gpu_compute_mib:,.2f} MiB on the GPU, "
         f"{log.cpu_compute_mib:,.2f} MiB on the CPU, {log.output_mib:,.2f} MiB for the logits. "
-        "This is llama-completion's; QuantPilot plans for llama-server, which reserves less "
-        "(an upper bound of it is in the context column of ocq feasibility)."
+        "QuantPilot's estimate (in the context column of ocq feasibility) is an upper bound "
+        "of the first and the last together."
     )
     if save_log:
         console.print(f"[dim]llama.cpp's log: {save_log}[/dim]")
-    if offloaded != total:
-        console.print("[dim]Not every layer is on the GPU, so the weights were not compared.[/dim]")
+    if not offloaded and not log.cpu_only:
+        console.print("[dim]No layer is on the GPU, so the weights were not compared.[/dim]")
     if not all(check.ok for check in checks):
         raise typer.Exit(1)
 
@@ -602,6 +606,14 @@ def cmd_feasibility(
             "[dim]gpu+ram (experts): llama.cpp only (--n-cpu-moe, see ocq plan). The AWQ, GPTQ, "
             "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "
             "whole layers instead.[/dim]"
+        )
+    split = [option for option in options if option.gpu_layers]
+    if split:
+        layers = ", ".join(f"{option.label}: {option.gpu_layers}" for option in split)
+        console.print(
+            f"[dim]gpu+ram: llama.cpp puts whole layers on the GPU, from the last one, and keeps "
+            f"1 GB free: {layers} of {snapshot.num_layers + 1} (the output layer counts as one)."
+            "[/dim]"
         )
     for note in dict.fromkeys(option.note for option in options if option.note):
         console.print(f"[yellow]{escape(note)}[/yellow]")

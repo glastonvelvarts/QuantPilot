@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ocq import measurements, model_analyzer
+from ocq import hardware, measurements, model_analyzer
 from ocq.types import DTYPE_BITS
 
 # Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
@@ -20,6 +20,8 @@ def private_caches(tmp_path, monkeypatch):
     """Tests must not read or write the speed measurements and model cache of the real user."""
     monkeypatch.setattr(measurements, "STORE", tmp_path / "measurements.json")
     monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path / "models")
+    # Nor the GPU driver of the PC they run on.
+    monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 
 
 def llama_style_tensors(
@@ -172,15 +174,22 @@ SPEC_BANDWIDTH = {
 }
 
 
-def nvidia_pc(*lines: str, ram_gb: float = 60):
-    """A Linux PC with these NVIDIA cards, as QuantPilot's own probe reads them."""
+def nvidia_pc(
+    *lines: str, ram_gb: float = 60, cuda_free_mib: float | None = None, windows: bool = False
+):
+    """A PC with these NVIDIA cards, as QuantPilot's own probe reads them: Linux, or Windows
+    (WDDM), with CUDA's own free figure when given."""
     from dataclasses import replace
 
     from ocq.hardware import parse_nvidia_smi
     from ocq.types import HardwareProfile
 
     cards = parse_nvidia_smi("\n".join(lines))
-    cards = tuple(replace(card, bandwidth_gbs=SPEC_BANDWIDTH[card.name]) for card in cards)
+    cuda_free = round(cuda_free_mib / 1024, 2) if cuda_free_mib is not None else None
+    cards = tuple(
+        replace(card, bandwidth_gbs=SPEC_BANDWIDTH[card.name], cuda_free_gb=cuda_free, wddm=windows)
+        for card in cards
+    )
     return HardwareProfile(
         total_ram_gb=ram_gb + 4,
         available_ram_gb=ram_gb,
@@ -191,5 +200,5 @@ def nvidia_pc(*lines: str, ram_gb: float = 60):
         unified_memory=False,
         ram_bandwidth_gbs=80.0,
         gpus=cards,
-        os_name="Linux",
+        os_name="Windows" if windows else "Linux",
     )

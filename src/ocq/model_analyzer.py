@@ -43,6 +43,7 @@ from ocq.model_size import (
     kv_value_bytes,
     layer_index,
     llama_server_buffers_bytes,
+    metal_attention_scratch,
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
@@ -53,6 +54,8 @@ from ocq.model_size import (
 )
 from ocq.runtimes import (
     LLAMA_FIT_TARGET_GB,
+    llama_cache_warning,
+    physical_gb,
     usable_gb,
     vllm_budget,
     vllm_card_budget_gb,
@@ -1558,14 +1561,17 @@ def fit_at(
     runtime = runtime or runtime_of(row_kind)
     value_bytes = kv_value_bytes(kv_cache, runtime, hardware.vllm_fp8_kv_cache)
     kv_bytes = model.kv_cache_bytes(context, runtime, value_bytes=value_bytes)
-    context_gb = 0.0
-    if kv_bytes is not None:
-        context_gb = (kv_bytes + working_bytes(model, context, runtime)) / GB
-
-    required = weights_gb + context_gb
     # llama.cpp on a separate GPU keeps the input embeddings in RAM, and fits the model itself
     # with --fit-target of headroom on every card (see runtimes.py).
     llama_gpu = runtime == LLAMA_CPP and not hardware.unified_memory
+    metal = runtime == LLAMA_CPP and hardware.apple_silicon
+    copies = kv_copies(value_bytes, llama_gpu, metal, cache_in_ram=False)
+    context_gb = 0.0
+    if kv_bytes is not None:
+        working = working_bytes(model, context, runtime, copies, metal)
+        context_gb = (kv_bytes + working) / GB
+
+    required = weights_gb + context_gb
     gpu_required = required - (embeddings_in_ram_gb(model, label, weights_gb) if llama_gpu else 0)
     # vLLM serves AWQ, GPTQ and NVFP4 with tensor parallel; llama.cpp and transformers split
     # by layers.
@@ -1629,14 +1635,18 @@ def fit_at(
 
     experts_ram_layers, experts_ram_gb = 0, 0.0
     offload = None
+    # Given --n-cpu-moe, llama.cpp fits nothing and keeps no headroom: the plan has what is
+    # really free (physical_gb), which under Windows' WDDM is more than CUDA's figure.
+    room = vram
+    if llama_gpu and pool:
+        room = sum(physical_gb(card, hardware.card_free_gb(card)) for card in pool.cards)
     if vram and gpu_required > fits and not hardware.unified_memory and row_kind == "gguf":
-        # Given --n-cpu-moe, llama.cpp keeps no headroom: the plan fits the experts itself.
-        offload = experts_to_ram(model, label, gpu_required - vram, ram, weights_gb)
+        offload = experts_to_ram(model, label, gpu_required - room, ram, weights_gb)
     used = required
     if vram and gpu_required <= fits:
         run_mode, available, used = RunMode.GPU, fits, gpu_required
     elif offload:
-        run_mode, available = RunMode.GPU_EXPERTS_RAM, vram + ram
+        run_mode, available = RunMode.GPU_EXPERTS_RAM, room + ram
         experts_ram_layers, experts_ram_gb = offload
     elif vllm and pool:
         # vLLM does not spill into RAM by default (cpu_offload_gb is 0) or run on the CPU.
@@ -1646,6 +1656,15 @@ def fit_at(
     else:
         run_mode, available = RunMode.CPU, ram
 
+    gpu_share = min(fits / gpu_required, 1.0) if gpu_required > 0 else 1.0
+    gpu_layers = 0
+    if run_mode == RunMode.GPU_OFFLOAD and llama_gpu:
+        layout = llama_layers_on_gpu(model, label, weights_gb, context, value_bytes, fits)
+        if layout:
+            gpu_layers, gpu_share = layout
+
+    if runtime == LLAMA_CPP:
+        note = llama_cache_warning(model.architecture, kv_cache)
     utilization = used / available * 100 if available > 0 else 999.0
     if utilization > 100:
         fit_level, run_mode = FitLevel.TOO_TIGHT, RunMode.UNFIT
@@ -1672,7 +1691,7 @@ def fit_at(
         read_fraction=model.read_fraction,
         ram_read_gb=experts_ram_gb * model.experts_per_token / model.experts if offload else 0.0,
         # Whole layers, with their share of the cache, fill the GPU; the rest runs from RAM.
-        gpu_share=min(fits / gpu_required, 1.0) if gpu_required > 0 else 1.0,
+        gpu_share=gpu_share,
     )
     return QuantOption(
         label=label,
@@ -1693,20 +1712,75 @@ def fit_at(
         else (),
         gpu_split=pool.split if pool else "",
         experts_in_ram=experts_ram_layers,
+        gpu_layers=gpu_layers,
         vllm_share=vllm_share,
         note=note,
         runtime=runtime,
     )
 
 
-def working_bytes(model: ModelSnapshot, context: int, runtime: str) -> int:
+# A block's tensors: model.layers.12.mlp..., blk.12.ffn_up ...
+BLOCK = re.compile(r"\.(\d+)\.")
+
+
+def working_bytes(
+    model: ModelSnapshot, context: int, runtime: str, copies: float = 0.0, metal: bool = False
+) -> int:
     """Memory a runtime needs besides the weights and the cache. llama.cpp: llama-server's
-    output and compute buffers; else 512 rows of logits."""
+    output and compute buffers; else 512 rows of logits.
+
+    copies: one layer's keys and values that attention copies, in 16-bit sizes (kv_copies).
+    metal: Apple's Metal, which also reserves a scratch buffer for attention."""
     ffn = ffn_width(list(model.tensors), model.experts, model.experts_per_token)
     if runtime != LLAMA_CPP or not ffn:
         return output_buffer_bytes(model.vocab_size)
-    sliding = any(layer.window for layer in model.kv_layers)
-    return llama_server_buffers_bytes(model.vocab_size, context, ffn, sliding, CONVERSATIONS)
+    attention = [layer for layer in model.kv_layers if layer.bytes_per_token]
+    # The cache length of the sliding-window layers, their second mask is as long.
+    sliding = max(
+        (
+            (layer.cache_bytes(context, LLAMA_CPP) - layer.state_bytes * CONVERSATIONS)
+            // layer.bytes_per_token
+            for layer in attention
+            if layer.window
+        ),
+        default=0,
+    )
+    # The widest layer's keys and values at 16 bits, for the tokens it caches.
+    widest = max(
+        (
+            layer.cache_bytes(context, LLAMA_CPP) - layer.state_bytes * CONVERSATIONS
+            for layer in attention
+        ),
+        default=(model.kv_cache_bytes(context, LLAMA_CPP) or 0) // max(model.num_layers, 1),
+    )
+    heads = model.num_attention_heads
+    width = max(model.hidden_size, heads * model.head_dim)
+    scratch = metal_attention_scratch(heads, model.head_dim) if metal and copies else 0
+    return llama_server_buffers_bytes(
+        model.vocab_size,
+        context,
+        ffn,
+        sliding,
+        CONVERSATIONS,
+        round(widest * copies),
+        width,
+        scratch,
+        beside_state=any(layer.bytes_per_token and layer.state_bytes for layer in attention),
+    )
+
+
+def kv_copies(value_bytes: float, separate_gpu: bool, metal: bool, cache_in_ram: bool) -> float:
+    """How much of one layer's keys and values llama.cpp's attention copies, in 16-bit sizes:
+    Metal always one; a separate GPU one when the cache is quantized (its kernels read 16
+    bits), and the layer as stored when its cache is in RAM. See ATTENTION_ACTIVATIONS."""
+    if metal:
+        return 1.0
+    if not separate_gpu:
+        return 0.0
+    copies = 0.0 if value_bytes == KV_BYTES_PER_VALUE else 1.0
+    if cache_in_ram:
+        copies += value_bytes / KV_BYTES_PER_VALUE
+    return copies
 
 
 def embeddings_in_ram_gb(model: ModelSnapshot, gguf_type: str, weights_gb: float) -> float:
@@ -1715,15 +1789,101 @@ def embeddings_in_ram_gb(model: ModelSnapshot, gguf_type: str, weights_gb: float
     so it is also on the GPU: 0 then."""
     if not any(name.endswith(OUTPUT) for name, _ in model.tensors):
         return 0.0
-    if model.gguf_tensor_bytes:
-        scale = weights_gb * GB / sum(model.gguf_tensor_bytes.values())
-        sizes = {name: size * scale for name, size in model.gguf_tensor_bytes.items()}
-    elif gguf_type in BASE_TYPE:
-        heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
-        sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
-    else:
+    sizes = gguf_sizes(model, gguf_type, weights_gb)
+    if sizes is None:
         return 0.0
     return sum(size for name, size in sizes.items() if name.endswith(EMBEDDING)) / GB
+
+
+def gguf_sizes(model: ModelSnapshot, gguf_type: str, weights_gb: float) -> dict[str, float] | None:
+    """Bytes of each tensor in the GGUF file of this row: the file's own, scaled when the row is
+    another file of the repo, else worked out for the type. None when neither is known."""
+    if model.gguf_tensor_bytes:
+        scale = weights_gb * GB / sum(model.gguf_tensor_bytes.values())
+        return {name: size * scale for name, size in model.gguf_tensor_bytes.items()}
+    if gguf_type in BASE_TYPE:
+        heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
+        return dict(gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head))
+    return None
+
+
+def llama_layers_on_gpu(
+    model: ModelSnapshot,
+    gguf_type: str,
+    weights_gb: float,
+    context: int,
+    value_bytes: float,
+    fits_gb: float,
+    working: float | None = None,
+    conversations: int = CONVERSATIONS,
+) -> tuple[int, float] | None:
+    """llama.cpp's --fit when the model does not fit (common/fit.cpp, b11429): it fills the GPU
+    back to front, the output layer first, then whole blocks from the last one, while
+    --fit-target stays free (fits_gb). Each block takes its weights and its share of the cache;
+    the working memory is on the GPU in any case.
+
+    Returns the layers on the GPU as llama.cpp counts them (the output layer is one: "offloaded
+    14/29 layers") and the share of the weights a token reads there. None when the size of each
+    tensor is not known. working: the bytes of working memory on the GPU, when known (verify
+    reads llama.cpp's); else QuantPilot's estimate for llama-server.
+    """
+    sizes = gguf_sizes(model, gguf_type, weights_gb)
+    if not sizes or not model.num_layers:
+        return None
+    tied = not any(name.endswith(OUTPUT) for name in sizes)
+    shapes = dict(model.tensors)
+    blocks = [0.0] * model.num_layers
+    experts = [0.0] * model.num_layers
+    output = 0.0
+    for name, size in sizes.items():
+        block = BLOCK.search(name)
+        if block and int(block.group(1)) < model.num_layers:
+            if model.experts and routed_expert(name, shapes.get(name, ()), model.experts):
+                experts[int(block.group(1))] += size
+            else:
+                blocks[int(block.group(1))] += size
+        elif not name.endswith(EMBEDDING) or tied:
+            # Final norm and output layer; a tied embedding table is the output layer.
+            output += size
+    if len(model.kv_layers) == model.num_layers:
+        cache = [
+            layer.cache_bytes(context, LLAMA_CPP, conversations, value_bytes)
+            for layer in model.kv_layers
+        ]
+    else:
+        total = model.kv_cache_bytes(context, LLAMA_CPP, conversations, value_bytes) or 0
+        cache = [total / model.num_layers] * model.num_layers
+
+    # A mixture of experts whose layers do not fit even without their experts: llama.cpp keeps
+    # every expert in RAM and fills the GPU with the rest of each layer ("filling dense-only
+    # layers back-to-front"). When they do fit, QuantPilot plans --n-cpu-moe instead.
+    # The lowest of the blocks on the GPU keeps its experts there too (b11429 overrides the
+    # experts of the layers above it: "n_layer=11, n_part=10").
+    dense_only = bool(model.experts)
+    if working is None:
+        # Some layers' cache is in RAM: one of them is copied to the GPU for attention.
+        copies = kv_copies(value_bytes, True, False, cache_in_ram=True)
+        working = working_bytes(model, context, LLAMA_CPP, copies)
+    room = fits_gb * GB - working - output
+    if room < 0:
+        return 0, 0.0
+    on_gpu, placed = 0, 0.0
+    for block in reversed(range(model.num_layers)):
+        # This block, should it be the lowest on the GPU, holds its experts too.
+        if placed + blocks[block] + cache[block] + experts[block] > room:
+            break
+        placed += blocks[block] + cache[block] + (0 if dense_only else experts[block])
+        on_gpu += 1
+    # A token reads every dense weight and experts_per_token of the experts.
+    used = model.experts_per_token / model.experts if model.experts else 1.0
+    gpu_blocks = range(model.num_layers - on_gpu, model.num_layers)
+    read = output + sum(blocks[b] for b in gpu_blocks)
+    if dense_only:
+        read += experts[gpu_blocks[0]] * used if on_gpu else 0.0
+    else:
+        read += sum(experts[b] for b in gpu_blocks)
+    total_read = output + sum(blocks) + sum(experts) * used
+    return on_gpu + 1, read / total_read
 
 
 def experts_to_ram(

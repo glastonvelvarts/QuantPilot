@@ -184,6 +184,11 @@ class GpuProfile:
     measured_bandwidth_gbs: float = 0.0
     # CUDA compute capability, 12.0 for an RTX 5090. None when unknown.
     compute_capability: float | None = None
+    # What CUDA itself reports free once a context exists (cuMemGetInfo): the figure llama.cpp's
+    # --fit and vLLM's start-up check work from. None when not read.
+    cuda_free_gb: float | None = None
+    # Windows' driver model (WDDM): CUDA reports a fixed free figure there, below what is free.
+    wddm: bool = False
 
     @property
     def vram_bytes(self) -> int:
@@ -453,6 +458,9 @@ class QuantOption:
     gpu_split: str = ""
     # GPU_EXPERTS_RAM: the experts of this many layers (the first ones) are kept in RAM.
     experts_in_ram: int = 0
+    # GPU_OFFLOAD with llama.cpp: the layers its --fit puts on the GPU, the output layer counted
+    # as one, as llama.cpp counts them (of num_layers + 1). 0: not worked out.
+    gpu_layers: int = 0
     # vLLM's gpu_memory_utilization the row was rated at, when its default is not free. 0: the
     # default.
     vllm_share: float = 0.0

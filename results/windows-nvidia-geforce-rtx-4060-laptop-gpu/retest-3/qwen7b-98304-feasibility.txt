@@ -1,0 +1,17 @@
+┌──────────────────────────────────────────────────────────────────────── Feasibility ────────────────────────────────────────────────────────────────────────┐
+│ local/Qwen--Qwen2.5-7B-Instruct-Q4_K_M.gguf                                                                                                                 │
+│ Params: 7.62B | Use case: Local GGUF                                                                                                                        │
+│ Sizes: the 1 GGUF files as published (file sizes; settings and tensor table from one file's header)                                                         │
+│ Facts: parameters exact, context memory cross-checked, quantization exact (sources: ocq inspect)                                                            │
+│ Context: 98304 tokens                                                                                                                                       │
+│ Free right now: 7.52 GB VRAM, 13.00 GB RAM                                                                                                                  │
+│ Best fit: Marginal (gpu+ram) @ Q4_K_M, 10.03 of 18.97 GB (53%)                                                                                              │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+    The repo's GGUF files, sizes in GB (run with llama.cpp, Ollama or LM Studio)    
+┌────────┬─────────┬──────┬─────────┬─────────┬───────┬──────────┬─────────┬───────┐
+│ Level  │ Backend │ Bits │ Weights │ Context │ Needs │ Fit      │ Runs on │ tok/s │
+├────────┼─────────┼──────┼─────────┼─────────┼───────┼──────────┼─────────┼───────┤
+│ Q4_K_M │ gguf    │ 4.91 │    4.36 │    5.67 │ 10.03 │ Marginal │ gpu+ram │ <= 31 │
+└────────┴─────────┴──────┴─────────┴─────────┴───────┴──────────┴─────────┴───────┘
+gpu+ram: llama.cpp puts whole layers on the GPU, from the last one, and keeps 1 GB free: Q4_K_M: 17 of 29 (the output layer counts as one).
+<= limit set by memory bandwidth. The real speed is lower and gets learned from benchmark runs on this PC (ocq optimize --execute).

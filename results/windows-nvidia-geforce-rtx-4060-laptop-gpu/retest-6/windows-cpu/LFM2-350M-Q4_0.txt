@@ -1,0 +1,14 @@
+Downloading llama-b11429-bin-win-cpu-x64.zip ---------------------------------------- 100% 0:00:00
+local/LFM2-350M-Q4_0.gguf in llama.cpp: 4,096 tokens, 4 conversation(s), on the CPU, no GPU, cache K f16, V f16
+            QuantPilot's prediction vs llama.cpp's own log (MiB)            
+┌───────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                        │ QuantPilot │ llama.cpp │ Difference │    │
+├───────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)            │      48.00 │     48.00 │      +0.00 │ ok │
+│ Mamba / convolution state     │       0.31 │      0.31 │      +0.00 │ ok │
+│ weights in RAM (file range)   │     204.62 │    204.62 │      +0.00 │ ok │
+│ weights repacked for this CPU │     154.12 │    154.12 │      +0.00 │ ok │
+└───────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama-server reserved: 0.00 MiB on the GPU, 41.02 MiB on the CPU, 1.00 MiB for the logits. QuantPilot's estimate (in the context 
+column of ocq feasibility) is an upper bound of the first and the last together.
+llama.cpp's log: C:\Users\glast\ocq-test\fix\windows-cpu\LFM2-350M-Q4_0.log

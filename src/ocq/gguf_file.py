@@ -320,7 +320,11 @@ def config_from_gguf(header: GgufHeader) -> dict:
     if (get("expert_count") or 0) > 1:
         config["num_experts"] = get("expert_count")
         config["num_experts_per_tok"] = get("expert_used_count")
-    if get("attention.kv_lora_rank"):  # MLA (DeepSeek)
+    # MLA (DeepSeek, Kimi, GLM-4.7-Flash): llama.cpp keeps the compressed cache only when the
+    # file says how wide the expanded heads are (key_length_mla, llama_hparams::is_mla). Older
+    # files, with one attn_kv_b tensor, run as plain attention: key_length + value_length per
+    # head, 9 x more cache for DeepSeek-V2-Lite.
+    if get("attention.kv_lora_rank") and get("attention.key_length_mla"):
         config["kv_lora_rank"] = get("attention.kv_lora_rank")
         config["qk_rope_head_dim"] = get("rope.dimension_count", 0)
     if get("shortconv.l_cache"):  # LFM2

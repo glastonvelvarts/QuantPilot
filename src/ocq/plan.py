@@ -16,6 +16,7 @@ from ocq.local_model import NO_TOKENIZER, has_tokenizer
 from ocq.model_analyzer import predict_for_config, runtime_of
 from ocq.model_size import kv_value_bytes
 from ocq.quantizers import get_quantizer
+from ocq.runtimes import llama_cache_warning
 from ocq.types import (
     LAYER_SPLIT,
     LLAMA_CPP,
@@ -65,6 +66,10 @@ def generate_plan(
         rationale.append(experts_note(model, predicted))
     if config.kv_cache != "f16":
         rationale.append(kv_cache_note(config, hardware))
+        if config.algorithm == QuantAlgorithm.GGUF:
+            warning = llama_cache_warning(model.architecture, config.kv_cache)
+            if warning:
+                rationale.append(f"{warning} QuantPilot's benchmark sets it.")
     picked = not (choices and choices.algorithm)
     if hardware.os_name == "Windows" and hardware.has_cuda and picked:
         if config.algorithm == QuantAlgorithm.GGUF:

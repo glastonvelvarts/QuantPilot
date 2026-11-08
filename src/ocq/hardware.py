@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -25,7 +27,14 @@ def detect_hardware(llmfit_bin: str | None = None) -> HardwareProfile:
         profile = LlmfitBridge(llmfit_bin).hardware_profile()
     except LlmfitError:
         profile = UniversalHardwareResolver.resolve_profile(probe_hardware())
+    if cpu_only():
+        return replace(profile, has_gpu=False, backend="CPU", unified_memory=False, gpus=())
     return with_live_gpu_readings(profile)
+
+
+def cpu_only() -> bool:
+    """OCQ_CPU_ONLY=1: plan and run as on a PC without a GPU (llama.cpp gets --device none)."""
+    return os.environ.get("OCQ_CPU_ONLY", "").strip().lower() not in ("", "0", "false", "no")
 
 
 def probe_hardware() -> HardwareProfile:
@@ -120,22 +129,90 @@ def with_live_gpu_readings(profile: HardwareProfile) -> HardwareProfile:
 
     live = nvidia_gpus()
     if not live:
+        # Without nvidia-smi only the CUDA driver knows what is free (without either, the total
+        # stands in). It is then also the figure for expert plans: nothing reads what WDDM has
+        # really left, so wddm stays off.
+        cuda = cuda_memory_mib() or []
+        nvidia = [g for g in profile.gpus if "cuda" in g.backend.lower()]
+        free = {}
+        if len(cuda) == len(nvidia):
+            for card, (free_mib, total_mib) in zip(nvidia, cuda, strict=True):
+                if card.vram_gb and abs(total_mib / 1024 - card.vram_gb) <= 0.02 * card.vram_gb:
+                    free[id(card)] = round(free_mib / 1024, 2)
         gpus = [
-            replace(g, measured_bandwidth_gbs=measured_gpu_bandwidth(g.name)) for g in profile.gpus
+            replace(
+                g,
+                measured_bandwidth_gbs=measured_gpu_bandwidth(g.name),
+                free_vram_gb=free.get(id(g), g.free_vram_gb),
+                cuda_free_gb=free.get(id(g), g.cuda_free_gb),
+            )
+            for g in profile.gpus
         ]
         return replace(profile, gpus=tuple(gpus))
 
     spec = {gpu.name: gpu.bandwidth_gbs for gpu in profile.gpus}
-    cards = [
-        replace(
-            card,
-            bandwidth_gbs=spec.get(card.name, 0.0),
-            measured_bandwidth_gbs=measured_gpu_bandwidth(card.name),
+    cuda = cuda_memory_mib() or []
+    wddm = platform.system() == "Windows"
+    cards = []
+    for index, card in enumerate(live):
+        cuda_free = None
+        # CUDA lists the cards in nvidia-smi's order (CUDA_DEVICE_ORDER=PCI_BUS_ID); the total
+        # must agree too, or the reading belongs to another card.
+        if len(cuda) == len(live) and card.vram_gb:
+            free_mib, total_mib = cuda[index]
+            if abs(total_mib / 1024 - card.vram_gb) <= 0.02 * card.vram_gb:
+                cuda_free = round(free_mib / 1024, 2)
+        cards.append(
+            replace(
+                card,
+                bandwidth_gbs=spec.get(card.name, 0.0),
+                measured_bandwidth_gbs=measured_gpu_bandwidth(card.name),
+                cuda_free_gb=cuda_free,
+                wddm=wddm,
+            )
         )
-        for card in live
-    ]
     others = [gpu for gpu in profile.gpus if "cuda" not in gpu.backend.lower()]
     return replace(profile, gpus=tuple(cards + others))
+
+
+def cuda_memory_mib() -> list[tuple[float, float]] | None:
+    """(free, total) MiB of each card as CUDA reports it once a context exists, as a runtime
+    sees it: through the NVIDIA driver (cuMemGetInfo), in about half a second. On Windows the
+    free figure is fixed (7,106 MiB on an 8 GB RTX 4060 Laptop, whatever else runs). None when
+    the driver library is missing or fails."""
+    names = ["nvcuda.dll"] if platform.system() == "Windows" else ["libcuda.so.1", "libcuda.so"]
+    driver = None
+    for name in names:
+        try:
+            driver = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    if driver is None:
+        return None
+    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    count = ctypes.c_int()
+    if driver.cuInit(0) != 0 or driver.cuDeviceGetCount(ctypes.byref(count)) != 0:
+        return None
+    readings = []
+    for index in range(count.value):
+        device, context = ctypes.c_int(), ctypes.c_void_p()
+        free, total = ctypes.c_size_t(), ctypes.c_size_t()
+        if driver.cuDeviceGet(ctypes.byref(device), index) != 0:
+            return None
+        if driver.cuDevicePrimaryCtxRetain(ctypes.byref(context), device) != 0:
+            return None
+        try:
+            if driver.cuCtxPushCurrent_v2(context) != 0:
+                return None
+            ok = driver.cuMemGetInfo_v2(ctypes.byref(free), ctypes.byref(total)) == 0
+            driver.cuCtxPopCurrent_v2(ctypes.byref(ctypes.c_void_p()))
+        finally:
+            driver.cuDevicePrimaryCtxRelease_v2(device)
+        if not ok:
+            return None
+        readings.append((free.value / 2**20, total.value / 2**20))
+    return readings
 
 
 def measured_gpu_bandwidth(gpu_name: str) -> float:

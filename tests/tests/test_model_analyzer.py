@@ -45,6 +45,7 @@ from ocq import measurements
 from ocq.model_analyzer import (
     best_option,
     build_snapshot,
+    llama_layers_on_gpu,
     parse_params_from_name,
     quant_options,
     recommend_models,
@@ -1096,13 +1097,16 @@ def test_a_gated_repo_says_so_and_links_the_license(monkeypatch, tmp_path):
 
 
 def test_a_model_too_big_for_the_gpu_is_as_fast_as_its_layers_in_ram_allow(qwen_tensors):
-    # The share of layers on the GPU is the free memory over weights and cache together: the
-    # cache of a long context pushes layers out too. Qwen2.5-7B Q4_K_M at 131k on the RTX 4060
-    # was shown at the all-GPU speed (<= 45 tok/s); llama.cpp put 14 of 29 layers on the GPU.
+    # Whole layers fill the GPU, each with its share of the cache: the cache of a long context
+    # pushes layers out too. Qwen2.5-7B Q4_K_M at 131k on the RTX 4060 was shown at the all-GPU
+    # speed (<= 45 tok/s); llama.cpp put 14 of 29 layers on the GPU.
     hardware = make_hardware(ram_gb=32, vram_gb=8, free_vram_gb=2.5)
-    q4 = options_by_label(qwen_snapshot(qwen_tensors, hardware, 32768), hardware, 32768)["Q4_K_M"]
+    snap = qwen_snapshot(qwen_tensors, hardware, 32768)
+    q4 = options_by_label(snap, hardware, 32768)["Q4_K_M"]
     assert q4.run_mode == RunMode.GPU_OFFLOAD
-    on_gpu = (2.5 - 0.55 - 1.0) / q4.memory_required_gb  # tied embeddings: all of it counts
+    layers, on_gpu = llama_layers_on_gpu(snap, "Q4_K_M", q4.weights_gb, 32768, 2, 2.5 - 0.55 - 1.0)
+    assert q4.gpu_layers == layers
+    assert 1 < layers < snap.num_layers + 1
     read = q4.weights_gb * qwen_snapshot(qwen_tensors, hardware).read_fraction
     gpu, ram = 180.0, 89.6e9 / 1024**3
     expected = 1 / (read * on_gpu / gpu + read * (1 - on_gpu) / ram)

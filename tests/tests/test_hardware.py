@@ -76,6 +76,46 @@ def test_identical_cards_each_keep_their_own_live_reading():
     assert [card.free_vram_gb for card in live.gpus] == [23.44, 22.46]
 
 
+def test_cudas_own_free_figure_is_kept_next_to_nvidia_smis(monkeypatch):
+    # The RTX 4060 Laptop under Windows: nvidia-smi 7,610 MiB free, CUDA 7,106 (retest-4).
+    laptop = "NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9"
+    monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: [(7106.0, 8187.5)])
+    monkeypatch.setattr(hardware.platform, "system", lambda: "Windows")
+    (card,) = live_readings(nvidia_pc(laptop), laptop).gpus
+    assert (card.free_vram_gb, card.cuda_free_gb, card.wddm) == (7.43, 6.94, True)
+    # A reading whose total does not match the card belongs to another one: not used.
+    monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: [(20000.0, 24576.0)])
+    (card,) = live_readings(nvidia_pc(laptop), laptop).gpus
+    assert card.cuda_free_gb is None
+
+
+def test_without_nvidia_smi_the_free_memory_comes_from_cuda(monkeypatch):
+    # Windows with nvidia-smi off PATH (retest-5): the card was known, its free memory was the
+    # total, 8.00 GB.
+    laptop = "NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9"
+    known = nvidia_pc(laptop)
+    monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: [(7106.0, 8187.5)])
+    (card,) = live_readings(known).gpus
+    assert (card.free_vram_gb, card.cuda_free_gb, card.wddm) == (6.94, 6.94, False)
+    monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
+    (card,) = live_readings(known).gpus
+    assert card.free_vram_gb == known.gpus[0].free_vram_gb
+
+
+def test_ocq_cpu_only_plans_as_on_a_pc_without_a_gpu(monkeypatch):
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    monkeypatch.setattr(hardware.LlmfitBridge, "hardware_profile", lambda self: laptop)
+    monkeypatch.setattr(hardware, "nvidia_gpus", lambda: [])
+    monkeypatch.setattr(hardware, "measured_gpu_bandwidth", lambda name: 0.0)
+    assert detect_hardware().has_cuda
+    for value in ("1", "yes", "true"):
+        monkeypatch.setenv("OCQ_CPU_ONLY", value)
+        hw = detect_hardware()
+        assert (hw.has_gpu, hw.gpus, hw.backend, hw.free_vram_gb) == (False, (), "CPU", 0.0)
+    monkeypatch.setenv("OCQ_CPU_ONLY", "0")
+    assert detect_hardware().has_cuda
+
+
 def test_llmfit_group_becomes_one_entry_per_card():
     # llmfit lists 2 identical cards once: vram_gb is one card's, count is 2.
     grouped = GpuProfile("NVIDIA GeForce RTX 3090", 24.0, "CUDA", 936.0, count=2)

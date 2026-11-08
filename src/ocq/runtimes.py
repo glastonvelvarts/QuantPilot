@@ -16,9 +16,19 @@ llama.cpp (common/fit.cpp, build b11429)
   --n-cpu-moe (or -ot), it does not fit anything ("tensor_buft_overrides already set by user,
   abort") and the plan has to fit by itself.
 
-Every CUDA runtime first creates a CUDA context, which takes memory nvidia-smi still shows as
-free. Measured on an RTX 4060 Laptop with 7,610 MiB free: vLLM 0.33.0 then saw 6.88 GiB,
-llama.cpp b11429 7,078-7,106 MiB, three starts each.
+Free memory has two figures on NVIDIA:
+  CUDA's    what cuMemGetInfo reports once a context exists. llama.cpp's --fit and vLLM's
+            start-up check work from it, so it predicts what they do (usable_gb). QuantPilot
+            reads it from the driver; without it, nvidia-smi's free memory less 0.55 GB.
+  physical  what is really left. With --n-cpu-moe llama.cpp fits nothing itself, so a plan is
+            limited by this (physical_gb).
+On Linux they are one: CUDA's figure is nvidia-smi's less the context. Windows' driver model
+(WDDM) reports a fixed figure instead: 7,106 MiB on an RTX 4060 Laptop in 127 loads, while
+nvidia-smi showed 7,420-7,792 free, and also with another process holding 2 GB. A context
+really takes about 90 MiB there (torch's 2,048 MiB took 2,136 in nvidia-smi, llama-server's
+7,127 took 7,219), and going over CUDA's figure did not slow llama.cpp down: gpt-oss with
+--n-cpu-moe 9 used 7,309 MiB of weights and was the fastest; only 8, over nvidia-smi's free
+memory, fell.
 """
 
 from __future__ import annotations
@@ -35,7 +45,43 @@ from ocq.types import GpuProfile
 # installed. With vLLM installed, its own default is read from its source.
 VLLM_LATEST_UTILIZATION = 0.92
 VLLM_LATEST = "v0.32.0"
-CUDA_CONTEXT_GB = 0.55
+CUDA_CONTEXT_GB = 0.55  # nvidia-smi's free less CUDA's figure, RTX 4060 Laptop (Windows)
+WDDM_CONTEXT_GB = 90 / 1024  # what a CUDA context really takes under WDDM
+
+# llama.cpp b11429 rotates the keys and values of a quantized cache (q8_0, q4_0) with a Hadamard
+# matrix, which adds nodes to every layer's graph. A graph may have 8 x the model's tensors in
+# nodes; Granite 3.0/3.1 MoE, with many steps for few tensors, then goes over and llama.cpp stops
+# ("ggml-impl.h:330: fatal error", RTX 4060, q8_0 at 16k). Without the rotation its graph is the
+# f16 one, which runs.
+ROTATION_OVER_NODE_LIMIT = frozenset({"granitemoe"})
+ROTATION_OFF = {"LLAMA_ATTN_ROT_DISABLE": "1"}
+
+
+def llama_cache_env(architecture: str, kv_cache: str) -> dict[str, str]:
+    """Environment llama.cpp needs to run this model with this cache type."""
+    name = architecture.split()[0] if architecture else ""
+    if kv_cache != "f16" and name in ROTATION_OVER_NODE_LIMIT:
+        return dict(ROTATION_OFF)
+    return {}
+
+
+def llama_device_env(has_gpu: bool) -> dict[str, str]:
+    """Without a GPU (or with OCQ_CPU_ONLY) llama.cpp must not offload to one, even when its build
+    has a backend for it (macOS's Metal, a CUDA build on PATH): --device none for llama-server
+    and llama-completion. llama-bench takes -dev none instead."""
+    return {} if has_gpu else {"LLAMA_ARG_DEVICE": "none"}
+
+
+def llama_cache_warning(architecture: str, kv_cache: str) -> str:
+    if not llama_cache_env(architecture, kv_cache):
+        return ""
+    return (
+        f"llama.cpp stops with an error on this model with a {kv_cache} cache unless "
+        "LLAMA_ATTN_ROT_DISABLE=1 is set (its cache rotation takes the graph over llama.cpp's "
+        "node limit)."
+    )
+
+
 # When vLLM's default share is not free, rate at the highest lower share in these steps
 # (0.85, 0.80 ...): round values a user types, with some room under what is free.
 VLLM_SHARE_STEP = 0.05
@@ -73,8 +119,19 @@ def cuda_context_gb(card: GpuProfile) -> float:
 
 
 def usable_gb(card: GpuProfile, free_gb: float) -> float:
-    """What a runtime can still use of the free memory once it has started."""
+    """The free memory a runtime sees once it has started: CUDA's figure when read (what
+    --fit and vLLM's start-up check use), else the free memory less the CUDA context."""
+    if card.cuda_free_gb is not None:
+        return card.cuda_free_gb
     return max(free_gb - cuda_context_gb(card), 0.0)
+
+
+def physical_gb(card: GpuProfile, free_gb: float) -> float:
+    """What is really left once a runtime has started, for a plan llama.cpp does not fit
+    itself (--n-cpu-moe). Under WDDM, more than CUDA's figure."""
+    if card.wddm and "cuda" in card.backend.lower():
+        return max(free_gb - WDDM_CONTEXT_GB, 0.0)
+    return usable_gb(card, free_gb)
 
 
 def vllm_card_budget_gb(card: GpuProfile, free_gb: float, utilization: float) -> float:
