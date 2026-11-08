@@ -191,3 +191,20 @@ quantization on this GPU): 5 passed.
 
   The expected speeds, fitted to this PC's earlier runs, are 12–25% high on all three models
   quantized this session (Qwen2.5 1.5B: 98.4 vs about 125).
+
+## Mac side, 2026-11-08 (branch `phase-4-nvidia-fixes`)
+
+Fixed: 1 (expert tensors of a GGUF were counted twice: `--n-cpu-moe` 6 → 11 for gpt-oss), 2 (CUDA
+context, now for every runtime), 3, 4, 5, 9, 10, 11, 13. llama.cpp on a separate GPU is now
+budgeted as stock llama.cpp b11429 does: 0.55 GB CUDA context, 1 GB `--fit-target` headroom per
+card (none with `--n-cpu-moe`), input embeddings in RAM, llama-server's buffers (an upper bound
+of all 18 runs in `server/`, at most 90 MiB over).
+
+To re-test on the NVIDIA PC: `feasibility` of gpt-oss-20b (expect `--n-cpu-moe 11`, and whether
+it runs without spilling), Qwen2.5-7B at 131k (layers on the GPU vs QuantPilot's 15 of 29),
+and vLLM at `--gpu-memory-utilization` 0.8 (now rated for vLLM).
+
+Still open: 6 (verify does not predict llama.cpp's own layer split), 7 (Gemma's extra 0.02–0.05
+MiB on CUDA), 8 (llama.cpp crash, Granite MoE + q8_0 at 16k), 12 (did not fail in 30 runs under
+load on the Mac), and llama-server's working memory for MLA models (DeepSeek reserved 754 MiB at
+64k on the Mac, more than the estimate).
