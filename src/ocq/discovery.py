@@ -424,7 +424,7 @@ def folder_tree_models(root: Path) -> list[LocalModel]:
     pending = [(root, 0)]
     while pending:
         folder, depth = pending.pop()
-        label = str(folder.relative_to(root)) if folder != root else folder.name
+        label = folder.relative_to(root).as_posix() if folder != root else folder.name
         found = folder_models(folder, label, FOLDER)
         models += found
         if depth < MAX_DEPTH:
@@ -546,7 +546,7 @@ def existing(dirs: list[Path]) -> list[Path]:
 
 def tilde(path: Path) -> str:
     try:
-        return f"~/{path.relative_to(Path.home())}"
+        return f"~/{path.relative_to(Path.home()).as_posix()}"
     except ValueError:
         return str(path)
 
