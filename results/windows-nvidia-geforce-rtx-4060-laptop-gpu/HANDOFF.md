@@ -144,7 +144,15 @@ quantization on this GPU): 5 passed.
    `moe/qwen2.5-7b-dense-offload.md`.
 6. QuantPilot does not predict how many layers llama.cpp's fit puts on the GPU, so `verify` skips
    the weight checks then (Qwen 7B 131k, OLMoE 64k).
-7. Gemma's extra 0.02–0.04 MiB on CUDA (section 2).
+7. Gemma's extra 0.02–0.05 MiB on CUDA (section 2), in every Gemma GGUF, also the ones QuantPilot
+   converts itself (`gemma-e2e.txt`).
+13. The context estimate adds an output buffer of 512 rows × vocab × 4 bytes (`EVAL_BATCH` in
+    `model_size.py`): 512 MiB for Gemma 3 (262k vocabulary), 500 MiB for Gemma 2. llama.cpp's
+    output buffer on CUDA is 1.00 MiB with llama-completion (1 row) and 4.00 MiB with llama-server
+    (4 rows). The 512-row size only resembles llama-completion's GPU compute buffer for Gemma
+    (526 MiB); llama-server's is 56–80 MiB. So `feasibility` shows Gemma 3's context at 4k as
+    0.57 GB where the cache is 71 MiB. Verify's note "llama-server keeps 4 rows of logits instead of
+    512" does not hold for llama-completion on this build either: it kept 1.
 8. llama.cpp b11429 crashes on Granite 3.1 MoE with a q8_0 cache at 16k (`ggml-impl.h:330: fatal error`
    in the K-rotation graph, `attn_inp_k_rot`); f16 at 4k/16k/64k is fine. A llama.cpp bug, but
    QuantPilot plans q8_0 there.
@@ -167,3 +175,19 @@ quantization on this GPU): 5 passed.
 - `ocq optimize Qwen/Qwen2.5-1.5B-Instruct -b gguf --gguf-type Q4_K_M --execute`: 0.918 GB on disk vs
   0.913 GB predicted, validation passed, 98.4 tok/s measured (expected about 125), 84 ms to first token.
 - `ocq models` on this PC: Ollama and the Hugging Face cache found, rated offline.
+- Gated repos with the license accepted (`google/gemma-3-1b-it`, `google/gemma-2-2b-it`): `inspect`
+  reads the safetensors headers, everything cross-checked with the HF API; the KV cache from
+  config.json matches llama.cpp (Gemma 3 38 MiB at 4k for 1 conversation, 71 MiB for 4; Gemma 2
+  416 MiB). Full `optimize -b gguf --gguf-type Q4_K_M --execute`, then `verify` at 4k and 32k
+  (`gemma-e2e.txt`):
+
+  | | Gemma 3 1B | Gemma 2 2B |
+  |---|---|---|
+  | Q4_K_M on disk vs predicted | 0.751 vs 0.745 GB | 1.591 vs 1.586 GB |
+  | validation | pass | pass |
+  | tok/s measured vs expected | 108.8 vs about 137 | 75.9 vs about 86 |
+  | time to first token | 80 ms | 92 ms |
+  | verify: KV / CPU range / GPU weights | exact / exact / −0.05 MiB | exact / exact / −0.03 MiB |
+
+  The expected speeds, fitted to this PC's earlier runs, are 12–25% high on all three models
+  quantized this session (Qwen2.5 1.5B: 98.4 vs about 125).
