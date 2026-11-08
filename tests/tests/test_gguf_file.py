@@ -226,3 +226,23 @@ def test_expert_weights_and_biases_of_a_gguf_are_counted_once():
     embeddings = next(t.nbytes for t in header.tensors if t.name == "token_embd.weight")
     on_gpu = sum(sizes.values()) - embeddings - moved_gb * 2**30
     assert on_gpu / 2**20 == pytest.approx(8522.54, abs=0.03)
+
+
+def test_feasibility_of_a_gguf_repo_gives_the_n_cpu_moe_flag(monkeypatch):
+    # ocq plan refuses a GGUF repo ("already GGUF"), so feasibility has to give the N itself.
+    from conftest import nvidia_pc
+    from typer.testing import CliRunner
+
+    from ocq import cli
+    from ocq.model_analyzer import gguf_snapshot
+
+    header, file_size = real_header("gpt-oss-20b-MXFP4")
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    files = [("MXFP4", header.data_bytes)]
+    snap = gguf_snapshot("ggml-org/gpt-oss-20b-GGUF", {}, header, files, file_size, True)
+    monkeypatch.setattr(cli, "detect_hardware", lambda _bin: laptop)
+    monkeypatch.setattr(cli, "resolve_model", lambda *a, **k: snap)
+    result = CliRunner().invoke(cli.app, ["feasibility", snap.model_id], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "MXFP4: --n-cpu-moe" in result.output
+    assert "see ocq plan" not in result.output

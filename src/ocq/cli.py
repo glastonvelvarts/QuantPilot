@@ -588,7 +588,18 @@ def cmd_feasibility(
             "tensor names show no separate k_proj/v_proj. Fit and Needs count the weights only, "
             "so no row is rated better than Marginal.[/dim]"
         )
-    if any(option.experts_in_ram for option in options):
+    if snapshot.gguf_files and any(option.experts_in_ram for option in options):
+        # ocq plan does not take a GGUF repo, so the flag is given here.
+        flags = ", ".join(
+            f"{option.label}: --n-cpu-moe {option.experts_in_ram}"
+            for option in options
+            if option.experts_in_ram
+        )
+        console.print(
+            f"[dim]gpu+ram (experts): run llama.cpp with the experts of the first layers in "
+            f"RAM ({flags}).[/dim]"
+        )
+    elif any(option.experts_in_ram for option in options):
         console.print(
             "[dim]gpu+ram (experts): llama.cpp only (--n-cpu-moe, see ocq plan). The AWQ, GPTQ, "
             "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "
