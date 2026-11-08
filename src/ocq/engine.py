@@ -175,8 +175,7 @@ def build_rationale(
     lines = [
         f"Goal: {goal.value}",
         f"Best fit on this PC: {fit.quant_label}, {fit.fit_level} ({fit.run_mode}), "
-        f"{fit.memory_required_gb:.2f} of {fit.memory_available_gb:.2f} GB free "
-        f"({fit.utilization_pct:.0f}%)",
+        f"{fit.memory_text}",
         f"Selected: {config.summary()}",
         f"Facts: {model.facts_summary()}",
     ]

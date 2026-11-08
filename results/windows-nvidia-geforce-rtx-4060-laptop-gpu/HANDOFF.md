@@ -251,3 +251,16 @@ with the license link (`retest/llama-gated.txt`). Meta has accepted this account
 now; `feasibility` of it works.
 
 **`ocq models`: fixed.** 10 models, all text generation (`retest/models.txt`).
+
+## Mac side, after the re-test
+
+- **vLLM on an 8 GB card:** when vLLM's default share is not free, or does not hold the model,
+  `feasibility` now rates the vLLM rows at the highest lower share that starts, in 0.05 steps,
+  and names it: "Rated at --gpu-memory-utilization 0.85, the highest that starts". On the
+  laptop (7,689 MiB free) `Qwen/Qwen2.5-1.5B-Instruct-AWQ` is Perfect at 0.85, 1.47 of 6.80 GB.
+  It also picks tensor parallel at a lower share when one busy card blocks the default.
+- **Header:** "1.47 of 0.00 GB (999%)" now reads "needs 1.47 GB, none is free for it".
+- **Re-test:** 0.80 was measured, 0.85 was not. Run vLLM at 0.85 (4k and 32k, f16 and fp8 KV)
+  and check it starts and the KV token count, then `feasibility` of the AWQ and
+  `meta-llama/Llama-3.2-1B-Instruct` AWQ / GPTQ rows.
+- **Still open:** the Qwen 7B 131k layer split (14 placed, 14.95 predicted), item 6.

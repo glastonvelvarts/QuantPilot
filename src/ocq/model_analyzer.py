@@ -8,6 +8,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -50,7 +51,13 @@ from ocq.model_size import (
     stored_bytes,
     weights_per_token,
 )
-from ocq.runtimes import LLAMA_FIT_TARGET_GB, usable_gb, vllm_budget, vllm_card_budget_gb
+from ocq.runtimes import (
+    LLAMA_FIT_TARGET_GB,
+    usable_gb,
+    vllm_budget,
+    vllm_card_budget_gb,
+    vllm_highest_share,
+)
 from ocq.types import (
     CONVERSATIONS,
     DTYPE_BITS,
@@ -67,6 +74,7 @@ from ocq.types import (
     FactKind,
     FeasibilityEstimate,
     FitLevel,
+    GpuProfile,
     HardwareProfile,
     KvLayer,
     ModelFacts,
@@ -1566,22 +1574,48 @@ def fit_at(
     # vLLM on NVIDIA works with a share of each card's total memory and only on the GPU.
     vllm = runtime == VLLM and hardware.has_cuda
     vllm_rule = vllm_budget() if vllm else None
-    budget = (
-        (lambda card, free: vllm_card_budget_gb(card, free, vllm_rule.utilization))
-        if vllm_rule
-        else usable_gb
+
+    def vllm_at(share: float) -> Callable[[GpuProfile, float], float]:
+        return lambda card, free: vllm_card_budget_gb(card, free, share)
+
+    pool = hardware.gpu_pool(
+        split, heads, vllm_at(vllm_rule.utilization) if vllm_rule else usable_gb
     )
-    pool = hardware.gpu_pool(split, heads, budget)
     note = ""
-    if vllm_rule and pool and not pool.free_gb:
-        card = pool.cards[0]
-        note = (
-            f"vLLM starts only with {vllm_rule.utilization:.0%} of the GPU's "
-            f"{card.vram_gb:.1f} GB free ({vllm_rule.source}); "
-            f"{hardware.card_free_gb(card):.1f} GB is free, about "
-            f"{usable_gb(card, hardware.card_free_gb(card)):.1f} GB once vLLM has started "
-            "CUDA. Lower --gpu-memory-utilization or close what else uses the GPU."
+    vllm_share = 0.0
+    if vllm_rule and pool and pool.free_gb < gpu_required:
+        # vLLM's default share is not free or does not hold the model: rate at the highest
+        # lower share that starts and holds it, else the one with the most room, and name it
+        # as --n-cpu-moe is named.
+        shares = {
+            vllm_highest_share(card, hardware.card_free_gb(card), vllm_rule.utilization)
+            for card in hardware.cards
+        }
+        best = None
+        for share in sorted((s for s in shares if 0 < s < vllm_rule.utilization), reverse=True):
+            lower = hardware.gpu_pool(split, heads, vllm_at(share))
+            if lower and (best is None or lower.free_gb > best[1].free_gb):
+                best = (share, lower)
+            if lower and lower.free_gb >= gpu_required:
+                best = (share, lower)
+                break
+        if best and best[1].free_gb > pool.free_gb:
+            vllm_share, pool = best
+    if vllm_rule and pool:
+        card = min(pool.cards, key=lambda c: usable_gb(c, hardware.card_free_gb(c)))
+        free = hardware.card_free_gb(card)
+        default = (
+            f"vLLM's default share is {vllm_rule.utilization:.0%} of the GPU's "
+            f"{card.vram_gb:.1f} GB ({vllm_rule.source}); {free:.1f} GB is free, about "
+            f"{usable_gb(card, free):.1f} GB once vLLM has started CUDA"
         )
+        if vllm_share:
+            note = (
+                f"{default}. Rated at --gpu-memory-utilization {vllm_share:.2f}, "
+                "the highest that starts."
+            )
+        elif not pool.free_gb:
+            note = f"{default}, so vLLM does not start. Close what else uses the GPU."
     if pool and pool.split == LAYER_SPLIT:
         # Layers on a slower card slow every token down. When the model fits on the best card
         # alone and that card is faster than the split, one card is the better setup.
@@ -1659,6 +1693,7 @@ def fit_at(
         else (),
         gpu_split=pool.split if pool else "",
         experts_in_ram=experts_ram_layers,
+        vllm_share=vllm_share,
         note=note,
         runtime=runtime,
     )

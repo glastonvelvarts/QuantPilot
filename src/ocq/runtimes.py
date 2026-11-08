@@ -24,6 +24,7 @@ llama.cpp b11429 7,078-7,106 MiB, three starts each.
 from __future__ import annotations
 
 import importlib.util
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,9 @@ from ocq.types import GpuProfile
 VLLM_LATEST_UTILIZATION = 0.92
 VLLM_LATEST = "v0.32.0"
 CUDA_CONTEXT_GB = 0.55
+# When vLLM's default share is not free, rate at the highest lower share in these steps
+# (0.85, 0.80 ...): round values a user types, with some room under what is free.
+VLLM_SHARE_STEP = 0.05
 LLAMA_FIT_TARGET_GB = 1.0
 UTILIZATION_DEFAULT = re.compile(r"gpu_memory_utilization: float = (?:Field\(default=)?([0-9.]+)")
 
@@ -59,8 +63,8 @@ def vllm_budget() -> VllmBudget:
             except OSError:
                 continue
             if match:
-                return VllmBudget(float(match.group(1)), "the installed vLLM's default")
-    return VllmBudget(VLLM_LATEST_UTILIZATION, f"vLLM's default ({VLLM_LATEST})")
+                return VllmBudget(float(match.group(1)), "the installed vLLM")
+    return VllmBudget(VLLM_LATEST_UTILIZATION, f"vLLM {VLLM_LATEST}")
 
 
 def cuda_context_gb(card: GpuProfile) -> float:
@@ -80,3 +84,12 @@ def vllm_card_budget_gb(card: GpuProfile, free_gb: float, utilization: float) ->
         return usable_gb(card, free_gb)  # total unknown: the free memory is all to go by
     requested = card.vram_gb * utilization
     return requested if usable_gb(card, free_gb) >= requested else 0.0
+
+
+def vllm_highest_share(card: GpuProfile, free_gb: float, default: float) -> float:
+    """The highest gpu_memory_utilization, in VLLM_SHARE_STEP steps and at most the default,
+    that vLLM starts with on this card. 0 when not even one step is free."""
+    if not card.vram_gb:
+        return default
+    steps = math.floor(round(usable_gb(card, free_gb) / card.vram_gb / VLLM_SHARE_STEP, 6))
+    return round(min(steps * VLLM_SHARE_STEP, default), 2)

@@ -549,9 +549,7 @@ def cmd_feasibility(
             f"Free right now: {hw.free_vram_gb:.2f} GB VRAM{gpu_note(hw)}, "
             f"{hw.available_ram_gb:.2f} GB RAM\n"
             f"Best fit: {colored_fit(fit.fit_level)} ({mode_label(fit.run_mode)}) "
-            f"@ {fit.quant_label}, "
-            f"{fit.memory_required_gb:.2f} of {fit.memory_available_gb:.2f} GB "
-            f"({fit.utilization_pct:.0f}%)",
+            f"@ {fit.quant_label}, {fit.memory_text}",
             title="Feasibility",
         )
     )

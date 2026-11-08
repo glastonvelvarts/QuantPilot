@@ -1,5 +1,6 @@
 """Tests for model snapshots and fit."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,7 @@ from ocq.types import (
     TENSOR_PARALLEL,
     TRANSFORMERS,
     FactKind,
+    FeasibilityEstimate,
     FitLevel,
     GpuProfile,
     HardwareProfile,
@@ -282,7 +284,8 @@ def test_awq_repo_counts_the_lm_head_it_stores():
 
 def test_a_stored_awq_repo_is_rated_for_vllm_without_its_tied_lm_head_copy():
     # RTX 4060 Laptop, 7,610 MiB free. vLLM loaded this repo in "1.1 GiB": the stored lm_head
-    # copy (0.435 GiB) is not loaded. At its default share (0.92) vLLM never started there.
+    # copy (0.435 GiB) is not loaded. At its default share (0.92) vLLM never started there; at
+    # 0.8 it started every time.
     laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
     snap = real_snapshot(QWEN_AWQ, laptop)
     (stored,) = quant_options(snap, laptop)
@@ -290,8 +293,12 @@ def test_a_stored_awq_repo_is_rated_for_vllm_without_its_tied_lm_head_copy():
     assert stored.weights_gb == pytest.approx(snap.original_gb - 0.435, abs=0.001)
     assert stored.weights_gb == pytest.approx(1.07, abs=0.01)
     assert stored.runtime == "vLLM"
-    assert stored.fit_level == FitLevel.TOO_TIGHT
+    # Rated at the highest share that starts: (7610 MiB - 0.55 GiB) / 8188 MiB = 0.86 -> 0.85.
+    assert stored.vllm_share == 0.85
+    assert stored.memory_available_gb == pytest.approx(0.85 * laptop.cards[0].vram_gb)
+    assert stored.fit_level == FitLevel.PERFECT
     assert "once vLLM has started CUDA" in stored.note
+    assert "Rated at --gpu-memory-utilization 0.85, the highest that starts" in stored.note
 
 
 def test_stored_formats_vllm_serves_and_the_ones_it_does_not():
@@ -544,12 +551,15 @@ def test_awq_on_two_3090s_is_tensor_parallel_and_reads_twice_as_fast():
 
 def test_vllm_needs_its_cuda_context_free_on_top_of_its_share():
     # The second card has 22.46 GiB free, more than 0.92 x 24 = 22.08 GiB, but vLLM measures
-    # after creating its CUDA context (0.55 GiB): 21.91 left, so it does not start on that card
-    # and tensor parallel over both is out. One card is used.
+    # after creating its CUDA context (0.55 GiB): 21.91 left, so at its default it does not
+    # start on that card, and one card cannot hold the 72B. At 0.90 (21.6 GiB) it starts on
+    # both, and tensor parallel holds it.
     two = nvidia_pc(RTX_3090, RTX_3090_BUSY)
     awq = options_by_label(real_snapshot(QWEN_72B, two), two)["AWQ 4-bit"]
-    assert awq.gpu_count == 1
-    assert awq.memory_available_gb == pytest.approx(0.92 * 24)
+    assert awq.vllm_share == 0.90
+    assert awq.gpu_count == 2
+    assert awq.memory_available_gb == pytest.approx(2 * 0.90 * 24)
+    assert awq.runnable
 
 
 def test_vllm_at_its_default_never_starts_on_an_8_gb_card():
@@ -560,16 +570,47 @@ def test_vllm_at_its_default_never_starts_on_an_8_gb_card():
     assert "7.4 GB is free, about 6.9 GB once vLLM has started CUDA" in awq.note
 
 
-def test_vllm_does_not_start_when_its_share_of_the_gpu_is_not_free(qwen_tensors):
-    # 0.92 x 24 GiB = 22.08 GiB must be free; with 2 GiB used by the desktop only 22 GiB is.
+def test_vllm_is_rated_at_a_lower_share_when_its_default_is_not_free(qwen_tensors):
+    # 0.92 x 24 GiB = 22.08 GiB must be free; with 2 GiB used by the desktop only 22 GiB is,
+    # 21.45 once vLLM has its CUDA context: 0.89 of the card, so 0.85.
     desktop = nvidia_pc("NVIDIA GeForce RTX 3090, 24576, 22528, 8.6")
     options = options_by_label(qwen_snapshot(qwen_tensors, desktop), desktop)
     awq = options["AWQ 4-bit"]
-    assert awq.fit_level == FitLevel.TOO_TIGHT
-    assert "vLLM starts only with 92% of the GPU's 24.0 GB free" in awq.note
+    assert awq.vllm_share == 0.85
+    assert awq.memory_available_gb == pytest.approx(0.85 * 24)
+    assert awq.fit_level == FitLevel.PERFECT
+    assert "vLLM's default share is 92% of the GPU's 24.0 GB" in awq.note
     assert "22.0 GB is free, about 21.4 GB once vLLM has started CUDA" in awq.note
+    assert "--gpu-memory-utilization 0.85" in awq.note
     # llama.cpp has no such rule: the same PC runs the GGUF rows.
     assert options["Q4_K_M"].fit_level == FitLevel.PERFECT
+
+
+def test_vllm_does_not_start_when_not_even_a_small_share_is_free(qwen_tensors):
+    # 0.9 GiB free on a 24 GiB card: 0.35 GiB once vLLM has its CUDA context, under 5%.
+    busy = nvidia_pc("NVIDIA GeForce RTX 3090, 24576, 922, 8.6")
+    awq = options_by_label(qwen_snapshot(qwen_tensors, busy), busy)["AWQ 4-bit"]
+    assert awq.fit_level == FitLevel.TOO_TIGHT
+    assert awq.vllm_share == 0
+    assert "so vLLM does not start. Close what else uses the GPU." in awq.note
+
+
+def test_the_summary_says_when_no_memory_is_free_for_the_model():
+    fit = FeasibilityEstimate(
+        quant_label="AWQ 4-bit",
+        fit_level=FitLevel.TOO_TIGHT,
+        run_mode=RunMode.UNFIT,
+        score=0,
+        estimated_tps=0,
+        memory_required_gb=1.47,
+        memory_available_gb=0.0,
+        utilization_pct=999.0,
+        runtime="vLLM",
+        estimate_confidence="",
+    )
+    assert fit.memory_text == "needs 1.47 GB, none is free for it"
+    room = replace(fit, memory_available_gb=6.8, utilization_pct=21.6)
+    assert room.memory_text == "1.47 of 6.80 GB (22%)"
 
 
 def test_vllm_does_not_spill_into_ram():
@@ -592,7 +633,7 @@ def test_the_installed_vllm_default_is_read_from_its_source(tmp_path, monkeypatc
         "    gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    assert runtimes.vllm_budget() == runtimes.VllmBudget(0.9, "the installed vLLM's default")
+    assert runtimes.vllm_budget() == runtimes.VllmBudget(0.9, "the installed vLLM")
     monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
     assert runtimes.vllm_budget().utilization == runtimes.VLLM_LATEST_UTILIZATION
 
