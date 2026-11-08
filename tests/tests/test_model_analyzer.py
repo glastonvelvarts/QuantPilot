@@ -1009,3 +1009,28 @@ def test_feasibility_says_mlx_needs_an_apple_silicon_mac(monkeypatch):
     result = CliRunner().invoke(cli.app, ["feasibility", MLX_QWEN], env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
     assert "MLX runs only on Apple Silicon Macs" in result.output
+
+
+def test_a_gated_repo_says_so_and_links_the_license(monkeypatch, tmp_path):
+    # Without an accepted license the Hub answers 403 GatedRepoError; that was shown as
+    # "tensor headers not readable" with the architecture unknown.
+    import httpx
+    import huggingface_hub
+    from huggingface_hub.errors import GatedRepoError
+
+    from ocq import model_analyzer
+
+    def gated(*args, **kwargs):
+        url = "https://huggingface.co/meta-llama/Llama-3.2-1B/resolve/main/config.json"
+        response = httpx.Response(403, request=httpx.Request("GET", url))
+        raise GatedRepoError("Cannot access gated repo", response=response)
+
+    monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", gated)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    with pytest.raises(OcqError) as error:
+        model_analyzer.fetch_model_files("meta-llama/Llama-3.2-1B", "abc")
+    assert "meta-llama/Llama-3.2-1B is gated" in str(error.value)
+    assert "https://huggingface.co/meta-llama/Llama-3.2-1B" in str(error.value)
+    assert "set HF_TOKEN" in str(error.value)

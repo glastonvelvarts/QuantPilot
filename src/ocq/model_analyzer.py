@@ -256,6 +256,20 @@ def fetch_hf_model(model_id: str) -> dict:
         raise OcqError(f"Could not reach HuggingFace: {exc.reason}") from exc
 
 
+def gated_message(model_id: str) -> str:
+    """Hugging Face shows a gated repo's files only to accounts that accepted its license."""
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    who = (
+        "The account of HF_TOKEN has not accepted it yet"
+        if token
+        else "Accept it, then set HF_TOKEN to a token of that account"
+    )
+    return (
+        f"{model_id} is gated: its files can be read only after accepting its license at "
+        f"https://huggingface.co/{model_id}. {who}."
+    )
+
+
 def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor], dict[str, str]]:
     """config.json, every tensor's shape and stored type. Only file headers are read."""
     cached = MODEL_CACHE / f"{model_id.replace('/', '--')}.json"
@@ -270,6 +284,7 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
     from huggingface_hub import get_safetensors_metadata, hf_hub_download
     from huggingface_hub.errors import (
         EntryNotFoundError,
+        GatedRepoError,
         NotASafetensorsRepoError,
         SafetensorsParsingError,
     )
@@ -277,6 +292,8 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
 
     try:
         config = json.loads(Path(hf_hub_download(model_id, "config.json")).read_text("utf-8"))
+    except GatedRepoError as exc:
+        raise OcqError(gated_message(model_id)) from exc
     except (OSError, ValueError, EntryNotFoundError):
         config = {}
 
