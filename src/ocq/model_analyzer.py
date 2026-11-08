@@ -8,6 +8,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,18 +27,22 @@ from ocq.gguf_file import (
 from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
 from ocq.local_model import fetch_local_model_files, gguf_files, parse_model_ref
 from ocq.model_size import (
+    BASE_TYPE,
     EMBEDDING,
+    OUTPUT,
     QUANT_METADATA,
     LayerBits,
     Tensor,
     bnb_scale_bits,
     bnb_weights_bytes,
     experts_in_names,
+    ffn_width,
     gguf_tensor_bytes,
     gguf_weights_bytes,
     group_size_that_fits,
     kv_value_bytes,
     layer_index,
+    llama_server_buffers_bytes,
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
@@ -46,7 +51,13 @@ from ocq.model_size import (
     stored_bytes,
     weights_per_token,
 )
-from ocq.runtimes import vllm_budget, vllm_card_budget_gb
+from ocq.runtimes import (
+    LLAMA_FIT_TARGET_GB,
+    usable_gb,
+    vllm_budget,
+    vllm_card_budget_gb,
+    vllm_highest_share,
+)
 from ocq.types import (
     CONVERSATIONS,
     DTYPE_BITS,
@@ -63,6 +74,7 @@ from ocq.types import (
     FactKind,
     FeasibilityEstimate,
     FitLevel,
+    GpuProfile,
     HardwareProfile,
     KvLayer,
     ModelFacts,
@@ -256,6 +268,20 @@ def fetch_hf_model(model_id: str) -> dict:
         raise OcqError(f"Could not reach HuggingFace: {exc.reason}") from exc
 
 
+def gated_message(model_id: str) -> str:
+    """Hugging Face shows a gated repo's files only to accounts that accepted its license."""
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    who = (
+        "The account of HF_TOKEN has not accepted it yet"
+        if token
+        else "Accept it, then set HF_TOKEN to a token of that account"
+    )
+    return (
+        f"{model_id} is gated: its files can be read only after accepting its license at "
+        f"https://huggingface.co/{model_id}. {who}."
+    )
+
+
 def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor], dict[str, str]]:
     """config.json, every tensor's shape and stored type. Only file headers are read."""
     cached = MODEL_CACHE / f"{model_id.replace('/', '--')}.json"
@@ -270,6 +296,7 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
     from huggingface_hub import get_safetensors_metadata, hf_hub_download
     from huggingface_hub.errors import (
         EntryNotFoundError,
+        GatedRepoError,
         NotASafetensorsRepoError,
         SafetensorsParsingError,
     )
@@ -277,6 +304,8 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
 
     try:
         config = json.loads(Path(hf_hub_download(model_id, "config.json")).read_text("utf-8"))
+    except GatedRepoError as exc:
+        raise OcqError(gated_message(model_id)) from exc
     except (OSError, ValueError, EntryNotFoundError):
         config = {}
 
@@ -336,6 +365,7 @@ def build_snapshot(
         catalog_source="huggingface",
         facts=facts,
         kv_layers=kv_layers_from(config)[0],
+        tied_copy_bytes=tied_copy_bytes(config, tensors, dtypes or {}),
         raw=meta,
         **(architecture_from(config) or vocabulary_from_tensors(tensors)),
     )
@@ -598,7 +628,7 @@ def runtime_for_row(option: QuantOption) -> str:
     if option.row_kind == "gguf":
         return "llama.cpp"
     if option.row_kind == "stored":
-        return "transformers (full precision)"
+        return "vLLM" if option.runtime == VLLM else "transformers (full precision)"
     return "vLLM / transformers"
 
 
@@ -822,6 +852,14 @@ def active_fact(
     elif config and (configured == named):
         source, kind = "config.json + tensor names", FactKind.CROSS_CHECKED
     return Fact(read, source, kind, ", ".join(parts))
+
+
+def tied_copy_bytes(config: dict, tensors: list[Tensor], dtypes: dict[str, str]) -> int:
+    """Bytes of the lm_head copy (see lm_head_copy) in the files. Runtimes do not load it."""
+    if not lm_head_copy(config, tensors):
+        return 0
+    copies = [(name, shape) for name, shape in tensors if name.endswith("lm_head.weight")]
+    return stored_bytes(copies, dtypes) or 0
 
 
 def lm_head_copy(config: dict, tensors: list[Tensor]) -> int:
@@ -1311,13 +1349,14 @@ def quant_options(
         return [
             fit_at(
                 label,
-                model.original_gb,
+                model.original_gb - model.tied_copy_bytes / GB,
                 model,
                 hardware,
                 context,
                 False,
                 row_kind="stored",
                 kv_cache=kv_cache,
+                runtime=stored_runtime(model),
             )
         ]
     stored = model.stored_precision or "FP16"
@@ -1474,6 +1513,17 @@ def best_option(options: list[QuantOption]) -> QuantOption:
     return quantized[-1]
 
 
+# Already quantized checkpoints vLLM serves as they are (quantization labels of
+# quantization_label). bitsandbytes, MLX and unnamed methods stay with transformers.
+VLLM_STORED = ("AWQ", "GPTQ", "ModelOpt", "FP8", "MXFP4", "compressed-tensors")
+
+
+def stored_runtime(model: ModelSnapshot) -> str:
+    """The runtime for a repo's own quantized files: vLLM for the formats it serves."""
+    label = str(model.facts.quantization.value or "")
+    return VLLM if label.startswith(VLLM_STORED) else TRANSFORMERS
+
+
 def runtime_of(row_kind: str) -> str:
     """The runtime that serves a row: llama.cpp for GGUF, vLLM for AWQ, GPTQ and NVFP4,
     transformers for the original weights and bitsandbytes."""
@@ -1493,7 +1543,9 @@ def fit_at(
     use_measurements: bool = True,
     row_kind: str = "gguf",
     kv_cache: str = "f16",
+    runtime: str = "",
 ) -> QuantOption:
+    """runtime: who runs the row, when not the one of its kind (runtime_of)."""
     if model.params_b <= 0:
         hint = model.facts.parameters.note
         raise OcqError(
@@ -1503,63 +1555,98 @@ def fit_at(
         )
     # transformers expands MLA's compressed cache and keeps 16 bits; llama.cpp and vLLM keep it
     # compressed, and store the cache type asked for in their own format.
-    runtime = runtime_of(row_kind)
+    runtime = runtime or runtime_of(row_kind)
     value_bytes = kv_value_bytes(kv_cache, runtime, hardware.vllm_fp8_kv_cache)
     kv_bytes = model.kv_cache_bytes(context, runtime, value_bytes=value_bytes)
     context_gb = 0.0
     if kv_bytes is not None:
-        context_gb = (kv_bytes + output_buffer_bytes(model.vocab_size)) / GB
+        context_gb = (kv_bytes + working_bytes(model, context, runtime)) / GB
 
     required = weights_gb + context_gb
+    # llama.cpp on a separate GPU keeps the input embeddings in RAM, and fits the model itself
+    # with --fit-target of headroom on every card (see runtimes.py).
+    llama_gpu = runtime == LLAMA_CPP and not hardware.unified_memory
+    gpu_required = required - (embeddings_in_ram_gb(model, label, weights_gb) if llama_gpu else 0)
     # vLLM serves AWQ, GPTQ and NVFP4 with tensor parallel; llama.cpp and transformers split
     # by layers.
-    split = TENSOR_PARALLEL if row_kind in VLLM_ROWS else LAYER_SPLIT
+    split = TENSOR_PARALLEL if runtime == VLLM else LAYER_SPLIT
     heads = model.num_attention_heads if model.architecture_known else None
     # vLLM on NVIDIA works with a share of each card's total memory and only on the GPU.
     vllm = runtime == VLLM and hardware.has_cuda
     vllm_rule = vllm_budget() if vllm else None
-    budget = (
-        (lambda card, free: vllm_card_budget_gb(card, free, vllm_rule.utilization))
-        if vllm_rule
-        else None
+
+    def vllm_at(share: float) -> Callable[[GpuProfile, float], float]:
+        return lambda card, free: vllm_card_budget_gb(card, free, share)
+
+    pool = hardware.gpu_pool(
+        split, heads, vllm_at(vllm_rule.utilization) if vllm_rule else usable_gb
     )
-    pool = hardware.gpu_pool(split, heads, budget)
     note = ""
-    if vllm_rule and pool and not pool.free_gb:
-        card = pool.cards[0]
-        note = (
-            f"vLLM starts only with {vllm_rule.utilization:.0%} of the GPU's "
-            f"{card.vram_gb:.1f} GB free ({vllm_rule.source}); "
-            f"{hardware.card_free_gb(card):.1f} GB is free. Lower --gpu-memory-utilization "
-            "or close what else uses the GPU."
+    vllm_share = 0.0
+    if vllm_rule and pool and pool.free_gb < gpu_required:
+        # vLLM's default share is not free or does not hold the model: rate at the highest
+        # lower share that starts and holds it, else the one with the most room, and name it
+        # as --n-cpu-moe is named.
+        shares = {
+            vllm_highest_share(card, hardware.card_free_gb(card), vllm_rule.utilization)
+            for card in hardware.cards
+        }
+        best = None
+        for share in sorted((s for s in shares if 0 < s < vllm_rule.utilization), reverse=True):
+            lower = hardware.gpu_pool(split, heads, vllm_at(share))
+            if lower and (best is None or lower.free_gb > best[1].free_gb):
+                best = (share, lower)
+            if lower and lower.free_gb >= gpu_required:
+                best = (share, lower)
+                break
+        if best and best[1].free_gb > pool.free_gb:
+            vllm_share, pool = best
+    if vllm_rule and pool:
+        card = min(pool.cards, key=lambda c: usable_gb(c, hardware.card_free_gb(c)))
+        free = hardware.card_free_gb(card)
+        default = (
+            f"vLLM's default share is {vllm_rule.utilization:.0%} of the GPU's "
+            f"{card.vram_gb:.1f} GB ({vllm_rule.source}); {free:.1f} GB is free, about "
+            f"{usable_gb(card, free):.1f} GB once vLLM has started CUDA"
         )
+        if vllm_share:
+            note = (
+                f"{default}. Rated at --gpu-memory-utilization {vllm_share:.2f}, "
+                "the highest that starts."
+            )
+        elif not pool.free_gb:
+            note = f"{default}, so vLLM does not start. Close what else uses the GPU."
     if pool and pool.split == LAYER_SPLIT:
         # Layers on a slower card slow every token down. When the model fits on the best card
         # alone and that card is faster than the split, one card is the better setup.
-        single = hardware.gpu_pool(ONE_GPU)
-        if required <= single.free_gb and single.read_speed > pool.read_speed:
+        single = hardware.gpu_pool(ONE_GPU, budget=usable_gb)
+        if gpu_required <= single.free_gb and single.read_speed > pool.read_speed:
             pool = single
     vram = pool.free_gb if pool else 0.0
     ram = hardware.available_ram_gb
+    # What a model may use when llama.cpp lays it out itself.
+    fits = max(vram - LLAMA_FIT_TARGET_GB * pool.count, 0.0) if llama_gpu and pool else vram
 
     experts_ram_layers, experts_ram_gb = 0, 0.0
     offload = None
-    if vram and required > vram and not hardware.unified_memory and row_kind == "gguf":
-        offload = experts_to_ram(model, label, required - vram, ram, weights_gb)
-    if vram and required <= vram:
-        run_mode, available = RunMode.GPU, vram
+    if vram and gpu_required > fits and not hardware.unified_memory and row_kind == "gguf":
+        # Given --n-cpu-moe, llama.cpp keeps no headroom: the plan fits the experts itself.
+        offload = experts_to_ram(model, label, gpu_required - vram, ram, weights_gb)
+    used = required
+    if vram and gpu_required <= fits:
+        run_mode, available, used = RunMode.GPU, fits, gpu_required
     elif offload:
         run_mode, available = RunMode.GPU_EXPERTS_RAM, vram + ram
         experts_ram_layers, experts_ram_gb = offload
     elif vllm and pool:
         # vLLM does not spill into RAM by default (cpu_offload_gb is 0) or run on the CPU.
         run_mode, available = RunMode.GPU, vram
-    elif vram and not hardware.unified_memory and required <= vram + ram:
-        run_mode, available = RunMode.GPU_OFFLOAD, vram + ram
+    elif fits and not hardware.unified_memory and required <= fits + ram:
+        run_mode, available = RunMode.GPU_OFFLOAD, fits + ram
     else:
         run_mode, available = RunMode.CPU, ram
 
-    utilization = required / available * 100 if available > 0 else 999.0
+    utilization = used / available * 100 if available > 0 else 999.0
     if utilization > 100:
         fit_level, run_mode = FitLevel.TOO_TIGHT, RunMode.UNFIT
     elif run_mode == RunMode.GPU_OFFLOAD or utilization > 85:
@@ -1584,6 +1671,8 @@ def fit_at(
         gpu_read_speed=pool.read_speed if pool else 0.0,
         read_fraction=model.read_fraction,
         ram_read_gb=experts_ram_gb * model.experts_per_token / model.experts if offload else 0.0,
+        # Whole layers, with their share of the cache, fill the GPU; the rest runs from RAM.
+        gpu_share=min(fits / gpu_required, 1.0) if gpu_required > 0 else 1.0,
     )
     return QuantOption(
         label=label,
@@ -1592,7 +1681,7 @@ def fit_at(
         context_gb=context_gb,
         exact=bool(model.tensors) and kv_bytes is not None,
         context_known=kv_bytes is not None,
-        memory_required_gb=required,
+        memory_required_gb=used,
         memory_available_gb=available,
         fit_level=fit_level,
         run_mode=run_mode,
@@ -1604,8 +1693,37 @@ def fit_at(
         else (),
         gpu_split=pool.split if pool else "",
         experts_in_ram=experts_ram_layers,
+        vllm_share=vllm_share,
         note=note,
+        runtime=runtime,
     )
+
+
+def working_bytes(model: ModelSnapshot, context: int, runtime: str) -> int:
+    """Memory a runtime needs besides the weights and the cache. llama.cpp: llama-server's
+    output and compute buffers; else 512 rows of logits."""
+    ffn = ffn_width(list(model.tensors), model.experts, model.experts_per_token)
+    if runtime != LLAMA_CPP or not ffn:
+        return output_buffer_bytes(model.vocab_size)
+    sliding = any(layer.window for layer in model.kv_layers)
+    return llama_server_buffers_bytes(model.vocab_size, context, ffn, sliding, CONVERSATIONS)
+
+
+def embeddings_in_ram_gb(model: ModelSnapshot, gguf_type: str, weights_gb: float) -> float:
+    """GB of the GGUF's input embedding table, which llama.cpp keeps in RAM on a separate GPU
+    (the token lookup runs on the CPU; verify checks it). A tied table is the output layer too,
+    so it is also on the GPU: 0 then."""
+    if not any(name.endswith(OUTPUT) for name, _ in model.tensors):
+        return 0.0
+    if model.gguf_tensor_bytes:
+        scale = weights_gb * GB / sum(model.gguf_tensor_bytes.values())
+        sizes = {name: size * scale for name, size in model.gguf_tensor_bytes.items()}
+    elif gguf_type in BASE_TYPE:
+        heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
+        sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
+    else:
+        return 0.0
+    return sum(size for name, size in sizes.items() if name.endswith(EMBEDDING)) / GB
 
 
 def experts_to_ram(

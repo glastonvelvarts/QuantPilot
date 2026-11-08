@@ -1,0 +1,19 @@
+╭──────────────────────────────────────────────────────────────────────── Feasibility ─────────────────────────────────────────────────────────────────────────╮
+│ Qwen/Qwen2.5-1.5B-Instruct-AWQ                                                                                                                               │
+│ Params: 1.78B | Use case: Instruction following, chat                                                                                                        │
+│ Sizes: already quantized (AWQ 4-bit), shown as stored. Quantize the original model to compare formats                                                        │
+│ Facts: parameters cross-checked, context memory exact, quantization cross-checked (sources: ocq inspect)                                                     │
+│ Context: 32768 tokens                                                                                                                                        │
+│ Free right now: 7.49 GB VRAM, 10.65 GB RAM                                                                                                                   │
+│ Best fit: Perfect (gpu) @ AWQ 4-bit (as stored), 1.80 of 6.80 GB (26%)                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+     By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same tensor math)     
+┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┓
+┃ Level                 ┃ Backend  ┃ Bits ┃ Weights ┃ Context ┃ Needs ┃ Fit     ┃ Runs on ┃  tok/s ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━┩
+│ AWQ 4-bit (as stored) │ original │ 5.17 │    1.07 │    0.73 │  1.80 │ Perfect │ gpu     │ <= 192 │
+└───────────────────────┴──────────┴──────┴─────────┴─────────┴───────┴─────────┴─────────┴────────┘
+vLLM's default share is 92% of the GPU's 8.0 GB (the installed vLLM); 7.5 GB is free, about 6.9 GB once vLLM has started CUDA. Rated at --gpu-memory-utilization
+0.85, the highest that starts.
+<= limit set by memory bandwidth. The real speed is lower and gets learned from benchmark runs on this PC (ocq optimize --execute).
+7675 MiB

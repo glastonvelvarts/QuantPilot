@@ -191,3 +191,101 @@ quantization on this GPU): 5 passed.
 
   The expected speeds, fitted to this PC's earlier runs, are 12–25% high on all three models
   quantized this session (Qwen2.5 1.5B: 98.4 vs about 125).
+
+## Mac side, 2026-11-08 (branch `phase-4-nvidia-fixes`)
+
+Fixed: 1 (expert tensors of a GGUF were counted twice: `--n-cpu-moe` 6 → 11 for gpt-oss), 2 (CUDA
+context, now for every runtime), 3, 4, 5, 9, 10, 11, 13. llama.cpp on a separate GPU is now
+budgeted as stock llama.cpp b11429 does: 0.55 GB CUDA context, 1 GB `--fit-target` headroom per
+card (none with `--n-cpu-moe`), input embeddings in RAM, llama-server's buffers (an upper bound
+of all 18 runs in `server/`, at most 90 MiB over).
+
+To re-test on the NVIDIA PC: `feasibility` of gpt-oss-20b (expect `--n-cpu-moe 11`, and whether
+it runs without spilling), Qwen2.5-7B at 131k (layers on the GPU vs QuantPilot's 15 of 29),
+and vLLM at `--gpu-memory-utilization` 0.8 (now rated for vLLM).
+
+Still open: 6 (verify does not predict llama.cpp's own layer split), 7 (Gemma's extra 0.02–0.05
+MiB on CUDA), 8 (llama.cpp crash, Granite MoE + q8_0 at 16k), 12 (did not fail in 30 runs under
+load on the Mac), and llama-server's working memory for MLA models (DeepSeek reserved 754 MiB at
+64k on the Mac, more than the estimate).
+
+## NVIDIA PC re-test of `phase-4-nvidia-fixes`, 2026-11-08
+
+`retest/`. 354 tests pass on Windows, ruff clean.
+
+**gpt-oss-20b: fixed.** `feasibility` gives `--n-cpu-moe 11`, for the local file and for
+`ggml-org/gpt-oss-20b-GGUF`. With 11, llama.cpp needs 7,030 MiB (6,500 weights + 114 KV + 416
+compute, llama-completion at 4k) of the 7,106 MiB it sees free, 60 MiB left; verify matches
+(KV +0.00, GPU weights -0.03, CPU +0.00). With 10 it needs 7,434 MiB and 0 MiB is left, so 11 is
+the first that fits. llama-bench, tok/s:
+
+| `--n-cpu-moe` | prompt | generate |
+|---|---|---|
+| 10 | 474.1 ± 28.7 | 17.9 ± 0.3 |
+| 11 | 449.1 ± 13.0 | 16.4 ± 0.2 |
+| 12 | 444.8 ± 2.1 | 14.9 ± 0.6 |
+
+No drop at 11 that would show a spill. Every run today was about 15% slower than the first session
+(10 gave 21.2 / 545 then), on AC power; not found why. The shown `<= 70` is far above 16.4.
+
+**Qwen2.5-7B Q4_K_M at 131k: one layer off.** llama.cpp puts 14/29 layers on the GPU (2,172 MiB
+weights, 3,328 MiB of the KV cache, 426 compute; 1,164 MiB left free). QuantPilot's share is
+0.5155 of 29 = 14.95 layers. The KV cache matches (7,168.00). The speed bound went from `<= 45` to
+`<= 29`; measured at 14 layers: 13.72 ± 0.46.
+
+**vLLM (Qwen/Qwen2.5-1.5B-Instruct-AWQ, WSL2): fixed, one new gap.**
+- At the default 0.92 vLLM fails as before (6.88 GiB free after its CUDA context), and QuantPilot
+  now says so: Too Tight, "7.5 GB is free, about 6.9 GB once vLLM has started CUDA".
+- The AWQ row is rated for vLLM, and its weights are 1.07 GB without the tied `lm_head` copy;
+  vLLM logs `Model loading took 1.1 GiB`.
+- At 0.8 vLLM starts every time: KV 4.5 GiB → 168,576 tokens at 4k; at 32k f16 4.47 GiB →
+  167,408 tokens, fp8 4.47 GiB → 335,104 tokens (2.00×).
+- **Gap:** `feasibility` has no way to rate at 0.8, so on an 8 GB card every vLLM row is Too Tight
+  although vLLM serves it at 0.8 (also the AWQ / GPTQ rows of `meta-llama/Llama-3.2-1B-Instruct`).
+  It could take `--gpu-memory-utilization`, or rate at the highest share that starts and name the
+  flag, as it does for `--n-cpu-moe`.
+- Small: the header then reads "1.47 of 0.00 GB (999%)".
+
+**Gated repos: fixed.** `meta-llama/Llama-3.1-8B-Instruct` (not accepted) gives the new message
+with the license link (`retest/llama-gated.txt`). Meta has accepted this account for Llama 3.2 1B
+now; `feasibility` of it works.
+
+**`ocq models`: fixed.** 10 models, all text generation (`retest/models.txt`).
+
+## Mac side, after the re-test
+
+- **vLLM on an 8 GB card:** when vLLM's default share is not free, or does not hold the model,
+  `feasibility` now rates the vLLM rows at the highest lower share that starts, in 0.05 steps,
+  and names it: "Rated at --gpu-memory-utilization 0.85, the highest that starts". On the
+  laptop (7,689 MiB free) `Qwen/Qwen2.5-1.5B-Instruct-AWQ` is Perfect at 0.85, 1.47 of 6.80 GB.
+  It also picks tensor parallel at a lower share when one busy card blocks the default.
+- **Header:** "1.47 of 0.00 GB (999%)" now reads "needs 1.47 GB, none is free for it".
+- **Re-test:** 0.80 was measured, 0.85 was not. Run vLLM at 0.85 (4k and 32k, f16 and fp8 KV)
+  and check it starts and the KV token count, then `feasibility` of the AWQ and
+  `meta-llama/Llama-3.2-1B-Instruct` AWQ / GPTQ rows.
+- **Still open:** the Qwen 7B 131k layer split (14 placed, 14.95 predicted), item 6.
+
+## NVIDIA PC re-test of `0ba7c29` (vLLM at the highest share that starts), 2026-11-08
+
+`retest-2/`. 356 tests pass on Windows, ruff clean. `scripts/vllm_check.sh` takes `SHARE=0.85`.
+
+**vLLM at 0.85: starts, fixed.** Qwen/Qwen2.5-1.5B-Instruct-AWQ, WSL2, 7,630-7,689 MiB free:
+
+| run | vLLM | KV cache | tokens |
+|---|---|---|---|
+| default (0.92) | fails: 6.88 GiB free < 7.36 | - | - |
+| 0.85, 4k | starts | 4.9 GiB | 183,552 |
+| 0.85, 32k, f16 | starts | 4.87 GiB | 182,384 |
+| 0.85, 32k, fp8 (Triton) | starts | 4.87 GiB | 365,056 (2.00×) |
+
+4.87 GiB / 182,384 tokens = 28,671 B per token (vLLM prints GiB to two decimals), QuantPilot
+28,672. vLLM sees 6.88 GiB free and 0.85 asks for 6.8 GiB: 0.08 GiB of room. QuantPilot's note
+says "about 6.9-7.0 GB once vLLM has started CUDA".
+
+`feasibility` of the AWQ repo at each setting: Perfect at 0.85, "1.47 of 6.80 GB (22%)" at 4k,
+2.23 at 32k f16, 1.80 at 32k fp8, with "Rated at --gpu-memory-utilization 0.85, the highest
+that starts".
+
+**Llama-3.2-1B-Instruct AWQ / GPTQ rows: fixed.** Perfect (gpu) at 0.85, on Windows (`vLLM
+v0.32.0` default, vLLM not installed) and in WSL2 (the installed vLLM's): AWQ 4-bit 1.33, GPTQ
+4-bit 1.33, GPTQ 8-bit 1.81 GB. Before: Too Tight, unfit.

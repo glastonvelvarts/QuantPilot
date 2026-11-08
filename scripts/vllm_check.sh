@@ -2,13 +2,16 @@
 # Start vLLM once per setting, keep its start-up log, stop it when it serves (Linux or WSL2).
 #   bash scripts/vllm_check.sh <results folder> [model]
 # Each run also saves what QuantPilot predicted (ocq feasibility) next to vLLM's log.
-# VENV=<folder> uses the ocq and vllm of that virtual environment; ONLY=<name> runs one setting.
+# VENV=<folder> uses the ocq and vllm of that virtual environment; ONLY=<name> runs one setting;
+# SHARE=<0.xx> is the --gpu-memory-utilization of the runs after the default one (0.8).
 set -u
 [ -n "${VENV:-}" ] && PATH="$VENV/bin:$PATH"
 # HF_TOKEN for gated models and faster downloads, from the repo's .env when there is one.
 [ -f .env ] && { set -a; . ./.env; set +a; }
 out="$1/vllm"
 model="${2:-Qwen/Qwen2.5-1.5B-Instruct-AWQ}"
+share="${SHARE:-0.8}"
+util="util${share#0.}"
 mkdir -p "$out"
 nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free,compute_cap --format=csv > "$out/gpu.csv"
 start_free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)
@@ -42,6 +45,6 @@ run() {
 }
 
 run default-4k "--max-model-len 4096" -c 4096
-run util80-4k "--max-model-len 4096 --gpu-memory-utilization 0.8" -c 4096
-run util80-fp8-kv-32k "--max-model-len 32768 --gpu-memory-utilization 0.8 --kv-cache-dtype fp8 --attention-backend TRITON_ATTN" -c 32768 --kv-cache q8_0
-run util80-f16-kv-32k "--max-model-len 32768 --gpu-memory-utilization 0.8 --attention-backend TRITON_ATTN" -c 32768
+run $util-4k "--max-model-len 4096 --gpu-memory-utilization $share" -c 4096
+run $util-fp8-kv-32k "--max-model-len 32768 --gpu-memory-utilization $share --kv-cache-dtype fp8 --attention-backend TRITON_ATTN" -c 32768 --kv-cache q8_0
+run $util-f16-kv-32k "--max-model-len 32768 --gpu-memory-utilization $share --attention-backend TRITON_ATTN" -c 32768

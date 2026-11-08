@@ -1,0 +1,33 @@
+╭──────────────────────────────────────────────────────────────────────── Feasibility ─────────────────────────────────────────────────────────────────────────╮
+│ meta-llama/Llama-3.2-1B-Instruct                                                                                                                             │
+│ Params: 1.24B | Use case: Instruction following, chat                                                                                                        │
+│ Sizes: exact, computed from the model's tensor shapes                                                                                                        │
+│ Facts: parameters cross-checked, context memory cross-checked (sources: ocq inspect)                                                                         │
+│ Context: 4096 tokens                                                                                                                                         │
+│ Free right now: 7.42 GB VRAM, 10.69 GB RAM                                                                                                                   │
+│ Best fit: Perfect (gpu) @ Q8_0, 1.49 of 5.87 GB (25%)                                                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+             By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same tensor math)              
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┓
+┃ Level            ┃ Backend                       ┃  Bits ┃ Weights ┃ Context ┃ Needs ┃ Fit     ┃ Runs on ┃  tok/s ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━┩
+│ BF16             │ original                      │ 16.00 │    2.30 │    0.37 │  2.67 │ Perfect │ gpu     │  <= 77 │
+│ Q8_0             │ gguf (install --extra gguf)   │  8.50 │    1.22 │    0.27 │  1.49 │ Perfect │ gpu     │ <= 146 │
+│ Q6_K             │ gguf (install --extra gguf)   │  6.56 │    0.94 │    0.27 │  1.22 │ Perfect │ gpu     │ <= 188 │
+│ Q5_K_M           │ gguf (install --extra gguf)   │  5.85 │    0.84 │    0.27 │  1.11 │ Perfect │ gpu     │ <= 211 │
+│ Q4_K_M           │ gguf (install --extra gguf)   │  5.18 │    0.74 │    0.27 │  1.02 │ Perfect │ gpu     │ <= 239 │
+│ Q3_K_M           │ gguf (install --extra gguf)   │  4.42 │    0.64 │    0.27 │  0.91 │ Perfect │ gpu     │ <= 280 │
+│ Q2_K             │ gguf (install --extra gguf)   │  3.71 │    0.53 │    0.27 │  0.81 │ Perfect │ gpu     │ <= 333 │
+│ AWQ 4-bit        │ awq (install --extra awq)     │  6.70 │    0.96 │    0.37 │  1.33 │ Perfect │ gpu     │ <= 185 │
+│ GPTQ 4-bit       │ gptq (install --extra gptq)   │  6.70 │    0.96 │    0.37 │  1.33 │ Perfect │ gpu     │ <= 185 │
+│ GPTQ 8-bit       │ gptq (install --extra gptq)   │ 10.00 │    1.44 │    0.37 │  1.81 │ Perfect │ gpu     │ <= 124 │
+│ BNB 4-bit single │ bnb (install --extra bnb)     │  6.94 │    1.00 │    0.37 │  1.37 │ Perfect │ gpu     │ <= 178 │
+│ BNB 4-bit double │ bnb (install --extra bnb)     │  6.65 │    0.96 │    0.37 │  1.33 │ Perfect │ gpu     │ <= 186 │
+│ BNB 8-bit        │ bnb (install --extra bnb)     │  9.71 │    1.40 │    0.37 │  1.77 │ Perfect │ gpu     │ <= 127 │
+│ NVFP4 4-bit      │ nvfp4 (install --extra nvfp4) │  6.94 │    1.00 │    0.37 │  1.37 │ Perfect │ gpu     │ <= 178 │
+└──────────────────┴───────────────────────────────┴───────┴─────────┴─────────┴───────┴─────────┴─────────┴────────┘
+vLLM's default share is 92% of the GPU's 8.0 GB (the installed vLLM); 7.4 GB is free, about 6.9 GB once vLLM has started CUDA. Rated at --gpu-memory-utilization
+0.85, the highest that starts.
+BNB single/double: double quantization also stores the 4-bit scales in 8 bits instead of 32 (--double-quant / --single-quant).
+NVFP4: no FP4 tensor cores on this GPU (Blackwell has them), vLLM runs it weights only at about AWQ speed.
+<= limit set by memory bandwidth. The real speed is lower and gets learned from benchmark runs on this PC (ocq optimize --execute).

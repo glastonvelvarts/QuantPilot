@@ -155,7 +155,7 @@ def ollama_model(root: Path, name: str, manifest_file: Path) -> LocalModel:
     complete = bool(weights) and all(blob_ok(root, layer) for layer in weights)
     if model:
         blob = blob_path(root, model[0].get("digest", "")) or manifest_file
-        quant = gguf_quantization(blob) if complete else ""
+        quant = gguf_quantization(blob)[0] if complete else ""
         return LocalModel(name, f"ollama:{name}", OLLAMA, blob, GGUF, quant, size, complete, note)
     if tensors:
         quant = ollama_mlx_label(root, tensors) if complete else ""
@@ -436,13 +436,60 @@ def folder_tree_models(root: Path) -> list[LocalModel]:
     return models
 
 
+# Models that write text. Encoders (BertModel), speech recognition (Nemotron ...ForRNNT,
+# ...ForCTC, Whisper) and sentence-transformers packages are not LLMs QuantPilot can rate.
+GENERATIVE = ("ForCausalLM", "LMHeadModel", "ForConditionalGeneration")
+SPEECH_TYPES = {
+    "whisper",
+    "speech_to_text",
+    "speech-encoder-decoder",
+    "seamless_m4t",
+    "seamless_m4t_v2",
+    "moonshine",
+}
+# GGUF architectures that are not a language model: vision projectors, draft models, encoders.
+NOT_LLM_GGUF = {
+    "clip",
+    "eagle3",
+    "bert",
+    "nomic-bert",
+    "nomic-bert-moe",
+    "jina-bert-v2",
+    "jina-bert-v3",
+    "neo-bert",
+    "modern-bert",
+    "t5encoder",
+    "wavtokenizer-dec",
+}
+
+
+def writes_text(folder: Path) -> bool:
+    """A transformers-style folder of a text generating model, judged by its config.json.
+
+    A config without architectures counts when it names a model type; CTranslate2 Whisper
+    folders name neither.
+    """
+    if (folder / "modules.json").is_file():  # sentence-transformers: an embedding model
+        return False
+    try:
+        config = read_json(folder / "config.json")
+    except OcqError:
+        return True  # listed, and inspect says what is wrong with it
+    if str(config.get("model_type", "")) in SPEECH_TYPES:
+        return False
+    architectures = config.get("architectures")
+    if architectures:
+        return any(str(name).endswith(GENERATIVE) for name in architectures)
+    return bool(config.get("model_type"))
+
+
 def folder_models(
     folder: Path, label: str, source: str, ref: str | None = None
 ) -> list[LocalModel]:
     """The models one folder holds: its GGUF files, or a transformers-style checkpoint."""
     if gguf_files(folder):
         return gguf_models(folder, label, source)
-    if not (folder / "config.json").is_file():
+    if not (folder / "config.json").is_file() or not writes_text(folder):
         return []
     try:
         files = weight_files(folder)
@@ -477,7 +524,9 @@ def gguf_models(folder: Path, label: str, source: str) -> list[LocalModel]:
         first = files[0]
         split = SPLIT_PART.search(first.name)
         complete = not split or len(files) == int(split.group(2))
-        quant = gguf_quantization(first)
+        quant, language_model = gguf_quantization(first)
+        if not language_model:
+            continue
         models.append(
             LocalModel(
                 f"{label}/{name}" if label else name,
@@ -501,12 +550,17 @@ def gguf_models(folder: Path, label: str, source: str) -> list[LocalModel]:
 # Reading what a model is -------------------------------------------------------------------
 
 
-def gguf_quantization(path: Path) -> str:
-    """The file type its header names, for example Q4_K_M."""
+def gguf_quantization(path: Path) -> tuple[str, bool]:
+    """The file type its header names, for example Q4_K_M, and whether it is a language model:
+    an architecture with layers (block_count) that is not an encoder, projector or draft."""
     try:
-        return read_local(path).file_type or "?"
+        header = read_local(path)
     except OcqError:
-        return "unreadable"
+        return "unreadable", True
+    language_model = (
+        header.architecture not in NOT_LLM_GGUF and header.get("block_count") is not None
+    )
+    return header.file_type or "?", language_model
 
 
 def safetensors_quantization(folder: Path) -> str:

@@ -402,7 +402,7 @@ GGUF_NAMES = [
     ),
     (
         re.compile(r"^blk\.(\d+)\.ffn_(gate|up|down)_exps\.(.+)$"),
-        r"model.layers.\1.mlp.experts.\2_proj",
+        r"model.layers.\1.mlp.experts.\2_proj.\3",
     ),
     (
         re.compile(r"^blk\.(\d+)\.ffn_(gate|up|down)_shexp\.(.+)$"),

@@ -359,10 +359,10 @@ def cmd_verify(
         )
     console.print(table)
     console.print(
-        f"Working memory llama.cpp reserved (not predicted yet): "
-        f"{log.gpu_compute_mib:,.2f} MiB on the GPU, {log.cpu_compute_mib:,.2f} MiB on the CPU, "
-        f"{log.output_mib:,.2f} MiB for the logits (llama-completion; llama-server reserves less, "
-        "it keeps 4 rows of logits instead of 512)"
+        f"Working memory llama.cpp reserved: {log.gpu_compute_mib:,.2f} MiB on the GPU, "
+        f"{log.cpu_compute_mib:,.2f} MiB on the CPU, {log.output_mib:,.2f} MiB for the logits. "
+        "This is llama-completion's; QuantPilot plans for llama-server, which reserves less "
+        "(an upper bound of it is in the context column of ocq feasibility)."
     )
     if save_log:
         console.print(f"[dim]llama.cpp's log: {save_log}[/dim]")
@@ -549,9 +549,7 @@ def cmd_feasibility(
             f"Free right now: {hw.free_vram_gb:.2f} GB VRAM{gpu_note(hw)}, "
             f"{hw.available_ram_gb:.2f} GB RAM\n"
             f"Best fit: {colored_fit(fit.fit_level)} ({mode_label(fit.run_mode)}) "
-            f"@ {fit.quant_label}, "
-            f"{fit.memory_required_gb:.2f} of {fit.memory_available_gb:.2f} GB "
-            f"({fit.utilization_pct:.0f}%)",
+            f"@ {fit.quant_label}, {fit.memory_text}",
             title="Feasibility",
         )
     )
@@ -588,7 +586,18 @@ def cmd_feasibility(
             "tensor names show no separate k_proj/v_proj. Fit and Needs count the weights only, "
             "so no row is rated better than Marginal.[/dim]"
         )
-    if any(option.experts_in_ram for option in options):
+    if snapshot.gguf_files and any(option.experts_in_ram for option in options):
+        # ocq plan does not take a GGUF repo, so the flag is given here.
+        flags = ", ".join(
+            f"{option.label}: --n-cpu-moe {option.experts_in_ram}"
+            for option in options
+            if option.experts_in_ram
+        )
+        console.print(
+            f"[dim]gpu+ram (experts): run llama.cpp with the experts of the first layers in "
+            f"RAM ({flags}).[/dim]"
+        )
+    elif any(option.experts_in_ram for option in options):
         console.print(
             "[dim]gpu+ram (experts): llama.cpp only (--n-cpu-moe, see ocq plan). The AWQ, GPTQ, "
             "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "

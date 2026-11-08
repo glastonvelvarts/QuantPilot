@@ -168,6 +168,7 @@ SPEC_BANDWIDTH = {
     "NVIDIA GeForce RTX 3090": 936.0,
     "NVIDIA GeForce RTX 3060": 360.0,
     "NVIDIA GeForce RTX 4090": 1008.0,
+    "NVIDIA GeForce RTX 4060 Laptop GPU": 272.0,
 }
 
 

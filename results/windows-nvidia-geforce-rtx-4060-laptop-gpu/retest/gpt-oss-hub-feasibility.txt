@@ -1,0 +1,8 @@
+      The repo's GGUF files, sizes in GB (run with llama.cpp, Ollama or LM Studio)       
+┌───────┬─────────┬──────┬─────────┬─────────┬───────┬──────┬───────────────────┬───────┐
+│ Level │ Backend │ Bits │ Weights │ Context │ Needs │ Fit  │ Runs on           │ tok/s │
+├───────┼─────────┼──────┼─────────┼─────────┼───────┼──────┼───────────────────┼───────┤
+│ MXFP4 │ gguf    │ 4.63 │   11.27 │    0.33 │ 11.59 │ Good │ gpu+ram (experts) │ <= 70 │
+└───────┴─────────┴──────┴─────────┴─────────┴───────┴──────┴───────────────────┴───────┘
+gpu+ram (experts): run llama.cpp with the experts of the first layers in RAM (MXFP4: --n-cpu-moe 11).
+<= limit set by memory bandwidth. The real speed is lower and gets learned from benchmark runs on this PC (ocq optimize --execute).

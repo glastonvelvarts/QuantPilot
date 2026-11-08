@@ -93,6 +93,7 @@ def test_quant_type_is_read_from_the_file_name(name, quant):
 
 import gzip  # noqa: E402
 import json  # noqa: E402
+from dataclasses import replace  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from ocq.gguf_file import (  # noqa: E402
@@ -103,6 +104,7 @@ from ocq.gguf_file import (  # noqa: E402
 )
 from ocq.model_analyzer import (  # noqa: E402
     build_snapshot,
+    experts_to_ram,
     gguf_variants,
     model_header,
     pick_gguf_file,
@@ -204,3 +206,88 @@ def test_draft_models_next_to_a_model_are_left_out():
     assert chosen == "gpt-oss-20b-MXFP4.gguf" and found.architecture == "gpt-oss"
     assert kept == ["gpt-oss-20b-MXFP4.gguf"]
     assert read == ["eagle3-gpt-oss-20b-BF16.gguf", "gpt-oss-20b-MXFP4.gguf"]
+
+
+def test_expert_weights_and_biases_of_a_gguf_are_counted_once():
+    # gpt-oss stores a bias next to each expert tensor (ffn_down_exps.weight and .bias). Both
+    # were named mlp.experts.down_proj, so every layer's experts were counted twice and
+    # --n-cpu-moe came out too small: 6 where the RTX 4060 (7.5 GB free) needed 10.
+    header, _ = real_header("gpt-oss-20b-MXFP4")
+    tensors = hf_style_tensors(header)
+    assert len({name for name, _ in tensors}) == len(tensors)
+
+    snap = build_snapshot("gpt-oss", {}, config_from_gguf(header), tensors, None)
+    sizes = {name: t.nbytes for (name, _), t in zip(tensors, header.tensors, strict=True)}
+    snap = replace(snap, gguf_tensor_bytes=sizes)
+    layers, moved_gb = experts_to_ram(snap, "MXFP4", too_much_gb=2.3, ram_gb=100)
+    assert layers == 6
+    # llama.cpp b11429 on CUDA with --n-cpu-moe 6: "CUDA0 model buffer size = 8522.54 MiB",
+    # everything but the input embeddings and the experts of the first 6 layers.
+    embeddings = next(t.nbytes for t in header.tensors if t.name == "token_embd.weight")
+    on_gpu = sum(sizes.values()) - embeddings - moved_gb * 2**30
+    assert on_gpu / 2**20 == pytest.approx(8522.54, abs=0.03)
+
+
+def test_feasibility_of_a_gguf_repo_gives_the_n_cpu_moe_flag(monkeypatch):
+    # ocq plan refuses a GGUF repo ("already GGUF"), so feasibility has to give the N itself.
+    from conftest import nvidia_pc
+    from typer.testing import CliRunner
+
+    from ocq import cli
+    from ocq.model_analyzer import gguf_snapshot
+
+    header, file_size = real_header("gpt-oss-20b-MXFP4")
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    files = [("MXFP4", header.data_bytes)]
+    snap = gguf_snapshot("ggml-org/gpt-oss-20b-GGUF", {}, header, files, file_size, True)
+    monkeypatch.setattr(cli, "detect_hardware", lambda _bin: laptop)
+    monkeypatch.setattr(cli, "resolve_model", lambda *a, **k: snap)
+    result = CliRunner().invoke(cli.app, ["feasibility", snap.model_id], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "MXFP4: --n-cpu-moe" in result.output
+    assert "see ocq plan" not in result.output
+
+
+# llama-server b11429 on an RTX 4060 Laptop, 4 conversations: GPU compute buffer + output
+# buffer, MiB, at 4096 and 16384 tokens (results/windows-nvidia-.../server/summary.md).
+LLAMA_SERVER_CUDA = {
+    "Falcon-H1-0.5B-Instruct-IQ1_M": (31.64 + 0.50, 43.64 + 0.50),
+    "gemma-2-2b-it-IQ3_M": (80.02 + 3.91, 104.02 + 3.91),
+    "gemma-3-1b-it-Q2_K": (56.02 + 4.00, 68.02 + 4.00),
+    "gpt-oss-20b-MXFP4": (206.99 + 3.07, 218.99 + 3.07),
+    "granite-3.1-1b-a400m-instruct-Q2_K": (44.01 + 0.75, 56.01 + 0.75),
+    "granite-4.0-h-350m-Q2_K": (29.69 + 1.53, 41.69 + 1.53),
+    "jamba-reasoning-3b-Q4_K_M": (76.25 + 1.00, 88.25 + 1.00),
+    "LFM2-350M-Q4_0": (39.01 + 1.00, 51.01 + 1.00),
+    "olmoe-1b-7b-0924-instruct-q2_k": (84.01 + 0.77, 96.01 + 0.77),
+}
+
+
+@pytest.mark.parametrize("stem", sorted(LLAMA_SERVER_CUDA))
+def test_llama_server_working_memory_is_an_upper_bound_of_the_measured(stem):
+    from ocq.model_analyzer import working_bytes
+    from ocq.types import LLAMA_CPP
+
+    header, _ = real_header(stem)
+    snap = build_snapshot(stem, {}, config_from_gguf(header), hf_style_tensors(header), None)
+    for context, measured in zip((4096, 16384), LLAMA_SERVER_CUDA[stem], strict=True):
+        predicted = working_bytes(snap, context, LLAMA_CPP) / 2**20
+        assert measured <= predicted <= measured + 91, (context, predicted, measured)
+
+
+def test_gpt_oss_on_the_rtx_4060_keeps_11_layers_of_experts_in_ram():
+    # 7,610 MiB free, 7,106 once llama.cpp has started CUDA. GPU side: the weights but the
+    # input embeddings (in RAM) and the experts of N layers, the cache, llama-server's buffers.
+    # --n-cpu-moe 6 (the old plan) put 8,522 MiB of weights alone on the card.
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+    from ocq.types import RunMode
+
+    header, file_size = real_header("gpt-oss-20b-MXFP4")
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    files = [("MXFP4", header.data_bytes)]
+    snap = gguf_snapshot("ggml-org/gpt-oss-20b-GGUF", {}, header, files, file_size, True)
+    (row,) = quant_options(snap, laptop)
+    assert row.run_mode == RunMode.GPU_EXPERTS_RAM
+    assert row.experts_in_ram == 11
