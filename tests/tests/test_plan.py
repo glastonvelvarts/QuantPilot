@@ -127,11 +127,11 @@ def test_plan_says_the_context_memory_is_unknown(tmp_path, qwen_tensors):
 
 
 def test_plan_says_how_the_gpus_are_used():
-    from conftest import QWEN_72B, RTX_3090, RTX_3090_BUSY, nvidia_pc, real_model
+    from conftest import QWEN_72B, RTX_3090, nvidia_pc, real_model
 
     from ocq.model_analyzer import build_snapshot
 
-    two = nvidia_pc(RTX_3090, RTX_3090_BUSY)
+    two = nvidia_pc(RTX_3090, RTX_3090)
     meta, config, tensors, dtypes = real_model(QWEN_72B)
     model = build_snapshot(QWEN_72B, meta, config, tensors, two, dtypes=dtypes)
     awq = QuantChoices(algorithm=QuantAlgorithm.AWQ)

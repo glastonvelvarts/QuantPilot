@@ -493,15 +493,33 @@ def test_72b_runs_fully_on_two_3090s_split_by_layers():
 
 
 def test_awq_on_two_3090s_is_tensor_parallel_and_reads_twice_as_fast():
-    two = nvidia_pc(RTX_3090, RTX_3090_BUSY)
+    two = nvidia_pc(RTX_3090, RTX_3090)
     snap = real_snapshot(QWEN_72B, two)
     awq = options_by_label(snap, two)["AWQ 4-bit"]
     assert awq.gpu_split == TENSOR_PARALLEL
     # vLLM works with 92% of each card's total (24 GiB), not what is free, as long as that much
-    # is free on both (23.44 and 22.46 GiB are).
+    # is free on both once vLLM has its CUDA context: 23.44 - 0.55 >= 22.08 GiB.
     assert awq.memory_available_gb == pytest.approx(2 * 0.92 * 24)
     read_gb = awq.weights_gb * snap.read_fraction
     assert awq.estimated_tps == pytest.approx(2 * 936e9 / 1024**3 / read_gb, abs=0.1)
+
+
+def test_vllm_needs_its_cuda_context_free_on_top_of_its_share():
+    # The second card has 22.46 GiB free, more than 0.92 x 24 = 22.08 GiB, but vLLM measures
+    # after creating its CUDA context (0.55 GiB): 21.91 left, so it does not start on that card
+    # and tensor parallel over both is out. One card is used.
+    two = nvidia_pc(RTX_3090, RTX_3090_BUSY)
+    awq = options_by_label(real_snapshot(QWEN_72B, two), two)["AWQ 4-bit"]
+    assert awq.gpu_count == 1
+    assert awq.memory_available_gb == pytest.approx(0.92 * 24)
+
+
+def test_vllm_at_its_default_never_starts_on_an_8_gb_card():
+    # RTX 4060 Laptop, 7,610 MiB free: vLLM saw 6.88 GiB and refused 0.92 x 8 = 7.36 GiB.
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    awq = options_by_label(real_snapshot(QWEN_72B, laptop), laptop)["AWQ 4-bit"]
+    assert awq.fit_level == FitLevel.TOO_TIGHT
+    assert "7.4 GB is free, about 6.9 GB once vLLM has started CUDA" in awq.note
 
 
 def test_vllm_does_not_start_when_its_share_of_the_gpu_is_not_free(qwen_tensors):
@@ -511,7 +529,7 @@ def test_vllm_does_not_start_when_its_share_of_the_gpu_is_not_free(qwen_tensors)
     awq = options["AWQ 4-bit"]
     assert awq.fit_level == FitLevel.TOO_TIGHT
     assert "vLLM starts only with 92% of the GPU's 24.0 GB free" in awq.note
-    assert "22.0 GB is free" in awq.note
+    assert "22.0 GB is free, about 21.4 GB once vLLM has started CUDA" in awq.note
     # llama.cpp has no such rule: the same PC runs the GGUF rows.
     assert options["Q4_K_M"].fit_level == FitLevel.PERFECT
 

@@ -46,7 +46,7 @@ from ocq.model_size import (
     stored_bytes,
     weights_per_token,
 )
-from ocq.runtimes import vllm_budget, vllm_card_budget_gb
+from ocq.runtimes import VLLM_CUDA_CONTEXT_GB, vllm_budget, vllm_card_budget_gb
 from ocq.types import (
     CONVERSATIONS,
     DTYPE_BITS,
@@ -1530,8 +1530,9 @@ def fit_at(
         note = (
             f"vLLM starts only with {vllm_rule.utilization:.0%} of the GPU's "
             f"{card.vram_gb:.1f} GB free ({vllm_rule.source}); "
-            f"{hardware.card_free_gb(card):.1f} GB is free. Lower --gpu-memory-utilization "
-            "or close what else uses the GPU."
+            f"{hardware.card_free_gb(card):.1f} GB is free, about "
+            f"{hardware.card_free_gb(card) - VLLM_CUDA_CONTEXT_GB:.1f} GB once vLLM has started "
+            "CUDA. Lower --gpu-memory-utilization or close what else uses the GPU."
         )
     if pool and pool.split == LAYER_SPLIT:
         # Layers on a slower card slow every token down. When the model fits on the best card
