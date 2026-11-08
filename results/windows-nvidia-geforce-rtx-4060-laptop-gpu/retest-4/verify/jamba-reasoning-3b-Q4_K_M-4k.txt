@@ -1,0 +1,14 @@
+local/jamba-reasoning-3b-Q4_K_M.gguf in llama.cpp: 4,096 tokens, 1 conversation(s), 29/29 layers on the GPU, cache K f16, V f16
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │       4.00 │      4.00 │      +0.00 │ ok │
+│ Mamba / convolution state       │       9.65 │      9.65 │      -0.00 │ ok │
+│ layers on the GPU               │         29 │        29 │         +0 │ ok │
+│ weights on the GPU              │   1,751.66 │  1,751.66 │      +0.00 │ ok │
+│ weights on the CPU (file range) │      90.00 │     90.00 │      +0.00 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama.cpp reserved: 177.01 MiB on the GPU, 24.02 MiB on the CPU, 0.25 MiB for the logits. This is llama-completion's; QuantPilot plans for 
+llama-server, which reserves less (an upper bound of it is in the context column of ocq feasibility).
+llama.cpp's log: C:\Users\glast\ocq-test\retest4\verify\jamba-reasoning-3b-Q4_K_M-4k.log

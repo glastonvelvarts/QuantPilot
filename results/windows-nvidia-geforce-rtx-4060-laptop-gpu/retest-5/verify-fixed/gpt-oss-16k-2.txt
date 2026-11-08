@@ -1,0 +1,13 @@
+local/gpt-oss-20b-MXFP4.gguf in llama.cpp: 16,384 tokens, 4 conversation(s), 25/25 layers on the GPU, experts of 10 layers in RAM, cache K f16, V f16
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │     408.00 │    408.00 │      +0.00 │ ok │
+│ weights on the GPU              │   6,904.65 │  6,904.65 │      -0.00 │ ok │
+│ weights on the CPU (file range) │   4,904.53 │  4,904.53 │      -0.00 │ ok │
+│ working memory (upper bound)    │     222.57 │    222.06 │      +0.51 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama-server reserved: 218.99 MiB on the GPU, 39.53 MiB on the CPU, 3.07 MiB for the logits. QuantPilot's estimate (in the context column of ocq
+feasibility) is an upper bound of the first and the last together.
+llama.cpp's log: C:\Users\glast\ocq-test\retest5\verify-fixed\gpt-oss-16k-2.log

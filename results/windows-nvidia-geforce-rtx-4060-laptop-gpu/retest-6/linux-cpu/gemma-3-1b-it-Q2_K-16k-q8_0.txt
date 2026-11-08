@@ -1,0 +1,12 @@
+local/gemma-3-1b-it-Q2_K.gguf in llama.cpp: 16,384 tokens, 4 conversation(s), on the CPU, no GPU, cache K q8_0, V q8_0
+            QuantPilot's prediction vs llama.cpp's own log (MiB)            
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━┓
+┃ Memory                        ┃ QuantPilot ┃ llama.cpp ┃ Difference ┃    ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━┩
+│ context cache (KV)            │      63.22 │     63.22 │      -0.00 │ ok │
+│ weights in RAM (file range)   │     651.63 │    651.63 │      -0.00 │ ok │
+│ weights repacked for this CPU │     242.68 │    242.68 │      +0.00 │ ok │
+└───────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama-server reserved: 0.00 MiB on the GPU, 70.81 MiB on the CPU, 4.00 MiB for the logits. QuantPilot's estimate (in the context column
+of ocq feasibility) is an upper bound of the first and the last together.
+llama.cpp's log: /mnt/c/Users/glast/ocq-test/fix/linux-cpu/gemma-3-1b-it-Q2_K-16k-q8_0.log

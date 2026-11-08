@@ -1,0 +1,15 @@
+local/granite-4.0-h-350m-Q2_K.gguf in llama.cpp: 16,384 tokens, 4 conversation(s), 33/33 layers on the GPU, cache K f16, V f16
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │      64.00 │     64.00 │      +0.00 │ ok │
+│ Mamba / convolution state       │      86.30 │     86.30 │      -0.00 │ ok │
+│ layers on the GPU               │         33 │        33 │         +0 │ ok │
+│ weights on the GPU              │     149.09 │    149.09 │      +0.00 │ ok │
+│ weights on the CPU (file range) │      60.29 │     60.29 │      +0.00 │ ok │
+│ working memory (upper bound)    │      53.53 │     43.22 │     +10.31 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama-server reserved: 41.69 MiB on the GPU, 22.02 MiB on the CPU, 1.53 MiB for the logits. QuantPilot's estimate (in the context column of ocq 
+feasibility) is an upper bound of the first and the last together.
+llama.cpp's log: C:\Users\glast\ocq-test\retest5\verify\granite-4.0-h-350m-Q2_K-16k.log

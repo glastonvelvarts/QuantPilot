@@ -1,0 +1,14 @@
+local/Falcon-H1-0.5B-Instruct-IQ1_M.gguf in llama.cpp: 4,096 tokens, 1 conversation(s), 37/37 layers on the GPU, cache K f16, V f16
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │      72.00 │     72.00 │      +0.00 │ ok │
+│ Mamba / convolution state       │      27.74 │     27.74 │      -0.00 │ ok │
+│ layers on the GPU               │         37 │        37 │         +0 │ ok │
+│ weights on the GPU              │     121.35 │    121.35 │      -0.00 │ ok │
+│ weights on the CPU (file range) │      10.51 │     10.51 │      -0.00 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama.cpp reserved: 76.05 MiB on the GPU, 12.02 MiB on the CPU, 0.13 MiB for the logits. This is llama-completion's; QuantPilot plans for 
+llama-server, which reserves less (an upper bound of it is in the context column of ocq feasibility).
+llama.cpp's log: C:\Users\glast\ocq-test\retest4\verify\Falcon-H1-0.5B-Instruct-IQ1_M-4k.log
