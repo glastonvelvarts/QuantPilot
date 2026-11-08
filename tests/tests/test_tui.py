@@ -521,3 +521,16 @@ def test_ctrl_c_quits(tmp_path: Path):
         assert not app.is_running
 
     run_app(tmp_path, steps)
+
+
+def test_progress_box_keeps_only_the_last_state_of_a_progress_bar():
+    from textual import events
+
+    log, lines = ProgressLog(), []
+    log.write = lambda text, **kwargs: lines.append(text.plain)
+    redraws = "\x1b[?25l\x1b[2KStarting 0%\x1b[2KStarting 50%\x1b[2KStarting done\n"
+    meters = "Fetching 14 files: 100%|####| 14/14\nDownload complete: :  |  0.00B\n"
+    for chunk in (redraws[:15], redraws[15:40], redraws[40:], meters, "\x1b[?25hConverting ...\n"):
+        log.on_print(events.Print(chunk))
+    log.flush()
+    assert lines == ["Starting done", "Converting ..."]

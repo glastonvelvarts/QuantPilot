@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from rich.markup import escape
@@ -129,23 +130,45 @@ class Card(Static):
 
 
 class ProgressLog(RichLog, can_focus=False):
-    """Progress lines printed by a long job (download, convert, quantize...)."""
+    """Progress lines printed by a long job (download, convert, quantize...).
+
+    Progress bars redraw their line, with \\r or with the "erase line" code that Rich uses;
+    only what such a line shows last is kept. `on_line` hears every finished line, so a page
+    can show the latest step above the box.
+    """
+
+    REDRAW = re.compile(r"\r|\x1b\[2K")
+    CURSOR = re.compile(r"\x1b\[\?25[hl]|\x1b\[\d*[ABCDG]")  # hide/show, moves
+    # Download and progress meters from libraries (Hugging Face, Rich): the steps QuantPilot
+    # prints say the same in words.
+    METER = re.compile(r"\|.*\||━|it/s|\d+(?:\.\d+)?\s?[kKMG]?i?B\b")
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(min_width=20, wrap=True, markup=False, **kwargs)
         self._partial = ""
+        self.on_line: Callable[[str], None] | None = None
 
     def on_print(self, event: events.Print) -> None:
         *lines, self._partial = (self._partial + event.text).split("\n")
+        self._partial = self._last(self._partial, keep_empty=True)  # do not let redraws pile up
         for line in lines:
-            line = line.split("\r")[-1].strip()  # progress bars redraw one line with \r
-            if line:
-                self.write(Text.from_ansi(line))
+            self._add(self._last(line))
 
     def flush(self) -> None:
-        if self._partial.strip():
-            self.write(Text.from_ansi(self._partial.split("\r")[-1].strip()))
+        self._add(self._last(self._partial))
         self._partial = ""
+
+    def _last(self, line: str, keep_empty: bool = False) -> str:
+        line = self.CURSOR.sub("", line)
+        parts = [part for part in self.REDRAW.split(line) if part.strip() or keep_empty]
+        return parts[-1] if parts else ""
+
+    def _add(self, line: str) -> None:
+        text = Text.from_ansi(line.strip())
+        if text.plain and not self.METER.search(text.plain):
+            self.write(text)
+            if self.on_line:
+                self.on_line(text.plain)
 
 
 # Pop-ups ----------------------------------------------------------------------------------
