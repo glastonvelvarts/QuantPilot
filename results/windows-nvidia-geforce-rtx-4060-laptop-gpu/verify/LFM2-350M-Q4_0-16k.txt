@@ -1,0 +1,13 @@
+local/LFM2-350M-Q4_0.gguf in llama.cpp: 16,384 tokens, 1 conversation(s), 17/17 layers on the GPU, cache K f16, V f16
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │     192.00 │    192.00 │      +0.00 │ ok │
+│ Mamba / convolution state       │       0.08 │      0.08 │      -0.00 │ ok │
+│ weights on the GPU              │     206.87 │    206.87 │      +0.00 │ ok │
+│ weights on the CPU (file range) │      52.50 │     52.50 │      +0.00 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama.cpp reserved (not predicted yet): 176.04 MiB on the GPU, 0.00 MiB on the CPU, 0.25 MiB for the logits (llama-completion; 
+llama-server reserves less, it keeps 4 rows of logits instead of 512)
+llama.cpp's log: C:\Users\glast\OneDrive\Desktop\quantPilot\results\windows-nvidia-geforce-rtx-4060-laptop-gpu\verify\LFM2-350M-Q4_0-16k.log

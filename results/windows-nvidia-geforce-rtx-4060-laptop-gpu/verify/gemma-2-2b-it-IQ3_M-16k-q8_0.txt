@@ -1,0 +1,13 @@
+local/gemma-2-2b-it-IQ3_M.gguf in llama.cpp: 16,384 tokens, 1 conversation(s), 27/27 layers on the GPU, cache K q8_0, V q8_0
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │     566.31 │    566.31 │      +0.00 │ ok │
+│ weights on the GPU              │   1,323.24 │  1,323.26 │      -0.02 │ ok │
+│ weights on the CPU (file range) │     461.43 │    461.43 │      -0.00 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama.cpp reserved (not predicted yet): 578.11 MiB on the GPU, 0.00 MiB on the CPU, 0.98 MiB for the logits (llama-completion; 
+llama-server reserves less, it keeps 4 rows of logits instead of 512)
+llama.cpp's log: 
+C:\Users\glast\OneDrive\Desktop\quantPilot\results\windows-nvidia-geforce-rtx-4060-laptop-gpu\verify\gemma-2-2b-it-IQ3_M-16k-q8_0.log

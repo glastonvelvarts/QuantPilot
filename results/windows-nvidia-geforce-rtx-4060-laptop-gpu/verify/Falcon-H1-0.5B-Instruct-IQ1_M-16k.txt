@@ -1,0 +1,14 @@
+local/Falcon-H1-0.5B-Instruct-IQ1_M.gguf in llama.cpp: 16,384 tokens, 1 conversation(s), 37/37 layers on the GPU, cache K f16, V f16
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │     288.00 │    288.00 │      +0.00 │ ok │
+│ Mamba / convolution state       │      27.74 │     27.74 │      -0.00 │ ok │
+│ weights on the GPU              │     121.35 │    121.35 │      -0.00 │ ok │
+│ weights on the CPU (file range) │      10.51 │     10.51 │      -0.00 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama.cpp reserved (not predicted yet): 112.07 MiB on the GPU, 0.00 MiB on the CPU, 0.13 MiB for the logits (llama-completion; 
+llama-server reserves less, it keeps 4 rows of logits instead of 512)
+llama.cpp's log: 
+C:\Users\glast\OneDrive\Desktop\quantPilot\results\windows-nvidia-geforce-rtx-4060-laptop-gpu\verify\Falcon-H1-0.5B-Instruct-IQ1_M-16k.log

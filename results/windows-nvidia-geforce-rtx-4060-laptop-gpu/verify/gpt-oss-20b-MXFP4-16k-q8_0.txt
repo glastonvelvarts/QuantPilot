@@ -1,0 +1,13 @@
+local/gpt-oss-20b-MXFP4.gguf in llama.cpp: 16,384 tokens, 1 conversation(s), 25/25 layers on the GPU, experts of 6 layers in RAM, cache K q8_0, V 
+q8_0
+             QuantPilot's prediction vs llama.cpp's own log (MiB)             
+┌─────────────────────────────────┬────────────┬───────────┬────────────┬────┐
+│ Memory                          │ QuantPilot │ llama.cpp │ Difference │    │
+├─────────────────────────────────┼────────────┼───────────┼────────────┼────┤
+│ context cache (KV)              │     213.56 │    213.56 │      +0.00 │ ok │
+│ weights on the GPU              │   8,522.52 │  8,522.54 │      -0.02 │ ok │
+│ weights on the CPU (file range) │   3,177.44 │  3,177.44 │      +0.00 │ ok │
+└─────────────────────────────────┴────────────┴───────────┴────────────┴────┘
+Working memory llama.cpp reserved (not predicted yet): 416.04 MiB on the GPU, 39.34 MiB on the CPU, 0.77 MiB for the logits (llama-completion; 
+llama-server reserves less, it keeps 4 rows of logits instead of 512)
+llama.cpp's log: C:\Users\glast\OneDrive\Desktop\quantPilot\results\windows-nvidia-geforce-rtx-4060-laptop-gpu\verify\gpt-oss-20b-MXFP4-16k-q8_0.log
