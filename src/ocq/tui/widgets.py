@@ -10,18 +10,33 @@ from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import SuggestFromList
 from textual.widget import Widget
-from textual.widgets import Button, Input, Label, OptionList, RichLog, Select, Static
+from textual.widgets import Button, DataTable, Input, Label, OptionList, RichLog, Select, Static
 from textual.widgets.option_list import Option
 
 from ocq.tui import words
 
+# Keyboard: on a page, Up/Down (and Right) move between fields and buttons, and Left goes back
+# to the menu. The widgets below give those keys back to the page where they would otherwise
+# keep them: a closed dropdown, a text field with the cursor at its start, a table at its top.
 
-class Dropdown(Select):
-    """A one-line dropdown that always has a value."""
+
+def step_focus(widget: Widget, delta: int) -> None:
+    """Moves the focus to the next (+1) or previous (-1) field of the page holding widget."""
+    for node in widget.ancestors_with_self:
+        if hasattr(node, "action_step"):
+            node.action_step(delta)
+            return
+
+
+class Dropdown(Select, inherit_bindings=False):
+    """A one-line dropdown that always has a value. Enter or Space opens it; Up/Down move
+    between fields like everywhere else on the page."""
+
+    BINDINGS = [Binding("enter,space", "show_overlay", "Open", show=False)]
 
     def __init__(self, options: Iterable[tuple[str, Any]], **kwargs: Any) -> None:
         super().__init__(options, allow_blank=False, compact=True, **kwargs)
@@ -30,6 +45,34 @@ class Dropdown(Select):
 class TextField(Input):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, compact=True, **kwargs)
+
+    def action_cursor_left(self, select: bool = False) -> None:
+        if self.cursor_position == 0 and not select and self.selection.is_empty:
+            self.app.action_menu()  # type: ignore[attr-defined]
+        else:
+            super().action_cursor_left(select)
+
+
+class RowTable(DataTable):
+    """Up/Down move through the rows; Up on the first row leaves the table, Left goes back to
+    the menu unless the table is scrolled sideways."""
+
+    def action_cursor_up(self) -> None:
+        if self.cursor_row <= 0:
+            step_focus(self, -1)
+        else:
+            super().action_cursor_up()
+
+    def action_cursor_left(self) -> None:
+        if self.scroll_x <= 0:
+            self.app.action_menu()  # type: ignore[attr-defined]
+        else:
+            super().action_cursor_left()
+
+
+class Results(VerticalScroll, can_focus=False):
+    """Where a page shows its result. It scrolls to whatever is focused inside it but takes
+    no focus itself, so the arrow keys keep moving between fields."""
 
 
 class Action(Button):
@@ -85,7 +128,7 @@ class Card(Static):
     """A bordered box for one result, such as the recommendation."""
 
 
-class ProgressLog(RichLog):
+class ProgressLog(RichLog, can_focus=False):
     """Progress lines printed by a long job (download, convert, quantize...)."""
 
     def __init__(self, **kwargs: Any) -> None:
@@ -188,10 +231,11 @@ class Confirm(ModalScreen[bool]):
 
 KEYS = (
     ("Up / Down", "Move"),
+    ("Right", "Into a page, next field"),
+    ("Left", "Back to the menu"),
     ("Enter", "Open, choose, run"),
-    ("Tab", "Next field"),
     ("Esc", "Back to the menu"),
-    ("Ctrl+P", "Go anywhere, change theme"),
+    ("Ctrl+P", "Go anywhere, theme"),
     ("q", "Quit"),
 )
 

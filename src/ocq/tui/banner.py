@@ -16,7 +16,7 @@ BANNER = (
 )
 
 # What a terminal too narrow or too short for the big banner shows instead.
-COMPACT = "Q U A N T P I L O T"
+COMPACT = "QUANTPILOT"
 
 TAGLINE = "See what your PC can run. Then quantize it to fit."
 

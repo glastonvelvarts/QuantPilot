@@ -371,3 +371,49 @@ def test_a_failing_job_shows_a_message_and_the_app_stays_up(tmp_path: Path, monk
     run_app(tmp_path, steps)
     assert seen["problem"] == "Something went wrong: network is unreachable"
     assert seen["running"]
+
+
+def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, monkeypatch):
+    fake_model(monkeypatch)
+    seen = []
+
+    def where(app) -> str:
+        focused = app.focused
+        return focused.id or type(focused).__name__
+
+    async def steps(app, pilot):
+        await pilot.press("down")  # menu: Home -> Check a model (lines are skipped)
+        await pilot.press("right")  # into the page: the model field
+        seen.append(where(app))
+        await pilot.press("left")  # empty field: back to the menu
+        seen.append(where(app))
+        await pilot.press("right", *"org/model")
+        await pilot.press("left")  # moves the cursor inside the text, stays
+        seen.append(where(app))
+        await pilot.press("home", "left")  # at the start: back to the menu
+        seen.append(where(app))
+        await pilot.press("right", "down", "down")  # model -> Browse -> Context
+        seen.append(where(app))
+        await pilot.press("down")  # a closed dropdown does not open on Down
+        seen.append(where(app))
+        await pilot.press("enter")  # Check
+        await settle(app, pilot)
+        await pilot.press("down", "down")  # -> Quantize to this -> the table
+        seen.append(where(app))
+        await pilot.press("up")  # first row: leaves the table
+        seen.append(where(app))
+        await pilot.press("left")
+        seen.append(where(app))
+
+    run_app(tmp_path, steps)
+    assert seen == [
+        "TextField",
+        "nav",
+        "TextField",
+        "nav",
+        "context",
+        "check",
+        "options",
+        "quantize-pick",
+        "nav",
+    ]
