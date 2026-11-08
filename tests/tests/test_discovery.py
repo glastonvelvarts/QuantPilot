@@ -395,3 +395,40 @@ def test_ocq_models_rates_each_model_as_stored_offline(tmp_path, monkeypatch):
 
     mac = replace(mac, backend="Metal", unified_memory=True)
     assert "Perfect" in rows(mac)["mlx-community/Qwen2.5-0.5B-Instruct-4bit"]
+
+
+def test_encoders_speech_models_and_embedding_packages_are_not_listed(tmp_path, monkeypatch):
+    # The Hugging Face cache of the RTX 4060 PC: these were listed as LLMs with a tok/s.
+    cache = tmp_path / "hub"
+
+    def config(**settings):
+        return json.dumps(settings).encode()
+
+    weights = b"w" * 10
+    llm = config(architectures=["Qwen2ForCausalLM"], model_type="qwen2")
+    hf_repo(cache, "Qwen/Qwen2.5-0.5B", {"config.json": llm, "model.safetensors": weights})
+    vlm = config(architectures=["Gemma3ForConditionalGeneration"], model_type="gemma3")
+    hf_repo(cache, "google/gemma-3-4b-it", {"config.json": vlm, "model.safetensors": weights})
+    bert = config(architectures=["BertModel"], model_type="bert")
+    hf_repo(
+        cache, "intfloat/multilingual-e5-small", {"config.json": bert, "model.safetensors": weights}
+    )
+    hf_repo(
+        cache,
+        "sentence-transformers/x",
+        {"config.json": llm, "modules.json": b"[]", "model.safetensors": weights},
+    )
+    asr = config(architectures=["Nemotron3_5AsrForRNNT"], model_type="nemotron3_5_asr")
+    hf_repo(cache, "nvidia/nemotron-3.5-asr", {"config.json": asr, "model.safetensors": weights})
+    whisper = config(architectures=["WhisperForConditionalGeneration"], model_type="whisper")
+    hf_repo(cache, "openai/whisper-tiny", {"config.json": whisper, "model.safetensors": weights})
+    # CTranslate2 (faster-whisper): config.json has no architecture or model type.
+    ct2 = config(alignment_heads=[[1, 0]], lang_ids=[1], suppress_ids=[1])
+    hf_repo(cache, "Systran/faster-whisper-small", {"config.json": ct2, "model.bin": weights})
+    asr_header = {"general.architecture": "asr", "general.file_type": 7, "asr.encoder.n_layers": 2}
+    hf_repo(cache, "nvidia/asr-gguf", {"asr-q8_0.gguf": gguf_bytes(asr_header, [])})
+    hf_repo(cache, "org/model-GGUF", {"model-Q8_0.gguf": tiny_gguf()})
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+
+    found = {m.label for m in discovery.hf_cache_models()}
+    assert found == {"Qwen/Qwen2.5-0.5B", "google/gemma-3-4b-it", "org/model-GGUF/model-Q8_0.gguf"}
