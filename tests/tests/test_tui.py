@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,6 +73,13 @@ def test_words_for_fit_speed_and_size():
     assert words.speed(option(fit=FitLevel.TOO_TIGHT)) == "-"
     assert words.gb(0.25) == "250 MB" and words.gb(4.26) == "4.3 GB"
     assert words.context(8192) == "8K tokens"
+
+
+def test_a_split_model_says_how_many_layers_are_on_the_gpu():
+    split = replace(option(), run_mode=RunMode.GPU_OFFLOAD, gpu_layers=14)
+    assert words.place(split) == "GPU + RAM"
+    assert words.layers(split, 28) == "14 of 29 layers on GPU"
+    assert words.layers(option(), 28) == "-"
 
 
 def test_warnings_lose_their_command_lines():
@@ -173,7 +181,12 @@ def fake_model(monkeypatch, warnings=()):
     ]
     facts = ModelFacts(parameters=Fact(1_000_000_000, "config", FactKind.EXACT))
     snapshot = SimpleNamespace(
-        model_id="org/model", is_quantized=False, gguf_files=(), facts=facts, original_gb=2.0
+        model_id="org/model",
+        is_quantized=False,
+        gguf_files=(),
+        facts=facts,
+        original_gb=2.0,
+        num_layers=24,
     )
     config = QuantConfig(algorithm=QuantAlgorithm.GGUF, bits=8, group_size=0, gguf_type="Q8_0")
     made = SimpleNamespace(
@@ -229,6 +242,37 @@ def test_check_recommends_a_format_in_plain_words(tmp_path: Path, monkeypatch):
     assert "uv sync" not in seen["card"]
     assert seen["rows"] == 3
     assert (seen["page"], seen["format"]) == ("quantize", "gguf:Q8_0")
+
+
+def test_a_gguf_repo_gets_the_clis_best_fit_with_its_layer_split(tmp_path: Path, monkeypatch):
+    # A bigger file that is tight loses to a smaller one that fits, as in ocq feasibility.
+    tight = option("Q8_0", fit=FitLevel.MARGINAL, bits=8.5, gb=7.6, tps=30)
+    fits = option("Q4_K_M", fit=FitLevel.GOOD, bits=4.9, gb=6.1, tps=29)
+    fits = replace(fits, run_mode=RunMode.GPU_OFFLOAD, gpu_layers=14)
+    snapshot = SimpleNamespace(
+        model_id="org/model-GGUF",
+        is_quantized=False,
+        gguf_files=(("Q8_0", 8e9), ("Q4_K_M", 4.7e9)),
+        facts=ModelFacts(),
+        original_gb=None,
+        num_layers=28,
+    )
+    monkeypatch.setattr(model_analyzer, "resolve_model", lambda *a, **k: snapshot)
+    monkeypatch.setattr(model_analyzer, "quant_options", lambda *a, **k: [tight, fits])
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("check", focus=True)
+        await pilot.press(*"org/model-GGUF", "enter")
+        await settle(app, pilot)
+        seen["card"] = text_of(app, "#pick-text")
+        seen["quantize"] = app.query_one("#quantize-pick").display
+
+    run_app(tmp_path, steps)
+    assert seen["card"].splitlines()[:2] == ["Best fit for this PC", "Q4_K_M"]
+    details = "Fits  6.1 GB  |  GPU + RAM  |  14 of 29 layers on GPU  |  up to 29 tok/s"
+    assert details in seen["card"]
+    assert not seen["quantize"]
 
 
 def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):

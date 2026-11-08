@@ -42,6 +42,14 @@ def place(option) -> str:
     return where
 
 
+def layers(option, num_layers: int) -> str:
+    """'14 of 29 layers on GPU' when llama.cpp splits the model between the GPU and RAM
+    (the output layer counts as one, as llama.cpp counts)."""
+    if not getattr(option, "gpu_layers", 0) or not num_layers:
+        return "-"
+    return f"{option.gpu_layers} of {num_layers + 1} layers on GPU"
+
+
 def speed(option) -> str:
     """'~40 tok/s' when learned from runs on this PC, 'up to 40 tok/s' for the memory limit."""
     if not option.runnable or option.estimated_tps <= 0:

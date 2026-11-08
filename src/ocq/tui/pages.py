@@ -29,7 +29,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from ocq.model_analyzer import QUANTIZED_LEVELS
+from ocq.model_analyzer import QUANTIZED_LEVELS, best_option
 from ocq.tui import words
 from ocq.tui.banner import TAGLINE
 from ocq.tui.widgets import (
@@ -563,16 +563,20 @@ class CheckPage(Page):
             title = "Recommended for this PC"
             name = plan.quant_config.summary()
         else:
-            runnable = [o for o in options if o.runnable]
-            best = max(runnable, key=lambda o: o.bits) if runnable else options[0]  # best quality
-            title = "Best fit for this PC" if runnable else "Too big for this PC"
+            best = best_option(options)  # the CLI's best fit
+            title = "Best fit for this PC" if best.runnable else "Too big for this PC"
         self.recommended = (format_key(best) or AUTO) if quantizable else AUTO
 
         text = Text()
         text.append(f"{title}\n", "dim")
         text.append(f"{name or best.label}\n", "bold")
         text.append_text(words.fit(best.fit_level))
-        details = [words.gb(best.memory_required_gb), words.place(best), words.speed(best)]
+        details = [
+            words.gb(best.memory_required_gb),
+            words.place(best),
+            words.layers(best, getattr(snapshot, "num_layers", 0)),
+            words.speed(best),
+        ]
         text.append("  " + "  |  ".join(d for d in details if d != "-"))
         if plan:
             for warning in plan.warnings:
@@ -700,9 +704,11 @@ class QuantizePage(Page):
             snapshot.model_id, hw, snapshot, OptimizationGoal(goal), default_output(ref),
             format_choices(key, context, kv_cache),
         )  # fmt: skip
-        self.app.call_from_thread(self.show_plan, plan, (ref, key, goal, context))
+        self.app.call_from_thread(
+            self.show_plan, plan, (ref, key, goal, context), snapshot.num_layers
+        )
 
-    def show_plan(self, plan, form: tuple) -> None:
+    def show_plan(self, plan, form: tuple, num_layers: int = 0) -> None:
         from ocq.tui.install import MISSING, READY, tool_state
 
         self.query_one(".busy").display = False
@@ -714,7 +720,7 @@ class QuantizePage(Page):
         if predicted:
             text.append_text(words.fit(predicted.fit_level))
             details = [words.gb(predicted.memory_required_gb), words.place(predicted),
-                       words.speed(predicted)]  # fmt: skip
+                       words.layers(predicted, num_layers), words.speed(predicted)]  # fmt: skip
             text.append("  " + "  |  ".join(d for d in details if d != "-"))
         text.append(f"\nSaves to {plan.output_dir}", "dim")
         tool = tool_state(plan.quant_config.algorithm, self.qp.hardware())
