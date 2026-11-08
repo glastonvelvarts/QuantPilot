@@ -59,6 +59,7 @@ def cmd_tui() -> None:
 
     run_tui()
 
+
 KIND_COLORS = {
     FactKind.EXACT: "green",
     FactKind.CROSS_CHECKED: "green",

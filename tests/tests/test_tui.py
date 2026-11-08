@@ -373,6 +373,46 @@ def test_a_failing_job_shows_a_message_and_the_app_stays_up(tmp_path: Path, monk
     assert seen["running"]
 
 
+def test_verify_runs_llama_server_and_shows_layers_as_a_count(tmp_path: Path, monkeypatch):
+    from ocq import local_model, verify
+    from ocq.quantizers import llama_cpp
+    from ocq.verify import Check, LlamaLog
+
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"GGUF")
+    snapshot = SimpleNamespace(gguf_files=("m.gguf",))
+    log = LlamaLog(4096, 4, (14, 29), 2172.17, 2288.28, 448.0, 0.0, "K f16, V f16", gpus=1)
+    checks = [
+        Check("layers on the GPU", 14, 14, unit="layers"),
+        Check("weights on the CPU (file range)", 2288.28, 2288.28),
+        Check("working memory (upper bound)", 463.3, 426.0, upper_bound=True),
+    ]
+    tools = []
+    monkeypatch.setattr(model_analyzer, "resolve_model", lambda *a, **k: snapshot)
+    monkeypatch.setattr(model_analyzer, "quant_options", lambda *a, **k: [option()])
+    monkeypatch.setattr(local_model, "parse_model_ref", lambda ref: (ref, gguf))
+    monkeypatch.setattr(llama_cpp, "tool_path", lambda name, hw: tools.append(name) or Path(name))
+    monkeypatch.setattr(verify, "verify", lambda *a, **k: (log, checks, "log text"))
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("verify", focus=True)
+        await pilot.press(*"m.gguf", "enter")
+        await settle(app, pilot)
+        seen["verdict"] = text_of(app, "#verify #verdict")
+        table = app.query_one("#verify #checks")
+        seen["rows"] = [[str(cell) for cell in table.get_row(key)] for key in table.rows]
+
+    run_app(tmp_path, steps)
+    assert tools == ["llama-server"]
+    assert seen["verdict"] == "Prediction matches llama.cpp\n14 of 29 layers on the GPU"
+    assert seen["rows"] == [
+        ["Layers on the GPU", "14", "14", "match"],
+        ["Weights in RAM", "2,288 MB", "2,288 MB", "match"],
+        ["Working memory", "463 MB", "426 MB", "within"],
+    ]
+
+
 def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, monkeypatch):
     fake_model(monkeypatch)
     seen = []

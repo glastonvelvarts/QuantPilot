@@ -895,8 +895,9 @@ class VerifyPage(Page):
         if not snapshot.gguf_files or path is None or not path.is_file():
             raise OcqError("Choose a .gguf file on this PC, or an Ollama model.")
         (row,) = quant_options(snapshot, hw, context, kv_cache)
-        tool = tool_path("llama-completion", hw)
-        log, checks = verify(snapshot, path, hw, tool, context, kv_cache, row.experts_in_ram)
+        # llama-server, as the CLI uses: what QuantPilot plans for.
+        tool = tool_path("llama-server", hw)
+        log, checks, _ = verify(snapshot, path, hw, tool, context, kv_cache, row.experts_in_ram)
         self.app.call_from_thread(self.show, log, checks)
 
     def show(self, log, checks) -> None:
@@ -908,21 +909,44 @@ class VerifyPage(Page):
         else:
             verdict.append("Prediction matches llama.cpp", "bold green")
         offloaded, total = log.layers_on_gpu
-        verdict.append(f"\n{offloaded}/{total} layers on the GPU", "dim")
+        where = "Ran on the CPU" if log.cpu_only else f"{offloaded} of {total} layers on the GPU"
+        verdict.append(f"\n{where}", "dim")
         self.query_one("#verdict", Static).update(verdict)
         table = self.query_one("#checks", DataTable)
         table.clear(columns=True)
-        table.add_columns("Memory", "Predicted", "Measured", "")
+        table.add_columns("", "Predicted", "Measured", "")
         for check in checks:
-            mark = Text("match", "green") if check.ok else Text("differs", "yellow")
+            if not check.ok:
+                mark = Text("differs", "yellow")
+            else:
+                mark = Text("within" if check.upper_bound else "match", "green")
             table.add_row(
-                check.name,
-                f"{check.predicted_mib:,.0f} MB",
-                f"{check.actual_mib:,.0f} MB",
+                CHECK_NAMES.get(check.name, check.name.capitalize()),
+                check_value(check.predicted_mib, check.unit),
+                check_value(check.actual_mib, check.unit),
                 mark,
             )
         for selector in ("#verdict", "#checks"):
             self.query_one(selector).display = True
+
+
+# What ocq verify compares, in the app's words.
+CHECK_NAMES = {
+    "context cache (KV)": "Context memory",
+    "Mamba / convolution state": "Model state",
+    "layers on the GPU": "Layers on the GPU",
+    "weights on the GPU": "Weights on the GPU",
+    "weights on the CPU (file range)": "Weights in RAM",
+    "weights in RAM (file range)": "Weights in RAM",
+    "weights repacked for this CPU": "Weights copied for this CPU",
+    "working memory (upper bound)": "Working memory",
+}
+
+
+def check_value(value: float, unit: str) -> str:
+    if unit == "layers":
+        return f"{value:,.0f}"
+    return f"{value:,.1f} MB" if value < 10 else f"{value:,.0f} MB"
 
 
 # Settings ---------------------------------------------------------------------------------
