@@ -323,10 +323,19 @@ def cmd_verify(
         if n_cpu_moe is None:
             (row,) = quant_options(snapshot, hw, context, kv_cache)
             n_cpu_moe = row.experts_in_ram
-        log, checks, text = verify(
-            snapshot, path, hw, tool_path("llama-completion", hw), context, kv_cache, n_cpu_moe
+        log, checks, _ = verify(
+            snapshot,
+            path,
+            hw,
+            tool_path("llama-completion", hw),
+            context,
+            kv_cache,
+            n_cpu_moe,
+            save_log,
         )
     except OcqError as exc:
+        if save_log and save_log.exists():
+            console.print(f"[dim]llama.cpp's log: {save_log}[/dim]")
         raise fail(exc) from exc
 
     offloaded, total = log.layers_on_gpu
@@ -356,7 +365,6 @@ def cmd_verify(
         "it keeps 4 rows of logits instead of 512)"
     )
     if save_log:
-        save_log.write_text(text, encoding="utf-8")
         console.print(f"[dim]llama.cpp's log: {save_log}[/dim]")
     if offloaded != total:
         console.print("[dim]Not every layer is on the GPU, so the weights were not compared.[/dim]")

@@ -12,6 +12,7 @@ from test_gguf_file import real_header
 
 from ocq.gguf_file import config_from_gguf, hf_style_tensors
 from ocq.model_analyzer import build_snapshot
+from ocq.types import OcqError
 from ocq.verify import parse_log, predict
 
 LOG = (
@@ -25,6 +26,31 @@ def test_only_the_real_load_is_read_not_the_trial_pass():
     assert (log.context, log.conversations, log.layers_on_gpu) == (4096, 1, (33, 33))
     assert (log.gpu_mib, log.cpu_mib) == (149.07, 60.29)  # the trial pass says 0.00
     assert (log.kv_mib, log.state_mib) == (16.00, 21.57)
+
+
+def test_pinned_ram_of_a_cuda_build_counts_as_ram():
+    # llama.cpp's CUDA build, OLMoE on an RTX 4060: CUDA_Host is RAM the GPU copies through.
+    cuda = (
+        "load_tensors: loading model tensors, this can take a while... (load_mode = mmap)\n"
+        "load_tensors: offloaded 17/17 layers to GPU\n"
+        "load_tensors:    CUDA_Host model buffer size =     0.00 MiB\n"
+        "load_tensors:   CPU_Mapped model buffer size =    50.00 MiB\n"
+        "load_tensors:        CUDA0 model buffer size =  2410.10 MiB\n"
+        "sched_reserve:      CUDA0 compute buffer size =   118.27 MiB\n"
+        "sched_reserve:  CUDA_Host compute buffer size =    20.02 MiB\n"
+    )
+    log = parse_log(cuda)
+    assert (log.gpu_mib, log.cpu_mib) == (2410.10, 50.00)
+    assert (log.gpu_compute_mib, log.cpu_compute_mib) == (118.27, 20.02)
+
+
+def test_a_llama_cpp_crash_is_reported_not_compared():
+    crashed = (
+        "load_tensors: loading model tensors, this can take a while...\n"
+        "D:/a/llama.cpp/llama.cpp/ggml/src\\ggml-impl.h:330: fatal error\n"
+    )
+    with pytest.raises(OcqError, match="ggml-impl.h:330: fatal error"):
+        parse_log(crashed)
 
 
 def test_prediction_matches_the_log():

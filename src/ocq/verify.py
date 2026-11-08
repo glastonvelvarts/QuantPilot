@@ -59,12 +59,20 @@ class Check:
         return abs(self.predicted_mib - self.actual_mib) <= 3 * ROUNDING_MIB
 
 
+def in_ram(device: str) -> bool:
+    """CPU buffers, and the pinned RAM a GPU backend copies through (CUDA_Host)."""
+    return device.startswith("CPU") or device.endswith("_Host")
+
+
 def parse_log(log: str) -> LlamaLog:
     """llama.cpp's memory numbers from the real load (after its trial pass)."""
     starts = [m.start() for m in re.finditer(r"load_tensors: loading model tensors", log)]
     if not starts:
         raise OcqError("llama.cpp did not load the model; see its log.")
     real = log[starts[-1] :]
+    crash = re.search(r"^.*(?:fatal error|GGML_ASSERT).*$", real, re.MULTILINE)
+    if crash:
+        raise OcqError(f"llama.cpp stopped with an error: {crash.group(0).strip()}")
 
     def number(pattern: str, default: float = 0.0) -> float:
         match = re.search(pattern, real)
@@ -74,7 +82,7 @@ def parse_log(log: str) -> LlamaLog:
     for device, size in re.findall(
         r"load_tensors:\s+(\S+) model buffer size =\s+([\d.]+) MiB", real
     ):
-        if device.startswith("CPU"):
+        if in_ram(device):
             cpu += float(size)
         else:
             gpu += float(size)
@@ -82,7 +90,7 @@ def parse_log(log: str) -> LlamaLog:
     for device, size in re.findall(
         r"sched_reserve:\s+(\S+) compute buffer size =\s+([\d.]+) MiB", real
     ):
-        if device.startswith("CPU"):
+        if in_ram(device):
             cpu_compute += float(size)
         else:
             gpu_compute += float(size)
@@ -196,9 +204,13 @@ def verify(
     context: int,
     kv_cache: str = "f16",
     experts_in_ram: int = 0,
+    save_log: Path | None = None,
 ) -> tuple[LlamaLog, list[Check], str]:
-    """llama.cpp's numbers, QuantPilot's next to them, and llama.cpp's whole log."""
+    """llama.cpp's numbers, QuantPilot's next to them, and llama.cpp's whole log (also written
+    to save_log, before anything can fail)."""
     text = run_llama(tool, model_path, context, kv_cache, experts_in_ram)
+    if save_log:
+        save_log.write_text(text, encoding="utf-8")
     log = parse_log(text)
     header = read_local(model_path)
     checks = predict(model, header, log, kv_cache, experts_in_ram, hardware.unified_memory)
