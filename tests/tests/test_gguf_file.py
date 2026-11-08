@@ -93,6 +93,7 @@ def test_quant_type_is_read_from_the_file_name(name, quant):
 
 import gzip  # noqa: E402
 import json  # noqa: E402
+from dataclasses import replace  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from ocq.gguf_file import (  # noqa: E402
@@ -103,6 +104,7 @@ from ocq.gguf_file import (  # noqa: E402
 )
 from ocq.model_analyzer import (  # noqa: E402
     build_snapshot,
+    experts_to_ram,
     gguf_variants,
     model_header,
     pick_gguf_file,
@@ -204,3 +206,23 @@ def test_draft_models_next_to_a_model_are_left_out():
     assert chosen == "gpt-oss-20b-MXFP4.gguf" and found.architecture == "gpt-oss"
     assert kept == ["gpt-oss-20b-MXFP4.gguf"]
     assert read == ["eagle3-gpt-oss-20b-BF16.gguf", "gpt-oss-20b-MXFP4.gguf"]
+
+
+def test_expert_weights_and_biases_of_a_gguf_are_counted_once():
+    # gpt-oss stores a bias next to each expert tensor (ffn_down_exps.weight and .bias). Both
+    # were named mlp.experts.down_proj, so every layer's experts were counted twice and
+    # --n-cpu-moe came out too small: 6 where the RTX 4060 (7.5 GB free) needed 10.
+    header, _ = real_header("gpt-oss-20b-MXFP4")
+    tensors = hf_style_tensors(header)
+    assert len({name for name, _ in tensors}) == len(tensors)
+
+    snap = build_snapshot("gpt-oss", {}, config_from_gguf(header), tensors, None)
+    sizes = {name: t.nbytes for (name, _), t in zip(tensors, header.tensors, strict=True)}
+    snap = replace(snap, gguf_tensor_bytes=sizes)
+    layers, moved_gb = experts_to_ram(snap, "MXFP4", too_much_gb=2.3, ram_gb=100)
+    assert layers == 6
+    # llama.cpp b11429 on CUDA with --n-cpu-moe 6: "CUDA0 model buffer size = 8522.54 MiB",
+    # everything but the input embeddings and the experts of the first 6 layers.
+    embeddings = next(t.nbytes for t in header.tensors if t.name == "token_embd.weight")
+    on_gpu = sum(sizes.values()) - embeddings - moved_gb * 2**30
+    assert on_gpu / 2**20 == pytest.approx(8522.54, abs=0.03)
