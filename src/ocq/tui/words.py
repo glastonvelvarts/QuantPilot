@@ -65,9 +65,22 @@ _COMMAND_HINT = re.compile(r"\s*(Run:|Use:)\s.*$|\s*\((?:-|ocq )[^)]*\)")
 _NOT_INSTALLED = re.compile(r"^(\w+) backend not installed\.?$")
 
 
-def warning(text: str) -> str:
-    """A plan warning in plain words, without the command line some of them end with."""
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+_COMMANDS = re.compile(r"\bocq [a-z]|(?:^|\s)--?[a-z]|\buv (sync|pip)|\bpip install|\bsudo ")
+
+
+def plain(text: str) -> str:
+    """A message from QuantPilot's core without the commands and flags meant for the CLI:
+    they are cut from the end of a sentence, and a sentence that is only advice to run a
+    command is left out."""
     text = _COMMAND_HINT.sub("", text).strip()
+    kept = [s for s in _SENTENCE.split(text) if s and not _COMMANDS.search(s)]
+    return " ".join(kept) or text
+
+
+def warning(text: str) -> str:
+    """A plan warning in plain words."""
+    text = plain(text)
     missing = _NOT_INSTALLED.match(text)
     if missing:
         return f"{missing.group(1)} tools are not installed on this PC."

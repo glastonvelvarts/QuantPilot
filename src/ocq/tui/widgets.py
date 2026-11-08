@@ -236,7 +236,7 @@ KEYS = (
     ("Enter", "Open, choose, run"),
     ("Esc", "Back to the menu"),
     ("Ctrl+P", "Go anywhere, theme"),
-    ("q", "Quit"),
+    ("Ctrl+C", "Quit"),
 )
 
 
