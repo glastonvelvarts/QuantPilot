@@ -300,23 +300,59 @@ def ffn_width(tensors: list[Tensor], experts: int = 0, experts_per_token: int = 
     return widest
 
 
-# llama-server (b11429) on a separate GPU needs two buffers besides the weights and the cache:
+# llama-server (b11429) needs two buffers besides the weights and the cache:
 #   output   one row of logits (vocabulary x 4 bytes) per conversation;
-#   compute  the attention mask (context x 512 tokens x 2 bytes; a second one for sliding
-#            window layers) and the intermediates of one 512-token batch. On CUDA, for 9 models
-#            (dense, MoE, Mamba hybrids, gpt-oss), those took 3.7 to 9 times the widest
-#            feed-forward layer x 512 tokens x 4 bytes. 9 is used: an upper bound, at most
-#            90 MiB over (Gemma 2 2B), against 500 MiB for 512 rows of logits before.
+#   compute  the attention masks of one 512-token batch (context x 512 x 2 bytes; sliding
+#            window layers have a second one, as long as their cache) and the larger of two
+#            peaks: the feed-forward one and the attention one.
+# Feed-forward: on CUDA, for 9 models (dense, MoE, Mamba hybrids, gpt-oss), 3.7 to 9 times the
+# widest feed-forward layer x 512 tokens x 4 bytes. 9 is used: an upper bound, at most 90 MiB
+# over (Gemma 2 2B).
+# Attention: when it needs a 16-bit copy of one layer's keys and values, that copy, the rows of
+# activations around it and, on Metal, a scratch buffer for the partial results:
+#   CUDA, quantized cache   its kernels read 16 bits (ggml_cuda_flash_attn_ext_get_alloc_size);
+#   CUDA, layers in RAM     a layer whose cache is in RAM is brought to the GPU as stored;
+#   Metal, any cache        it always reserves the copy ("extra_kv_f16", ggml-metal-ops.cpp).
+# Measured besides the mask and the copy (MiB): CUDA q8_0 OLMoE 20.09, Qwen1.5-0.5B 10.05 (5.02
+# rows of 512 x the attention width x 4 B); CUDA layers in RAM Qwen2.5-7B 42.00, OLMoE 24.00
+# (6.0 rows); Metal Qwen1.5-0.5B 18.23 (4.13 scratch + 7.05 rows). 8 rows are used.
+# A layer that runs attention beside a Mamba block (Falcon-H1) keeps the copy while the rest of
+# the layer works, so the copy adds to the feed-forward peak: Falcon-H1 0.5B on CUDA, q8_0 over
+# f16 at 4k / 16k / 64k, +4.03 / +9.03 / +33.03 MiB for a copy of 2 / 8 / 32 MiB.
 UBATCH = 512
 FFN_INTERMEDIATES = 9
+ATTENTION_ACTIVATIONS = 8
+METAL_WORKGROUPS = 32  # Metal's scratch: 32 rows x heads x 32 workgroups x (head + 2) x 4 B
 
 
 def llama_server_buffers_bytes(
-    vocab_size: int, context: int, ffn: int, sliding_window: bool, conversations: int
+    vocab_size: int,
+    context: int,
+    ffn: int,
+    sliding_tokens: int,
+    conversations: int,
+    kv_copy: int = 0,
+    attention_width: int = 0,
+    scratch: int = 0,
+    beside_state: bool = False,
 ) -> int:
+    """sliding_tokens: the cache length of the sliding-window layers (0: none).
+    kv_copy: bytes of the 16-bit copy of one layer's keys and values, when one is made.
+    attention_width: the wider of the hidden size and all heads' queries.
+    scratch: Metal's buffer for partial results (metal_attention_scratch).
+    beside_state: attention runs beside a Mamba block in the same layer (Falcon-H1)."""
     output = conversations * vocab_size * 4
-    masks = context * UBATCH * 2 * (2 if sliding_window else 1)
-    return output + masks + UBATCH * 4 * FFN_INTERMEDIATES * ffn
+    masks = (context + sliding_tokens) * UBATCH * 2
+    intermediates = UBATCH * 4 * FFN_INTERMEDIATES * ffn
+    if kv_copy:
+        attention = kv_copy + UBATCH * 4 * ATTENTION_ACTIVATIONS * attention_width + scratch
+        alongside = intermediates + kv_copy if beside_state else 0
+        intermediates = max(intermediates, attention, alongside)
+    return output + masks + intermediates
+
+
+def metal_attention_scratch(heads: int, head_dim: int) -> int:
+    return 4 * 32 * heads * METAL_WORKGROUPS * (head_dim + 2)
 
 
 # Tensors a quantized checkpoint stores next to its weights: scales, zero points, group

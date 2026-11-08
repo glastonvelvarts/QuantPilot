@@ -275,6 +275,79 @@ def test_llama_server_working_memory_is_an_upper_bound_of_the_measured(stem):
         assert measured <= predicted <= measured + 91, (context, predicted, measured)
 
 
+# llama-server b11429, compute + output buffer in MiB. Attention copies one layer's keys and
+# values at 16 bits on CUDA with a q8_0 cache, on CUDA when that layer's cache is in RAM, and
+# on Metal always; it sets the peak when it is larger than the feed-forward one.
+# CUDA: RTX 4060 Laptop (results/windows-nvidia-.../retest-3/server-*.log.gz).
+# Metal: M1 16 GB. "deepseek-v2-lite-2-layers" is DeepSeek-V2-Lite's shapes in 2 layers with
+# random weights (MLA, 64 experts; q_lora_rank 1536, which llama.cpp needs below 26 layers).
+CUDA, CUDA_LAYERS_IN_RAM, METAL = "cuda", "cuda, layers in ram", "metal"
+LLAMA_SERVER_ATTENTION = [
+    # Attention beside a Mamba block in every layer: the copy adds to the peak (retest-5).
+    ("Falcon-H1-0.5B-Instruct-IQ1_M", 4096, "q8_0", CUDA, 35.67 + 0.50),
+    ("Falcon-H1-0.5B-Instruct-IQ1_M", 16384, "q8_0", CUDA, 52.67 + 0.50),
+    ("Falcon-H1-0.5B-Instruct-IQ1_M", 65536, "q8_0", CUDA, 124.67 + 0.50),
+    ("gemma-2-2b-it-IQ3_M", 8192, "q8_0", CUDA, 88.55 + 3.91),
+    ("gemma-3-1b-it-Q2_K", 16384, "q8_0", CUDA, 68.55 + 4.00),
+    ("gemma-3-1b-it-Q2_K", 32768, "q8_0", CUDA, 84.55 + 4.00),
+    ("gemma-3-1b-it-Q2_K", 32768, "f16", CUDA, 84.02 + 4.00),
+    ("olmoe-1b-7b-0924-instruct-q2_k", 32768, "f16", CUDA, 112.01 + 0.77),
+    ("olmoe-1b-7b-0924-instruct-q2_k", 16384, "q8_0", CUDA, 164.09 + 0.77),
+    ("olmoe-1b-7b-0924-instruct-q2_k", 32768, "q8_0", CUDA, 308.09 + 0.77),
+    ("olmoe-1b-7b-0924-instruct-q2_k", 65536, "q8_0", CUDA, 596.09 + 0.77),
+    ("qwen1_5-0_5b-chat-q2_k", 8192, "f16", CUDA, 32.51 + 2.32),
+    ("qwen1_5-0_5b-chat-q2_k", 32768, "f16", CUDA, 56.51 + 2.32),
+    ("qwen1_5-0_5b-chat-q2_k", 16384, "q8_0", CUDA, 90.05 + 2.32),
+    ("qwen1_5-0_5b-chat-q2_k", 32768, "q8_0", CUDA, 170.05 + 2.32),
+    ("Qwen2.5-7B-Instruct-Q4_K_M", 32768, "q8_0", CUDA, 171.09 + 2.32),
+    ("Qwen2.5-7B-Instruct-Q4_K_M", 65536, "f16", CUDA_LAYERS_IN_RAM, 271.00 + 2.32),
+    ("Qwen2.5-7B-Instruct-Q4_K_M", 98304, "f16", CUDA_LAYERS_IN_RAM, 330.00 + 2.32),
+    ("Qwen2.5-7B-Instruct-Q4_K_M", 131072, "f16", CUDA_LAYERS_IN_RAM, 426.00 + 2.32),
+    ("qwen1_5-0_5b-chat-q2_k", 8192, "f16", METAL, 58.21 + 2.32),
+    ("qwen1_5-0_5b-chat-q2_k", 8192, "q8_0", METAL, 58.49 + 2.32),
+    ("qwen1_5-0_5b-chat-q2_k", 16384, "f16", METAL, 98.22 + 2.32),
+    ("qwen1_5-0_5b-chat-q2_k", 32768, "f16", METAL, 178.23 + 2.32),
+    ("deepseek-v2-lite-2-layers-q8_0", 4096, "f16", METAL, 115.84 + 1.56),
+    ("deepseek-v2-lite-2-layers-q8_0", 16384, "f16", METAL, 141.35 + 1.56),
+    ("deepseek-v2-lite-2-layers-q8_0", 65536, "f16", METAL, 243.40 + 1.56),
+]
+
+
+@pytest.mark.parametrize(("stem", "context", "cache", "where", "measured"), LLAMA_SERVER_ATTENTION)
+def test_llama_server_working_memory_with_attentions_copy(stem, context, cache, where, measured):
+    from ocq.model_analyzer import kv_copies, working_bytes
+    from ocq.model_size import kv_value_bytes
+    from ocq.types import LLAMA_CPP
+
+    header, _ = real_header(stem)
+    snap = build_snapshot(stem, {}, config_from_gguf(header), hf_style_tensors(header), None)
+    metal = where == METAL
+    copies = kv_copies(kv_value_bytes(cache, LLAMA_CPP), not metal, metal, where != CUDA)
+    predicted = working_bytes(snap, context, LLAMA_CPP, copies, metal) / 2**20
+    assert measured <= predicted, (predicted, measured)
+    if stem.startswith(("olmoe", "qwen1_5", "Falcon-H1")) and copies:
+        # The copy sets the peak: 8 rows of activations are counted, llama.cpp took 5-7.
+        assert predicted <= measured + 12, (predicted, measured)
+
+
+def test_olmoe_at_64k_with_a_q8_0_cache_keeps_3_layers_of_experts_in_ram():
+    # The old plan, --n-cpu-moe 1, overfilled the RTX 4060 Laptop: 2,271 MiB of weights +
+    # 4,352 cache + 596 compute with 7,106 free (retest-3/olmoe-64k-q8_0.txt). Each layer of
+    # experts is 139 MiB: 2 leaves 26 MiB, 3 leaves 165 MiB.
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+    from ocq.types import RunMode
+
+    stem = "olmoe-1b-7b-0924-instruct-q2_k"
+    header, file_size = real_header(stem)
+    snap = gguf_snapshot(stem, {}, header, [("Q2_K", header.data_bytes)], file_size, True)
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9", ram_gb=16)
+    (row,) = quant_options(snap, laptop, 65536, "q8_0")
+    assert row.run_mode == RunMode.GPU_EXPERTS_RAM
+    assert row.experts_in_ram == 3
+
+
 def test_gpt_oss_on_the_rtx_4060_keeps_11_layers_of_experts_in_ram():
     # 7,610 MiB free, 7,106 once llama.cpp has started CUDA. GPU side: the weights but the
     # input embeddings (in RAM) and the experts of N layers, the cache, llama-server's buffers.
@@ -291,3 +364,122 @@ def test_gpt_oss_on_the_rtx_4060_keeps_11_layers_of_experts_in_ram():
     (row,) = quant_options(snap, laptop)
     assert row.run_mode == RunMode.GPU_EXPERTS_RAM
     assert row.experts_in_ram == 11
+
+
+def test_llama_cpp_fills_the_gpu_with_whole_layers_from_the_back():
+    # Qwen2.5-7B Q4_K_M at 131k on the RTX 4060 Laptop, llama-completion b11429 with --fit
+    # (results/windows-nvidia-.../retest/qwen7b-131k-verify.log.gz): 15 layers would take
+    # 6,324 MiB of its 6,082 MiB target, so "offloaded 14/29 layers to GPU", the output layer
+    # and blocks 15-27: "CUDA0 model buffer size = 2172.17 MiB". QuantPilot shared the GPU out
+    # evenly before and said 14.95 layers.
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+    from ocq.types import RunMode
+
+    header, file_size = real_header("Qwen2.5-7B-Instruct-Q4_K_M")
+    assert header.data_start + header.data_bytes == file_size
+    gpu = [t for t in header.tensors if not t.name.startswith(("blk.", "token_embd"))]
+    last_13 = tuple(f"blk.{i}." for i in range(15, 28))
+    gpu += [t for t in header.tensors if t.name.startswith(last_13)]
+    assert sum(t.nbytes for t in gpu) / 2**20 == pytest.approx(2172.17, abs=0.01)
+
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9", ram_gb=16)
+    files = [("Q4_K_M", header.data_bytes)]
+    snap = gguf_snapshot("bartowski/Qwen2.5-7B-Instruct-GGUF", {}, header, files, file_size, True)
+    (row,) = quant_options(snap, laptop, 131072)
+    assert row.run_mode == RunMode.GPU_OFFLOAD
+    assert row.gpu_layers == 14
+    # 13.72 tok/s measured at 14 layers; the bound reads 14/29 of the weights from the GPU.
+    assert 13.72 < row.estimated_tps < 30
+
+
+def test_a_mixture_of_experts_too_big_even_without_experts_fills_dense_layers():
+    # OLMoE Q2_K at 64k on the RTX 4060 Laptop: llama.cpp b11429 put 11/17 layers on the GPU,
+    # the experts of all but the lowest of them in RAM
+    # (results/windows-nvidia-.../verify/olmoe-1b-7b-0924-instruct-q2_k-64k.log.gz).
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+    from ocq.types import RunMode
+
+    stem = "olmoe-1b-7b-0924-instruct-q2_k"
+    header, file_size = real_header(stem)
+    snap = gguf_snapshot(stem, {}, header, [("Q2_K", header.data_bytes)], file_size, True)
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9", ram_gb=16)
+    (row,) = quant_options(snap, laptop, 65536)
+    assert row.run_mode == RunMode.GPU_OFFLOAD
+    assert row.gpu_layers == 11
+
+
+@pytest.mark.parametrize(
+    ("stem", "per_token"),
+    [
+        # Converted before llama.cpp split attn_kv_b (no key_length_mla): llama.cpp runs it as
+        # plain attention, 16 heads x (192 + 128) values of 2 bytes in each of 27 layers.
+        ("DeepSeek-V2-Lite-Chat.Q2_K", 27 * 16 * (192 + 128) * 2),
+        # attn_k_b / attn_v_b and key_length_mla: the compressed cache, 512 + 64 values.
+        ("Moonlight-16B-A3B-Instruct-Q2_K", 27 * (512 + 64) * 2),
+        # Converted with b11429 (2 layers): llama-server logged 144.00 MiB at 64k, 4 slots.
+        ("deepseek-v2-lite-2-layers-q8_0", 2 * (512 + 64) * 2),
+    ],
+)
+def test_an_mla_gguf_is_compressed_only_when_llama_cpp_runs_it_so(stem, per_token):
+    from ocq.types import LLAMA_CPP
+
+    header, _ = real_header(stem)
+    snap = build_snapshot(stem, {}, config_from_gguf(header), hf_style_tensors(header), None)
+    assert snap.kv_cache_bytes(1, LLAMA_CPP, 1) == per_token
+
+
+def test_granite_moe_with_a_quantized_cache_names_llama_cpps_workaround():
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+
+    stem = "granite-3.1-1b-a400m-instruct-Q2_K"
+    header, file_size = real_header(stem)
+    snap = gguf_snapshot(stem, {}, header, [("Q2_K", header.data_bytes)], file_size, True)
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    (q8,) = quant_options(snap, laptop, 16384, "q8_0")
+    assert "LLAMA_ATTN_ROT_DISABLE=1" in q8.note
+    (f16,) = quant_options(snap, laptop, 16384, "f16")
+    assert not f16.note
+
+
+def test_an_expert_plan_on_windows_has_what_is_really_free():
+    # gpt-oss-20b at 4k on the RTX 4060 Laptop under Windows (retest-4): nvidia-smi 7,792 MiB
+    # free, CUDA's fixed figure 7,106. llama-bench: --n-cpu-moe 9 (7,309 MiB of weights) was the
+    # fastest, 8 (7,713) over nvidia-smi's free memory fell to a third of the prompt speed.
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+
+    header, file_size = real_header("gpt-oss-20b-MXFP4")
+    files = [("MXFP4", header.data_bytes)]
+    snap = gguf_snapshot("ggml-org/gpt-oss-20b-GGUF", {}, header, files, file_size, True)
+    card = "NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7792, 8.9"
+    windows = nvidia_pc(card, cuda_free_mib=7106, windows=True)
+    (row,) = quant_options(snap, windows)
+    assert row.experts_in_ram == 9
+    # On Linux CUDA's figure is what is left once the context exists: the plan keeps to it.
+    linux = nvidia_pc(card, cuda_free_mib=7106)
+    (row,) = quant_options(snap, linux)
+    assert row.experts_in_ram == 11
+
+
+def test_llama_cpps_fit_works_from_cudas_own_free_figure():
+    # Qwen2.5-7B at 131k (retest-3): llama.cpp's --fit target was 7,106 - 1,024 = 6,082 MiB
+    # whatever nvidia-smi said, and it put 14 of 29 layers on the GPU.
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+
+    header, file_size = real_header("Qwen2.5-7B-Instruct-Q4_K_M")
+    files = [("Q4_K_M", header.data_bytes)]
+    snap = gguf_snapshot("bartowski/Qwen2.5-7B-Instruct-GGUF", {}, header, files, file_size, True)
+    for smi_free in (7420, 7792):
+        card = f"NVIDIA GeForce RTX 4060 Laptop GPU, 8188, {smi_free}, 8.9"
+        laptop = nvidia_pc(card, ram_gb=16, cuda_free_mib=7106, windows=True)
+        (row,) = quant_options(snap, laptop, 131072)
+        assert row.gpu_layers == 14

@@ -1,0 +1,33 @@
+0.00.036.380 I srv  llama_server: n_parallel is set to auto, using n_parallel = 4 and kv_unified = true
+0.00.101.419 I llama_prepare_model_devices: using device MTL0 (Apple M1) (unknown id) - 12123 MiB free
+0.00.176.497 I load_tensors: loading model tensors, this can take a while... (load_mode = none)
+0.00.179.414 I load_tensors: offloading output layer to GPU
+0.00.179.414 I load_tensors: offloading 23 repeating layers to GPU
+0.00.179.414 I load_tensors: offloaded 25/25 layers to GPU
+0.00.179.416 I load_tensors:          CPU model buffer size =     0.00 MiB
+0.00.179.416 I load_tensors:         MTL0 model buffer size =     0.00 MiB
+0.00.179.827 I llama_context: n_seq_max             = 4
+0.00.179.827 I llama_context: n_ctx                 = 32768
+0.00.179.828 I llama_context: n_ctx_seq             = 32768
+0.00.180.148 I llama_context:        CPU  output buffer size =     2.32 MiB
+0.00.180.289 I llama_kv_cache:       MTL0 KV buffer size =     0.00 MiB
+0.00.180.290 I llama_kv_cache: size = 3072.00 MiB ( 32768 cells,  24 layers,  4/1 seqs), K (f16): 1536.00 MiB, V (f16): 1536.00 MiB
+0.00.187.125 I sched_reserve:       MTL0 compute buffer size =   178.23 MiB
+0.00.187.125 I sched_reserve:        CPU compute buffer size =    40.02 MiB
+0.00.187.126 I sched_reserve:        CPU compute buffer size =    40.02 MiB
+0.00.258.134 I llama_prepare_model_devices: using device MTL0 (Apple M1) (unknown id) - 12123 MiB free
+0.00.331.328 I load_tensors: loading model tensors, this can take a while... (load_mode = mmap)
+0.00.346.162 I load_tensors: offloading output layer to GPU
+0.00.346.164 I load_tensors: offloading 23 repeating layers to GPU
+0.00.346.165 I load_tensors: offloaded 25/25 layers to GPU
+0.00.346.166 I load_tensors:   CPU_Mapped model buffer size =    48.69 MiB
+0.00.346.166 I load_tensors:  MTL0_Mapped model buffer size =   278.92 MiB
+0.00.347.811 I llama_context: n_seq_max             = 4
+0.00.347.811 I llama_context: n_ctx                 = 32768
+0.00.347.811 I llama_context: n_ctx_seq             = 32768
+0.00.348.088 I llama_context:        CPU  output buffer size =     2.32 MiB
+0.00.843.092 I llama_kv_cache:       MTL0 KV buffer size =  3072.00 MiB
+0.01.075.098 I llama_kv_cache: size = 3072.00 MiB ( 32768 cells,  24 layers,  4/1 seqs), K (f16): 1536.00 MiB, V (f16): 1536.00 MiB
+0.01.097.839 I sched_reserve:       MTL0 compute buffer size =   178.23 MiB
+0.01.097.840 I sched_reserve:        CPU compute buffer size =    40.02 MiB
+0.01.302.415 I srv  llama_server: model loaded

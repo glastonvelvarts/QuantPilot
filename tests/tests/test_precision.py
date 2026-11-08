@@ -109,29 +109,45 @@ def test_benchmark_runs_llama_cpp_with_the_planned_cache(tmp_path, monkeypatch):
 
     from ocq.quantizers import gguf
 
-    commands = []
+    commands, envs = [], []
+    load_log = (
+        "load_tensors: offloaded 31/31 layers to GPU\n"
+        "load_tensors:   CPU_Mapped model buffer size =   292.36 MiB\n"
+        "load_tensors:        CUDA0 model buffer size =  1500.00 MiB\n"
+    )
 
-    def fake_run_tool(command, log):
+    def fake_run_tool(command, log, env=None):
         commands.append(command)
+        envs.append(env)
         if "llama-bench" in command[0]:
             return json.dumps([{"avg_ts": 100.0, "stddev_ts": 1.0}]), ""
-        return "The sky is blue.", "offloaded 31/31 layers to GPU"
+        return "The sky is blue.", load_log
 
     monkeypatch.setattr(gguf, "run_tool", fake_run_tool)
     monkeypatch.setattr(gguf, "tool_path", lambda name, hardware: Path(name))
     plan = SimpleNamespace(
         output_dir=tmp_path,
-        hardware=None,
+        hardware=SimpleNamespace(has_gpu=True),
         quant_config=SimpleNamespace(context=4096, kv_cache="q8_0"),
         predicted=None,
+        model=SimpleNamespace(architecture="qwen2"),
     )
     gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
     assert len(commands) == 2  # the sample answer (llama-completion), the speed (llama-bench)
     for command in commands:
         assert command[-4:] == ["-ctk", "q8_0", "-ctv", "q8_0"]
+    assert envs == [{}, {}]
+
+    # Granite 3.x MoE stops in llama.cpp b11429 with a quantized cache unless its rotation is
+    # off (results/windows-nvidia-.../verify/granite-3.1-1b-a400m-instruct-Q2_K-16k-q8_0).
+    commands.clear(), envs.clear()
+    plan.model = SimpleNamespace(architecture="granitemoe")
+    gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
+    assert envs == [{"LLAMA_ATTN_ROT_DISABLE": "1"}] * 2
+    plan.model = SimpleNamespace(architecture="qwen2")
 
     # A mixture of experts planned with the experts of 5 layers in RAM.
-    commands.clear()
+    commands.clear(), envs.clear()
     plan.predicted = SimpleNamespace(experts_in_ram=5)
     result = gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
     completion, bench = commands
@@ -139,3 +155,41 @@ def test_benchmark_runs_llama_cpp_with_the_planned_cache(tmp_path, monkeypatch):
     assert bench[-2:] == ["-ncmoe", "5"]
     # Not a plain GPU run, so it is kept out of this PC's GPU speed history.
     assert result.device == "gpu (experts of 5 layers in ram)"
+    plan.predicted = None
+
+
+def test_a_benchmark_without_a_gpu_runs_on_the_cpu_and_is_recorded_so(tmp_path, monkeypatch):
+    # llama.cpp's CPU build also logs "offloaded 17/17 layers to GPU" (ocq verify on Linux
+    # without a GPU, retest-5); only the buffers show where the weights went.
+    import json
+    from types import SimpleNamespace
+
+    from ocq.quantizers import gguf
+
+    commands, envs = [], []
+
+    def fake_run_tool(command, log, env=None):
+        commands.append(command)
+        envs.append(env)
+        if "llama-bench" in command[0]:
+            return json.dumps([{"avg_ts": 30.0, "stddev_ts": 1.0}]), ""
+        return "The sky is blue.", (
+            "load_tensors: offloaded 17/17 layers to GPU\n"
+            "load_tensors:   CPU_Mapped model buffer size =   204.62 MiB\n"
+            "load_tensors:   CPU_REPACK model buffer size =   154.12 MiB\n"
+        )
+
+    monkeypatch.setattr(gguf, "run_tool", fake_run_tool)
+    monkeypatch.setattr(gguf, "tool_path", lambda name, hardware: Path(name))
+    plan = SimpleNamespace(
+        output_dir=tmp_path,
+        hardware=SimpleNamespace(has_gpu=False),
+        quant_config=SimpleNamespace(context=4096, kv_cache="f16"),
+        predicted=None,
+        model=SimpleNamespace(architecture="lfm2"),
+    )
+    result = gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
+    completion, bench = commands
+    assert result.device == "cpu"
+    assert bench[bench.index("-ngl") + 1] == "0" and bench[-2:] == ["-dev", "none"]
+    assert envs == [{"LLAMA_ARG_DEVICE": "none"}] * 2

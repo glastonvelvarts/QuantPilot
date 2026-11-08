@@ -13,8 +13,9 @@ import sys
 from pathlib import Path
 
 from ocq.quantizers.base import model_slug, model_weights_dir
-from ocq.quantizers.llama_cpp import converter_script, tool_path
+from ocq.quantizers.llama_cpp import converter_script, missing_library, tool_path
 from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, Quantizer
+from ocq.runtimes import llama_cache_env, llama_device_env
 from ocq.types import (
     BenchmarkResult,
     HardwareProfile,
@@ -99,6 +100,8 @@ class GGUFQuantizer(Quantizer):
         # Mixture of experts that does not fit in VRAM: the experts of the first layers in RAM.
         experts = plan.predicted.experts_in_ram if plan.predicted else 0
         moe_flags = ["--n-cpu-moe", str(experts)] if experts else []
+        has_gpu = plan.hardware.has_gpu
+        env = {**llama_cache_env(plan.model.architecture, cache), **llama_device_env(has_gpu)}
 
         # One real answer: the sample text, the time to first token, and where the layers ran.
         text, log = run_tool(
@@ -122,10 +125,20 @@ class GGUFQuantizer(Quantizer):
                 *moe_flags,
             ],
             log=workspace / "benchmark.log",
+            env=env,
         )
         prompt = re.search(r"prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens", log)
         on_gpu = re.search(r"offloaded (\d+)/(\d+) layers to GPU", log)
-        gpu_layers = int(on_gpu.group(1)) if on_gpu else 0
+        # llama.cpp's CPU build also says "offloaded 17/17 layers to GPU": only a model buffer on
+        # a GPU shows that one took part.
+        gpu_buffers = [
+            float(size)
+            for buffer, size in re.findall(
+                r"load_tensors:\s+(\S+) model buffer size =\s+([\d.]+) MiB", log
+            )
+            if not (buffer.startswith("CPU") or buffer.endswith("_Host"))
+        ]
+        gpu_layers = int(on_gpu.group(1)) if on_gpu and any(gpu_buffers) else 0
 
         device = "cpu"
         if gpu_layers:
@@ -154,8 +167,10 @@ class GGUFQuantizer(Quantizer):
                 "json",
                 *cache_flags,
                 *(["-ncmoe", str(experts)] if experts else []),
+                *([] if has_gpu else ["-dev", "none"]),
             ],
             log=workspace / "speed.log",
+            env=env,
         )
         speed = json.loads(report)[0]
 
@@ -193,8 +208,9 @@ def has_openmp_runtime() -> bool:
         return False
 
 
-def run_tool(command: list[str], log: Path) -> tuple[str, str]:
-    """Run a command quietly, keep its output in a log file, and fail with the last lines of it."""
+def run_tool(command: list[str], log: Path, env: dict[str, str] | None = None) -> tuple[str, str]:
+    """Run a command quietly, keep its output in a log file, and fail with the last lines of it.
+    env: variables to set on top of this process's environment."""
     completed = subprocess.run(
         command,
         capture_output=True,
@@ -202,10 +218,13 @@ def run_tool(command: list[str], log: Path) -> tuple[str, str]:
         encoding="utf-8",
         errors="replace",
         stdin=subprocess.DEVNULL,
-        env={**os.environ, "PYTHONUTF8": "1"},
+        env={**os.environ, "PYTHONUTF8": "1", **(env or {})},
     )
     log.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
+        library = missing_library(completed.stdout + completed.stderr, completed.returncode)
+        if library:
+            raise OcqError(f"{log.stem} step failed: {library} Full log in {log}")
         last_lines = "\n".join((completed.stderr or completed.stdout).strip().splitlines()[-15:])
         raise OcqError(f"{log.stem} step failed, full log in {log}\n{last_lines}")
     return completed.stdout, completed.stderr

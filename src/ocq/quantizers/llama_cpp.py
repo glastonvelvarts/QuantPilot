@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import tarfile
 import urllib.request
@@ -18,6 +19,34 @@ from ocq.types import HardwareProfile, OcqError
 TAG = "b11429"
 GITHUB = "https://github.com/ggml-org/llama.cpp"
 CACHE = Path.home() / ".cache" / "ocq" / "llama.cpp" / TAG
+
+# The Linux releases link against the system's OpenMP runtime, which minimal installs (servers,
+# containers, a fresh WSL) leave out.
+LIBRARY_PACKAGES = {
+    "libgomp.so.1": "libgomp1 (Debian, Ubuntu), libgomp (Fedora) or gcc-libs (Arch)",
+}
+# Windows' exit code when a program needs a DLL it cannot find (STATUS_DLL_NOT_FOUND).
+DLL_NOT_FOUND = 0xC0000135
+
+
+def missing_library(output: str, returncode: int | None = None) -> str | None:
+    """What to tell the user when a llama.cpp tool could not start for want of a library:
+    Linux ("error while loading shared libraries"), macOS ("Library not loaded"), Windows (no
+    message, only the exit code). None when that is not why it stopped."""
+    found = re.search(
+        r"error while loading shared libraries: ([^:\s]+)|Library not loaded: (\S+)", output
+    )
+    if found:
+        library = found.group(1) or found.group(2)
+        package = LIBRARY_PACKAGES.get(library)
+        install = f" Install {package}." if package else ""
+        return f"llama.cpp cannot start: this system lacks {library}.{install}"
+    if returncode is not None and returncode & 0xFFFFFFFF == DLL_NOT_FOUND:
+        return (
+            "llama.cpp cannot start: Windows did not find a DLL it needs (for the CUDA build, "
+            "the CUDA runtime next to it; else the Microsoft Visual C++ runtime)."
+        )
+    return None
 
 
 def tool_path(name: str, hardware: HardwareProfile) -> Path:
