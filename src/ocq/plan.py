@@ -90,6 +90,8 @@ def generate_plan(
         )
     if not model.feasibility.runnable:
         warnings.append("Model is Too Tight on this PC. It may not load after quantization.")
+    if predicted.note:
+        warnings.append(predicted.note)
     asked_group = choices.group_size if choices else None
     if asked_group and asked_group != config.group_size:
         warnings.append(

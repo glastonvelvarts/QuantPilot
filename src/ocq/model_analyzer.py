@@ -14,6 +14,7 @@ from pathlib import Path
 from ocq import measurements
 from ocq.engine import default_group_size
 from ocq.gguf_file import (
+    QUANT_IN_NAME,
     SPLIT_PART,
     GgufHeader,
     config_from_gguf,
@@ -45,6 +46,7 @@ from ocq.model_size import (
     stored_bytes,
     weights_per_token,
 )
+from ocq.runtimes import vllm_budget, vllm_card_budget_gb
 from ocq.types import (
     CONVERSATIONS,
     DTYPE_BITS,
@@ -462,16 +464,39 @@ def gguf_variants(
 
 
 def pick_gguf_file(names: list[str]) -> str:
-    """The file whose header to read: Q4_K_M if there is one, else the first of the smallest
-    variant. All files of a model share the settings; only the tensor types differ."""
+    """The file whose header to read: Q4_K_M if there is one, else the first by name.
+    All files of a model share the settings; only the tensor types differ."""
     models = [
         n for n in names if n.endswith(".gguf") and not Path(n).name.lower().startswith("mmproj")
     ]
     if not models:
-        raise OcqError("No GGUF model file found (only mmproj vision projectors).")
+        raise OcqError("No GGUF model file found (only vision projectors or draft models).")
     preferred = [n for n in models if quant_from_filename(n) == "Q4_K_M"]
     firsts = [n for n in (preferred or models) if not SPLIT_PART.search(n) or "-00001-of-" in n]
     return sorted(firsts or models)[0]
+
+
+# llama.cpp architectures of files that ship next to a model but are not one: vision
+# projectors and EAGLE3 draft models (for speculative decoding).
+COMPANION_ARCHS = ("clip", "eagle3")
+
+
+def gguf_stem(name: str) -> str:
+    """The model a GGUF file name stands for: eagle3-gpt-oss-20b-BF16.gguf -> eagle3-gpt-oss-20b."""
+    base = QUANT_IN_NAME.sub("", SPLIT_PART.sub(".gguf", Path(name).name))
+    return base.removesuffix(".gguf").strip("-_.").lower()
+
+
+def model_header(names: list[str], read) -> tuple[str, GgufHeader, list[str]]:
+    """(file read, its header, the model's files). A repo can hold companions, for example
+    eagle3-gpt-oss-20b-*.gguf next to gpt-oss-20b-MXFP4.gguf; their header names them, and
+    every file under that name is left out."""
+    while True:
+        chosen = pick_gguf_file(names)
+        header = read(chosen)
+        if header.architecture not in COMPANION_ARCHS:
+            return chosen, header, names
+        names = [n for n in names if gguf_stem(n) != gguf_stem(chosen)]
 
 
 def local_gguf_snapshot(
@@ -482,8 +507,12 @@ def local_gguf_snapshot(
         files = sorted(path.parent.glob(SPLIT_PART.sub("-*-of-*.gguf", path.name)))
     # An Ollama blob is a GGUF file without the .gguf name.
     named = path.is_file() and path.suffix.lower() == ".gguf"
-    chosen = Path(pick_gguf_file([str(f) for f in files])) if named or path.is_dir() else path
-    header = read_local(chosen)
+    if path.is_dir():
+        name, header, names = model_header([str(f) for f in files], lambda n: read_local(Path(n)))
+        chosen, files = Path(name), [Path(n) for n in names]
+    else:
+        chosen = Path(pick_gguf_file([str(f) for f in files])) if named else path
+        header = read_local(chosen)
     whole = not SPLIT_PART.search(chosen.name)
     variants = gguf_variants([(str(f), f.stat().st_size) for f in files], header.data_start)
     if not variants:
@@ -537,11 +566,13 @@ def hub_gguf_snapshot(
     """A Hub repo with only GGUF files: one header read with range requests, the file sizes
     from the Hub's file list."""
     sizes = hub_file_sizes(model_id)
-    chosen = pick_gguf_file(list(sizes))
     revision = meta.get("sha") or "main"
-    header = read_remote(f"https://huggingface.co/{model_id}/resolve/{revision}/{chosen}")
+    chosen, header, names = model_header(
+        list(sizes),
+        lambda name: read_remote(f"https://huggingface.co/{model_id}/resolve/{revision}/{name}"),
+    )
     whole = not SPLIT_PART.search(chosen)
-    variants = gguf_variants(list(sizes.items()), header.data_start)
+    variants = gguf_variants([(n, sizes[n]) for n in names], header.data_start)
     snapshot = gguf_snapshot(model_id, meta, header, variants, sizes.get(chosen), whole)
     return (
         with_fit(snapshot, hardware, context, kv_cache)
@@ -1484,7 +1515,24 @@ def fit_at(
     # by layers.
     split = TENSOR_PARALLEL if row_kind in VLLM_ROWS else LAYER_SPLIT
     heads = model.num_attention_heads if model.architecture_known else None
-    pool = hardware.gpu_pool(split, heads)
+    # vLLM on NVIDIA works with a share of each card's total memory and only on the GPU.
+    vllm = runtime == VLLM and hardware.has_cuda
+    vllm_rule = vllm_budget() if vllm else None
+    budget = (
+        (lambda card, free: vllm_card_budget_gb(card, free, vllm_rule.utilization))
+        if vllm_rule
+        else None
+    )
+    pool = hardware.gpu_pool(split, heads, budget)
+    note = ""
+    if vllm_rule and pool and not pool.free_gb:
+        card = pool.cards[0]
+        note = (
+            f"vLLM starts only with {vllm_rule.utilization:.0%} of the GPU's "
+            f"{card.vram_gb:.1f} GB free ({vllm_rule.source}); "
+            f"{hardware.card_free_gb(card):.1f} GB is free. Lower --gpu-memory-utilization "
+            "or close what else uses the GPU."
+        )
     if pool and pool.split == LAYER_SPLIT:
         # Layers on a slower card slow every token down. When the model fits on the best card
         # alone and that card is faster than the split, one card is the better setup.
@@ -1503,6 +1551,9 @@ def fit_at(
     elif offload:
         run_mode, available = RunMode.GPU_EXPERTS_RAM, vram + ram
         experts_ram_layers, experts_ram_gb = offload
+    elif vllm and pool:
+        # vLLM does not spill into RAM by default (cpu_offload_gb is 0) or run on the CPU.
+        run_mode, available = RunMode.GPU, vram
     elif vram and not hardware.unified_memory and required <= vram + ram:
         run_mode, available = RunMode.GPU_OFFLOAD, vram + ram
     else:
@@ -1553,6 +1604,7 @@ def fit_at(
         else (),
         gpu_split=pool.split if pool else "",
         experts_in_ram=experts_ram_layers,
+        note=note,
     )
 
 

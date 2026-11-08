@@ -303,6 +303,9 @@ def cmd_verify(
             "PC)",
         ),
     ] = None,
+    save_log: Annotated[
+        Path | None, typer.Option("--save-log", help="Also write llama.cpp's whole log here")
+    ] = None,
     llmfit_bin: LlmfitBin = None,
 ) -> None:
     """Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction."""
@@ -320,10 +323,19 @@ def cmd_verify(
         if n_cpu_moe is None:
             (row,) = quant_options(snapshot, hw, context, kv_cache)
             n_cpu_moe = row.experts_in_ram
-        log, checks = verify(
-            snapshot, path, hw, tool_path("llama-completion", hw), context, kv_cache, n_cpu_moe
+        log, checks, _ = verify(
+            snapshot,
+            path,
+            hw,
+            tool_path("llama-completion", hw),
+            context,
+            kv_cache,
+            n_cpu_moe,
+            save_log,
         )
     except OcqError as exc:
+        if save_log and save_log.exists():
+            console.print(f"[dim]llama.cpp's log: {save_log}[/dim]")
         raise fail(exc) from exc
 
     offloaded, total = log.layers_on_gpu
@@ -346,6 +358,14 @@ def cmd_verify(
             mark,
         )
     console.print(table)
+    console.print(
+        f"Working memory llama.cpp reserved (not predicted yet): "
+        f"{log.gpu_compute_mib:,.2f} MiB on the GPU, {log.cpu_compute_mib:,.2f} MiB on the CPU, "
+        f"{log.output_mib:,.2f} MiB for the logits (llama-completion; llama-server reserves less, "
+        "it keeps 4 rows of logits instead of 512)"
+    )
+    if save_log:
+        console.print(f"[dim]llama.cpp's log: {save_log}[/dim]")
     if offloaded != total:
         console.print("[dim]Not every layer is on the GPU, so the weights were not compared.[/dim]")
     if not all(check.ok for check in checks):
@@ -574,6 +594,8 @@ def cmd_feasibility(
             "BNB and NVFP4 rows cannot keep experts in RAM: vLLM and transformers split by "
             "whole layers instead.[/dim]"
         )
+    for note in dict.fromkeys(option.note for option in options if option.note):
+        console.print(f"[yellow]{escape(note)}[/yellow]")
     if snapshot.is_mlx and not hw.apple_silicon:
         console.print(
             "[yellow]MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio), not on this PC: "

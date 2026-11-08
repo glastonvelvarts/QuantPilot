@@ -230,8 +230,8 @@ def test_a_digest_cannot_point_outside_the_blobs_folder(tmp_path):
 
 
 def hf_repo(cache: Path, repo_id: str, files: dict[str, bytes | None]) -> Path:
-    """A repo laid out like huggingface_hub does: snapshot files link to blobs.
-    None makes a link whose blob is missing."""
+    """A repo laid out like huggingface_hub does: snapshot files link to blobs, or are copies
+    where Windows allows no links. None makes a link whose blob is missing (no file on Windows)."""
     repo = cache / f"models--{repo_id.replace('/', '--')}"
     snapshot = repo / "snapshots" / "abc123"
     snapshot.mkdir(parents=True)
@@ -242,7 +242,11 @@ def hf_repo(cache: Path, repo_id: str, files: dict[str, bytes | None]) -> Path:
         blob = repo / "blobs" / f"blob{i}"
         if data is not None:
             blob.write_bytes(data)
-        (snapshot / name).symlink_to(blob)
+        try:
+            (snapshot / name).symlink_to(blob)
+        except OSError:
+            if data is not None:
+                (snapshot / name).write_bytes(data)
     return repo
 
 

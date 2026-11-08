@@ -1,0 +1,17 @@
+╭──────────────────────────────────────────────────────────────────────── Feasibility ─────────────────────────────────────────────────────────────────────────╮
+│ Qwen/Qwen2.5-1.5B-Instruct-AWQ                                                                                                                               │
+│ Params: 1.78B | Use case: Instruction following, chat                                                                                                        │
+│ Sizes: already quantized (AWQ 4-bit), shown as stored. Quantize the original model to compare formats                                                        │
+│ Facts: parameters cross-checked, context memory exact, quantization cross-checked (sources: ocq inspect)                                                     │
+│ Context: 4096 tokens                                                                                                                                         │
+│ Free right now: 7.42 GB VRAM, 10.64 GB RAM                                                                                                                   │
+│ Best fit: Perfect (gpu) @ AWQ 4-bit (as stored), 1.90 of 7.42 GB (26%)                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+     By format, sizes in GB (stored checkpoint, GGUF, AWQ, GPTQ, BNB, NVFP4 — same tensor math)     
+┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┓
+┃ Level                 ┃ Backend  ┃ Bits ┃ Weights ┃ Context ┃ Needs ┃ Fit     ┃ Runs on ┃  tok/s ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━┩
+│ AWQ 4-bit (as stored) │ original │ 7.27 │    1.50 │    0.40 │  1.90 │ Perfect │ gpu     │ <= 136 │
+└───────────────────────┴──────────┴──────┴─────────┴─────────┴───────┴─────────┴─────────┴────────┘
+<= limit set by memory bandwidth. The real speed is lower and gets learned from benchmark runs on this PC (ocq optimize --execute).
+7610 MiB

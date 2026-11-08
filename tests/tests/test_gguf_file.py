@@ -101,7 +101,12 @@ from ocq.gguf_file import (  # noqa: E402
     config_from_gguf,
     hf_style_tensors,
 )
-from ocq.model_analyzer import build_snapshot, gguf_variants, pick_gguf_file  # noqa: E402
+from ocq.model_analyzer import (  # noqa: E402
+    build_snapshot,
+    gguf_variants,
+    model_header,
+    pick_gguf_file,
+)
 from ocq.types import FactKind  # noqa: E402
 
 GGUF_DATA = Path(__file__).parent / "data" / "gguf"
@@ -179,3 +184,23 @@ def test_gguf_variants_add_up_split_parts_and_skip_vision_projectors():
     # Largest first; each loses the header bytes once per file.
     assert gguf_variants(files, header_bytes=1000) == [("Q8_0", 8_999_000), ("Q4_K_M", 7_998_000)]
     assert pick_gguf_file([name for name, _ in files]) == "Model-Q4_K_M-00001-of-00002.gguf"
+
+
+def test_draft_models_next_to_a_model_are_left_out():
+    # ggml-org/gpt-oss-20b-GGUF: the EAGLE3 draft files sort first, their header names them.
+    names = [
+        "eagle3-gpt-oss-20b-BF16.gguf",
+        "eagle3-gpt-oss-20b-Q8_0.gguf",
+        "gpt-oss-20b-MXFP4.gguf",
+    ]
+    archs = {"eagle3-gpt-oss-20b-BF16.gguf": "eagle3", "gpt-oss-20b-MXFP4.gguf": "gpt-oss"}
+    read = []
+
+    def header(name):
+        read.append(name)
+        return GgufHeader(3, {"general.architecture": archs[name]}, (), 0)
+
+    chosen, found, kept = model_header(names, header)
+    assert chosen == "gpt-oss-20b-MXFP4.gguf" and found.architecture == "gpt-oss"
+    assert kept == ["gpt-oss-20b-MXFP4.gguf"]
+    assert read == ["eagle3-gpt-oss-20b-BF16.gguf", "gpt-oss-20b-MXFP4.gguf"]
