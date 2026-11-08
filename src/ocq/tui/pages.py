@@ -15,7 +15,8 @@ from rich.table import Table
 from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
-from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.binding import Binding
+from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import (
     Button,
     Collapsible,
@@ -38,6 +39,8 @@ from ocq.tui.widgets import (
     ModelActions,
     ModelField,
     ProgressLog,
+    Results,
+    RowTable,
     field,
 )
 from ocq.types import (
@@ -131,6 +134,12 @@ def background(group: str):
 
 class Page(Vertical):
     TITLE = ""
+    # Keys the focused field does not use itself (see widgets.py).
+    BINDINGS = [
+        Binding("left", "app.menu", "Menu", show=False),
+        Binding("up", "step(-1)", show=False),
+        Binding("down,right", "step(1)", show=False),
+    ]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(classes="page", **kwargs)
@@ -151,6 +160,15 @@ class Page(Vertical):
 
     def run(self) -> None:
         """Enter in a field, the main button, or Ctrl+R."""
+
+    def action_step(self, delta: int) -> None:
+        """Focus the next (+1) or previous (-1) field or button on this page; stops at the ends."""
+        chain = [w for w in self.screen.focus_chain if self in w.ancestors]
+        if not chain:
+            return
+        focused = self.screen.focused
+        index = chain.index(focused) + delta if focused in chain else 0
+        chain[max(0, min(index, len(chain) - 1))].focus()
 
     def focus_first(self) -> None:
         for widget in self.query("Input, Select, Button, DataTable, Switch, TextArea"):
@@ -222,7 +240,7 @@ class PcPage(Page):
     loaded = False
 
     def compose_body(self) -> ComposeResult:
-        with VerticalScroll(classes="results"):
+        with Results(classes="results"):
             yield Static("", id="pc-info")
         with Horizontal(classes="actions"):
             yield Action("Refresh", id="refresh")
@@ -288,7 +306,7 @@ class ListPage(Page):
 
     def compose_body(self) -> ComposeResult:
         yield from self.compose_filters()
-        yield DataTable(cursor_type="row", zebra_stripes=True)
+        yield RowTable(cursor_type="row", zebra_stripes=True)
         yield Static("", classes="empty")
 
     def compose_filters(self) -> ComposeResult:
@@ -453,11 +471,11 @@ class CheckPage(Page):
         with Horizontal(classes="actions"):
             yield Action("Check", variant="primary", id="check")
         yield LoadingIndicator(classes="busy")
-        with VerticalScroll(classes="results"):
+        with Results(classes="results"):
             with Card(id="pick", classes="card"):
                 yield Static("", id="pick-text")
                 yield Action("Quantize to this", variant="primary", id="quantize-pick")
-            yield DataTable(cursor_type="row", zebra_stripes=True, id="options")
+            yield RowTable(cursor_type="row", zebra_stripes=True, id="options")
             with Collapsible(title="About this model", collapsed=True, id="about"):
                 yield Static("", id="facts")
             yield Static("", classes="problem")
@@ -600,7 +618,7 @@ class QuantizePage(Page):
         with Horizontal(classes="actions"):
             yield Action("Review", variant="primary", id="review")
         yield LoadingIndicator(classes="busy")
-        with VerticalScroll(classes="results"):
+        with Results(classes="results"):
             with Card(id="plan", classes="card"):
                 yield Static("", id="plan-text")
                 yield Action("Start", variant="primary", id="start")
@@ -777,9 +795,9 @@ class VerifyPage(Page):
         with Horizontal(classes="actions"):
             yield Action("Verify", variant="primary", id="verify")
         yield LoadingIndicator(classes="busy")
-        with VerticalScroll(classes="results"):
+        with Results(classes="results"):
             yield Static("", id="verdict")
-            yield DataTable(cursor_type="row", id="checks")
+            yield RowTable(cursor_type="row", id="checks")
             yield Static("", classes="problem")
 
     def on_mount(self) -> None:
@@ -848,7 +866,7 @@ class SettingsPage(Page):
         s = self.qp.settings
         themes = [(name, name) for name in sorted(self.app.available_themes)]
         kv = [(KV_LABELS.get(kind, kind), kind) for kind in KV_CACHE_TYPES]
-        with VerticalScroll(classes="results"):
+        with Results(classes="results"):
             with Grid(classes="form"):
                 yield field("Theme", Dropdown(themes, value=self.app.theme, id="theme"))
                 yield field(
