@@ -14,6 +14,7 @@ from pathlib import Path
 from ocq import measurements
 from ocq.engine import default_group_size
 from ocq.gguf_file import (
+    QUANT_IN_NAME,
     SPLIT_PART,
     GgufHeader,
     config_from_gguf,
@@ -463,16 +464,39 @@ def gguf_variants(
 
 
 def pick_gguf_file(names: list[str]) -> str:
-    """The file whose header to read: Q4_K_M if there is one, else the first of the smallest
-    variant. All files of a model share the settings; only the tensor types differ."""
+    """The file whose header to read: Q4_K_M if there is one, else the first by name.
+    All files of a model share the settings; only the tensor types differ."""
     models = [
         n for n in names if n.endswith(".gguf") and not Path(n).name.lower().startswith("mmproj")
     ]
     if not models:
-        raise OcqError("No GGUF model file found (only mmproj vision projectors).")
+        raise OcqError("No GGUF model file found (only vision projectors or draft models).")
     preferred = [n for n in models if quant_from_filename(n) == "Q4_K_M"]
     firsts = [n for n in (preferred or models) if not SPLIT_PART.search(n) or "-00001-of-" in n]
     return sorted(firsts or models)[0]
+
+
+# llama.cpp architectures of files that ship next to a model but are not one: vision
+# projectors and EAGLE3 draft models (for speculative decoding).
+COMPANION_ARCHS = ("clip", "eagle3")
+
+
+def gguf_stem(name: str) -> str:
+    """The model a GGUF file name stands for: eagle3-gpt-oss-20b-BF16.gguf -> eagle3-gpt-oss-20b."""
+    base = QUANT_IN_NAME.sub("", SPLIT_PART.sub(".gguf", Path(name).name))
+    return base.removesuffix(".gguf").strip("-_.").lower()
+
+
+def model_header(names: list[str], read) -> tuple[str, GgufHeader, list[str]]:
+    """(file read, its header, the model's files). A repo can hold companions, for example
+    eagle3-gpt-oss-20b-*.gguf next to gpt-oss-20b-MXFP4.gguf; their header names them, and
+    every file under that name is left out."""
+    while True:
+        chosen = pick_gguf_file(names)
+        header = read(chosen)
+        if header.architecture not in COMPANION_ARCHS:
+            return chosen, header, names
+        names = [n for n in names if gguf_stem(n) != gguf_stem(chosen)]
 
 
 def local_gguf_snapshot(
@@ -483,8 +507,12 @@ def local_gguf_snapshot(
         files = sorted(path.parent.glob(SPLIT_PART.sub("-*-of-*.gguf", path.name)))
     # An Ollama blob is a GGUF file without the .gguf name.
     named = path.is_file() and path.suffix.lower() == ".gguf"
-    chosen = Path(pick_gguf_file([str(f) for f in files])) if named or path.is_dir() else path
-    header = read_local(chosen)
+    if path.is_dir():
+        name, header, names = model_header([str(f) for f in files], lambda n: read_local(Path(n)))
+        chosen, files = Path(name), [Path(n) for n in names]
+    else:
+        chosen = Path(pick_gguf_file([str(f) for f in files])) if named else path
+        header = read_local(chosen)
     whole = not SPLIT_PART.search(chosen.name)
     variants = gguf_variants([(str(f), f.stat().st_size) for f in files], header.data_start)
     if not variants:
@@ -538,11 +566,13 @@ def hub_gguf_snapshot(
     """A Hub repo with only GGUF files: one header read with range requests, the file sizes
     from the Hub's file list."""
     sizes = hub_file_sizes(model_id)
-    chosen = pick_gguf_file(list(sizes))
     revision = meta.get("sha") or "main"
-    header = read_remote(f"https://huggingface.co/{model_id}/resolve/{revision}/{chosen}")
+    chosen, header, names = model_header(
+        list(sizes),
+        lambda name: read_remote(f"https://huggingface.co/{model_id}/resolve/{revision}/{name}"),
+    )
     whole = not SPLIT_PART.search(chosen)
-    variants = gguf_variants(list(sizes.items()), header.data_start)
+    variants = gguf_variants([(n, sizes[n]) for n in names], header.data_start)
     snapshot = gguf_snapshot(model_id, meta, header, variants, sizes.get(chosen), whole)
     return (
         with_fit(snapshot, hardware, context, kv_cache)
