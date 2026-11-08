@@ -1,0 +1,169 @@
+# NVIDIA test session: RTX 4060 Laptop, Windows 11 + WSL2
+
+Results of the Phase 4 test plan on an NVIDIA PC, for the Mac side to pick up. Everything here was run on
+branch `nvidia-windows-test` (= `phase-4-runtimes` + the fixes listed below), 2026-11-08.
+
+## The machine
+
+| | |
+|---|---|
+| GPU | NVIDIA GeForce RTX 4060 Laptop, 8,188 MiB, compute capability 8.9, driver 621.01 (WDDM) |
+| Free VRAM | 7,520–7,640 MiB with the desktop running (Cursor, Explorer, Brave hold the rest) |
+| CPU / RAM | Ryzen 7 7840HS, 23.2 GB (10–14 GB free during the runs) |
+| llama.cpp | b11429, `win-cuda` (CUDA 12.4) build that QuantPilot downloads |
+| vLLM | 0.33.0 in WSL2 Ubuntu (torch 2.14.0+cu130), separate venv `~/.venvs/vllm` |
+| Models | the 8 Mac GGUFs, byte for byte (sizes checked against `tests/tests/data/gguf/*.json.gz`), plus `ggml-org/gpt-oss-20b-GGUF` MXFP4 (12.1 GB, does not fit 8 GB) |
+
+How to rerun on any machine: `scripts/gpu_check.py` (verify, llama-server, MoE benchmarks; picks the
+llama.cpp build for the OS through `tool_path`), `scripts/vllm_check.sh` (Linux or WSL2),
+`scripts/summarize_verify.py`, `scripts/summarize_moe.py`. Logs are gzipped: `zcat verify/x.log.gz`.
+
+## Test plan, item by item
+
+### 1. llama.cpp's working memory on the GPU: measured
+
+`verify/summary.md` (llama-completion, 9 models × 4k/16k/64k/16k-q8_0) and `server/summary.md`
+(llama-server, 9 models × 4k/16k). Every log is in `verify/` and `server/`.
+
+- **The CUDA build has a third buffer kind, `CUDA_Host`** (pinned RAM). `parse_log` counted it as GPU,
+  so the GPU working memory was overstated and the CPU side always read 0. Fixed here (`in_ram()` in
+  `verify.py`). Example, OLMoE 4k: CUDA0 118.27 MiB + CUDA_Host 20.02 MiB, reported before as
+  138.29 on the GPU.
+- **Pinned-RAM compute buffer (llama-completion) grows by exactly 1 MiB per 1,024 tokens of context,
+  for every model**: 12.02 / 24.02 / 72.02 MiB at 4k / 16k / 64k for Falcon-H1, LFM2, Granite 3.1;
+  the 4k base differs by model (Granite 4.0-H 10.02, Gemma 3 14.03, Jamba 24.02, Gemma 2 26.03,
+  gpt-oss 27.28). Candidate rule to check against the Mac's CPU buffer numbers.
+- **llama-server, GPU compute buffer: +12.00 MiB from 4k to 16k for 8 of 9 models** (Gemma 2:
+  +24.00), from a per-model base (29.69 MiB Granite 4.0-H … 206.99 MiB gpt-oss). Only two context sizes
+  per model, so a hypothesis, not a rule yet.
+- **llama-server reserves far less than llama-completion** (what `verify` runs): LFM2 4k 39.01 vs
+  140.02 MiB, Gemma 2 4k 80.02 vs 526.02, gpt-oss 4k 206.99 vs 416.01. Predicting from verify's
+  numbers would overstate a server by 100–450 MiB.
+- Base GPU compute differs a lot by model at 4k (llama-completion): Falcon-H1 76, LFM2 140,
+  Granite 4.0-H 206, Gemma 2 526, Gemma 3 526, gpt-oss 416 MiB.
+
+### 2. Is the input embedding table kept in RAM on CUDA: yes
+
+`weights on the CPU (file range)` matches exactly for every model (`CPU_Mapped`), and `weights on the
+GPU` matches for every model but the two Gemmas, with tied embeddings (Llama 3.2 1B) and untied
+(Qwen2.5 7B) alike. So the VRAM estimate should leave `token_embd` out, as `verify.predict` does.
+
+**Gemma only, CUDA only:** GPU weights are 0.04 MiB (Gemma 3 1B: 651.63 predicted vs 651.67) and
+0.02 MiB (Gemma 2 2B: 1,323.24 vs 1,323.26) larger than the sum of the tensors. It is not per-tensor
+alignment: padding every tensor to 32–512 bytes still gives 651.63. Gemma 3 fails the 0.03 MiB
+tolerance at every context, Gemma 2 just passes. Something llama.cpp adds for Gemma on a separate GPU;
+the Mac's file-range layout would not show it.
+
+### 3. Experts in RAM for a MoE: QuantPilot's plan is too tight
+
+`moe/summary.md`, llama-bench `-p 512 -n 128 -r 3`.
+
+gpt-oss-20b MXFP4 (12.1 GB) on 8 GB:
+
+| setup | prompt tok/s | generate tok/s |
+|---|---|---|
+| `--n-cpu-moe 6` (QuantPilot's plan) | 250.1 ± 1.3 | 17.0 ± 0.1 |
+| `--n-cpu-moe 8` | 249.1 ± 2.4 | 18.1 ± 0.2 |
+| `--n-cpu-moe 10` | 544.9 ± 11.6 | 21.2 ± 0.3 |
+| `--n-cpu-moe 24` (all experts in RAM) | 362.1 ± 4.0 | 15.2 ± 1.8 |
+| `-ngl 15` (whole layers, best) | 526.3 ± 4.0 | 21.9 ± 0.3 |
+| `-ngl 18` / `-ngl 21` | 222.3 / 248.6 | 15.0 / 14.3 |
+
+- **The plan overfills the card.** With `--n-cpu-moe 6`, llama.cpp puts **8,522.54 MiB** of weights on
+  the GPU (verify predicts 8,522.52, so the layout math is right), plus 114 MiB KV and 416 MiB compute,
+  on a card with 7,600 MiB free. The planner's fit test disagrees with verify's layout: it should
+  have chosen about 10, the first N that fits, and exactly where the speed peaks. Windows hides this:
+  the WDDM driver spills to system RAM (sysmem fallback) instead of failing, so it only gets slower; on
+  Linux expect an out-of-memory error. The planner also needs the compute buffer in its budget.
+- Experts in RAM against whole layers in RAM, each at its best: 21.2 vs 21.9 tok/s generating,
+  545 vs 526 prompt. About even on this PC (PCIe 4.0 x8 laptop, DDR5).
+- For MoEs that fit, each expert layer moved to RAM costs speed steadily: OLMoE 104.1 → 78.1 / 71.8 /
+  58.4 tok/s at 0 / 4 / 8 / 16; Granite 3.1 MoE 144.4 → 123.3 / 100.9 / 88.9 at 0 / 6 / 12 / 24.
+- `verify` with QuantPilot's plan matched exactly for gpt-oss at 4k, 16k, 64k and 16k-q8_0 (KV,
+  GPU weights, CPU file range), so the expert layout itself is right on CUDA.
+
+### 4. vLLM's memory budget and start-up check: the check is wrong on this card
+
+`vllm-wsl2/`, Qwen/Qwen2.5-1.5B-Instruct-AWQ.
+
+- **vLLM at its defaults never starts here**: `Free memory on device cuda:0 (6.88/8.0 GiB) on startup
+  is less than desired GPU memory utilization (0.92, 7.36 GiB)`, three times out of three.
+  `nvidia-smi` showed 7,551–7,640 MiB (7.37–7.46 GiB) free just before. **vLLM measures the free
+  memory after creating its own CUDA context, about 0.5 GiB later.** QuantPilot said Perfect, with no
+  start-up note. The check needs that overhead: 0.92 × 8 GiB can never be met on an 8 GB card.
+- **"As stored" rows of quantized repos skip the vLLM rules.** An AWQ repo gets backend `original`,
+  runtime transformers, so neither the budget nor the start-up note applies, and at 32k it even
+  said `gpu+ram`, which vLLM cannot do. That is the model a user would point vLLM at.
+- **Stored but tied `lm_head` counted as runtime memory.** The AWQ repo stores `lm_head` (0.435 GiB)
+  although `config.json` ties it; `inspect` notices it. vLLM does not load it: 1.50 − 0.435 =
+  1.07 GiB, and vLLM logs `Model loading took 1.1 GiB`.
+- With `--gpu-memory-utilization 0.8` (6.4 GiB) it starts. vLLM's breakdown: weights + non-torch
+  1.3 GiB, peak activations 0.59–0.79 GiB (differs between two identical starts), CUDA graphs
+  0.2 GiB (0.36 estimated), KV cache 4.3–4.5 GiB.
+- **KV bytes per token match**: 4.3 GiB → 161,200 tokens and 4.27 GiB → 160,032 tokens = 28,650 B,
+  QuantPilot 28,672 B (`inspect`).
+
+### 5. 8-bit KV cache in vLLM (compute capability 8.9): confirmed
+
+At 32k, `--gpu-memory-utilization 0.8`, Triton attention: f16 4.27 GiB → 160,032 tokens, fp8
+4.28 GiB → 320,368 tokens = 14,345 B/token, half of f16. QuantPilot's rule (8 bits at 8.9+) holds.
+
+What it took to run vLLM in WSL2 without root (worth a README line): no gcc, so torch.compile fails
+("Failed to find C compiler"); `CC` pointed at `zig cc` from the `ziglang` wheel works. No CUDA
+toolkit, so FlashInfer cannot JIT: `VLLM_USE_FLASHINFER_SAMPLER=0`, and for an FP8 cache
+`--attention-backend TRITON_ATTN` (FlashAttention 2 has no FP8 cache before Hopper, vLLM then picks
+FlashInfer). `scripts/vllm_check.sh` sets these.
+
+### 6. Several GPUs: not tested, one card.
+
+## Fixed on this branch
+
+| Problem | Fix |
+|---|---|
+| `ocq models` labels mixed `\` and `/` on Windows (`a\b/x.gguf`), same for the `~/…` refs | `as_posix()` in `discovery.py` |
+| 4 discovery tests used `symlink_to`, which Windows refuses without Developer Mode | copy where links are refused, as huggingface_hub does |
+| `ggml-org/gpt-oss-20b-GGUF` read as an 855M BF16 model with an MXFP4 row at 113 bits/weight: its EAGLE3 draft files sort first and their header was read | `model_header()`: a header whose `general.architecture` is `clip` or `eagle3` drops that file name; now 20.91B, cross-checked with the HF API, 4.63 bits |
+| `verify` counted `CUDA_Host` (pinned RAM) as GPU memory | `in_ram()` |
+| A llama.cpp crash showed as a "differs +486 MiB" table | `parse_log` reports `fatal error` / `GGML_ASSERT`; `--save-log` writes the log before anything can fail |
+| `.env` (HF token) not ignored | `.gitignore` |
+
+`make check`: 335 tests pass, ruff clean. `pytest -m slow` (real GGUF, AWQ, GPTQ, BNB, NVFP4
+quantization on this GPU): 5 passed.
+
+## Still open, for the Mac side
+
+1. Planner's `--n-cpu-moe` for gpt-oss-20b: picks 6, needs about 10 (section 3); and the llama.cpp
+   compute buffer in the VRAM budget.
+2. vLLM start-up check: subtract vLLM's own CUDA context (~0.5 GiB measured) from the free VRAM
+   (section 4).
+3. Apply the vLLM rules to the "as stored" rows of AWQ / GPTQ / NVFP4 / FP8 repos.
+4. Leave a stored `lm_head` out of runtime memory when `config.json` ties it.
+5. Speed of a dense `gpu+ram` row: Qwen2.5-7B Q4_K_M at 131k, llama.cpp puts 14/29 layers on the
+   GPU; QuantPilot shows `<= 45 tok/s`, measured 13.72 ± 0.46 (all 29 layers: 44.03 ± 2.19). The
+   bound ignores the layers in RAM. Same for OLMoE at 64k (11/17 layers on the GPU, shown `<= 446`).
+   `moe/qwen2.5-7b-dense-offload.md`.
+6. QuantPilot does not predict how many layers llama.cpp's fit puts on the GPU, so `verify` skips
+   the weight checks then (Qwen 7B 131k, OLMoE 64k).
+7. Gemma's extra 0.02–0.04 MiB on CUDA (section 2).
+8. llama.cpp b11429 crashes on Granite 3.1 MoE with a q8_0 cache at 16k (`ggml-impl.h:330: fatal error`
+   in the K-rotation graph, `attn_inp_k_rot`); f16 at 4k/16k/64k is fine. A llama.cpp bug, but
+   QuantPilot plans q8_0 there.
+9. `feasibility` on a GGUF repo says "--n-cpu-moe, see ocq plan", but `plan` refuses GGUF repos
+   ("already GGUF"), so the N is never shown.
+10. A gated repo (Gemma, Llama) without an accepted license shows "tensor headers not readable",
+    architecture unknown; it should say the repo is gated and link the license page (403
+    GatedRepoError from the Hub).
+11. `ocq models` lists encoders, an ASR model and CTranslate2 Whisper folders as LLMs with tok/s
+    (`intfloat/multilingual-e5-small`, `sentence-transformers/*`, `nvidia/nemotron-3.5-asr-…`,
+    `Systran/faster-whisper-*` as "only config.json" although complete).
+12. One unit test (`test_ocq_models_rates_each_model_as_stored_offline`) failed once while the slow
+    tests ran in parallel and passed in every run after.
+
+## Also checked, all fine
+
+- `ocq verify` on CUDA, dense: Llama 3.2 1B Q8_0 (Ollama) at 4k f16 and 16k q8_0, Qwen2.5 7B Q4_K_M
+  at 8k: KV, GPU weights and CPU file range exact.
+- Mamba / convolution state on CUDA (Granite 4.0-H, Falcon-H1, Jamba, LFM2): exact at every context.
+- `ocq optimize Qwen/Qwen2.5-1.5B-Instruct -b gguf --gguf-type Q4_K_M --execute`: 0.918 GB on disk vs
+  0.913 GB predicted, validation passed, 98.4 tok/s measured (expected about 125), 84 ms to first token.
+- `ocq models` on this PC: Ollama and the Hugging Face cache found, rated offline.
