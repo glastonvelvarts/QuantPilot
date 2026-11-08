@@ -1,2 +1,0 @@
-llama.cpp's log: results\windows-nvidia-geforce-rtx-4060-laptop-gpu\verify\granite-3.1-1b-a400m-instruct-Q2_K-16k-q8_0.log
-Error: llama.cpp stopped with an error: 0.00.305.372 D D:/a/llama.cpp/llama.cpp/ggml/src\ggml-impl.h:330: fatal error

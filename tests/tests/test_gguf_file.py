@@ -249,7 +249,7 @@ def test_feasibility_of_a_gguf_repo_gives_the_n_cpu_moe_flag(monkeypatch):
 
 
 # llama-server b11429 on an RTX 4060 Laptop, 4 conversations: GPU compute buffer + output
-# buffer, MiB, at 4096 and 16384 tokens (results/windows-nvidia-.../server/summary.md).
+# buffer, MiB, at 4096 and 16384 tokens, from llama-server's start-up logs.
 LLAMA_SERVER_CUDA = {
     "Falcon-H1-0.5B-Instruct-IQ1_M": (31.64 + 0.50, 43.64 + 0.50),
     "gemma-2-2b-it-IQ3_M": (80.02 + 3.91, 104.02 + 3.91),
@@ -278,12 +278,12 @@ def test_llama_server_working_memory_is_an_upper_bound_of_the_measured(stem):
 # llama-server b11429, compute + output buffer in MiB. Attention copies one layer's keys and
 # values at 16 bits on CUDA with a q8_0 cache, on CUDA when that layer's cache is in RAM, and
 # on Metal always; it sets the peak when it is larger than the feed-forward one.
-# CUDA: RTX 4060 Laptop (results/windows-nvidia-.../retest-3/server-*.log.gz).
+# CUDA: RTX 4060 Laptop, from llama-server's start-up logs.
 # Metal: M1 16 GB. "deepseek-v2-lite-2-layers" is DeepSeek-V2-Lite's shapes in 2 layers with
 # random weights (MLA, 64 experts; q_lora_rank 1536, which llama.cpp needs below 26 layers).
 CUDA, CUDA_LAYERS_IN_RAM, METAL = "cuda", "cuda, layers in ram", "metal"
 LLAMA_SERVER_ATTENTION = [
-    # Attention beside a Mamba block in every layer: the copy adds to the peak (retest-5).
+    # Attention beside a Mamba block in every layer: the copy adds to the peak.
     ("Falcon-H1-0.5B-Instruct-IQ1_M", 4096, "q8_0", CUDA, 35.67 + 0.50),
     ("Falcon-H1-0.5B-Instruct-IQ1_M", 16384, "q8_0", CUDA, 52.67 + 0.50),
     ("Falcon-H1-0.5B-Instruct-IQ1_M", 65536, "q8_0", CUDA, 124.67 + 0.50),
@@ -332,7 +332,7 @@ def test_llama_server_working_memory_with_attentions_copy(stem, context, cache, 
 
 def test_olmoe_at_64k_with_a_q8_0_cache_keeps_3_layers_of_experts_in_ram():
     # The old plan, --n-cpu-moe 1, overfilled the RTX 4060 Laptop: 2,271 MiB of weights +
-    # 4,352 cache + 596 compute with 7,106 free (retest-3/olmoe-64k-q8_0.txt). Each layer of
+    # 4,352 cache + 596 compute with 7,106 free (llama.cpp's log). Each layer of
     # experts is 139 MiB: 2 leaves 26 MiB, 3 leaves 165 MiB.
     from conftest import nvidia_pc
 
@@ -368,7 +368,7 @@ def test_gpt_oss_on_the_rtx_4060_keeps_11_layers_of_experts_in_ram():
 
 def test_llama_cpp_fills_the_gpu_with_whole_layers_from_the_back():
     # Qwen2.5-7B Q4_K_M at 131k on the RTX 4060 Laptop, llama-completion b11429 with --fit
-    # (results/windows-nvidia-.../retest/qwen7b-131k-verify.log.gz): 15 layers would take
+    # (data/gguf/llama-completion-qwen2.5-7b-131k-cuda.log): 15 layers would take
     # 6,324 MiB of its 6,082 MiB target, so "offloaded 14/29 layers to GPU", the output layer
     # and blocks 15-27: "CUDA0 model buffer size = 2172.17 MiB". QuantPilot shared the GPU out
     # evenly before and said 14.95 layers.
@@ -397,7 +397,7 @@ def test_llama_cpp_fills_the_gpu_with_whole_layers_from_the_back():
 def test_a_mixture_of_experts_too_big_even_without_experts_fills_dense_layers():
     # OLMoE Q2_K at 64k on the RTX 4060 Laptop: llama.cpp b11429 put 11/17 layers on the GPU,
     # the experts of all but the lowest of them in RAM
-    # (results/windows-nvidia-.../verify/olmoe-1b-7b-0924-instruct-q2_k-64k.log.gz).
+    # (data/gguf/llama-completion-olmoe-1b-7b-0924-instruct-q2_k-64k-cuda.log).
     from conftest import nvidia_pc
 
     from ocq.model_analyzer import gguf_snapshot, quant_options
@@ -448,7 +448,7 @@ def test_granite_moe_with_a_quantized_cache_names_llama_cpps_workaround():
 
 
 def test_an_expert_plan_on_windows_has_what_is_really_free():
-    # gpt-oss-20b at 4k on the RTX 4060 Laptop under Windows (retest-4): nvidia-smi 7,792 MiB
+    # gpt-oss-20b at 4k on the RTX 4060 Laptop under Windows: nvidia-smi 7,792 MiB
     # free, CUDA's fixed figure 7,106. llama-bench: --n-cpu-moe 9 (7,309 MiB of weights) was the
     # fastest, 8 (7,713) over nvidia-smi's free memory fell to a third of the prompt speed.
     from conftest import nvidia_pc
@@ -469,8 +469,8 @@ def test_an_expert_plan_on_windows_has_what_is_really_free():
 
 
 def test_llama_cpps_fit_works_from_cudas_own_free_figure():
-    # Qwen2.5-7B at 131k (retest-3): llama.cpp's --fit target was 7,106 - 1,024 = 6,082 MiB
-    # whatever nvidia-smi said, and it put 14 of 29 layers on the GPU.
+    # Qwen2.5-7B at 131k on the RTX 4060 Laptop: llama.cpp's --fit target was 7,106 - 1,024 =
+    # 6,082 MiB whatever nvidia-smi said, and it put 14 of 29 layers on the GPU.
     from conftest import nvidia_pc
 
     from ocq.model_analyzer import gguf_snapshot, quant_options

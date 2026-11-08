@@ -77,7 +77,7 @@ def test_identical_cards_each_keep_their_own_live_reading():
 
 
 def test_cudas_own_free_figure_is_kept_next_to_nvidia_smis(monkeypatch):
-    # The RTX 4060 Laptop under Windows: nvidia-smi 7,610 MiB free, CUDA 7,106 (retest-4).
+    # The RTX 4060 Laptop under Windows: nvidia-smi 7,610 MiB free, CUDA 7,106.
     laptop = "NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9"
     monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: [(7106.0, 8187.5)])
     monkeypatch.setattr(hardware.platform, "system", lambda: "Windows")
@@ -90,7 +90,7 @@ def test_cudas_own_free_figure_is_kept_next_to_nvidia_smis(monkeypatch):
 
 
 def test_without_nvidia_smi_the_free_memory_comes_from_cuda(monkeypatch):
-    # Windows with nvidia-smi off PATH (retest-5): the card was known, its free memory was the
+    # Windows with nvidia-smi off PATH: the card was known, its free memory was the
     # total, 8.00 GB.
     laptop = "NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9"
     known = nvidia_pc(laptop)
