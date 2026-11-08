@@ -47,6 +47,7 @@ from ocq.model_analyzer import (
     parse_params_from_name,
     quant_options,
     recommend_models,
+    stored_runtime,
 )
 from ocq.model_size import kv_value_bytes
 from ocq.types import (
@@ -267,6 +268,32 @@ def test_awq_repo_counts_the_lm_head_it_stores():
     assert snap.facts.parameters.value == 1_777_088_000
     assert snap.facts.parameters.kind == FactKind.CROSS_CHECKED
     assert "lm_head stored" in snap.facts.architecture.note
+
+
+def test_a_stored_awq_repo_is_rated_for_vllm_without_its_tied_lm_head_copy():
+    # RTX 4060 Laptop, 7,610 MiB free. vLLM loaded this repo in "1.1 GiB": the stored lm_head
+    # copy (0.435 GiB) is not loaded. At its default share (0.92) vLLM never started there.
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    snap = real_snapshot(QWEN_AWQ, laptop)
+    (stored,) = quant_options(snap, laptop)
+    assert snap.tied_copy_bytes == 151_936 * 1536 * 2
+    assert stored.weights_gb == pytest.approx(snap.original_gb - 0.435, abs=0.001)
+    assert stored.weights_gb == pytest.approx(1.07, abs=0.01)
+    assert stored.runtime == "vLLM"
+    assert stored.fit_level == FitLevel.TOO_TIGHT
+    assert "once vLLM has started CUDA" in stored.note
+
+
+def test_stored_formats_vllm_serves_and_the_ones_it_does_not():
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    for repo in (QWEN_AWQ, QWEN_GPTQ, QWEN3_8B_NVFP4, QWEN_W8A8):
+        assert stored_runtime(real_snapshot(repo)) == "vLLM", repo
+    for repo in (QWEN_BNB, MLX_QWEN):
+        assert stored_runtime(real_snapshot(repo)) == "transformers", repo
+    # bitsandbytes stays with transformers, which can keep layers in RAM.
+    (bnb,) = quant_options(real_snapshot(QWEN_BNB, laptop), laptop)
+    assert bnb.runtime == "transformers"
+    assert bnb.fit_level != FitLevel.TOO_TIGHT
 
 
 def test_plain_repo_facts_match_the_hub():

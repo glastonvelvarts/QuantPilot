@@ -336,6 +336,7 @@ def build_snapshot(
         catalog_source="huggingface",
         facts=facts,
         kv_layers=kv_layers_from(config)[0],
+        tied_copy_bytes=tied_copy_bytes(config, tensors, dtypes or {}),
         raw=meta,
         **(architecture_from(config) or vocabulary_from_tensors(tensors)),
     )
@@ -598,7 +599,7 @@ def runtime_for_row(option: QuantOption) -> str:
     if option.row_kind == "gguf":
         return "llama.cpp"
     if option.row_kind == "stored":
-        return "transformers (full precision)"
+        return "vLLM" if option.runtime == VLLM else "transformers (full precision)"
     return "vLLM / transformers"
 
 
@@ -822,6 +823,14 @@ def active_fact(
     elif config and (configured == named):
         source, kind = "config.json + tensor names", FactKind.CROSS_CHECKED
     return Fact(read, source, kind, ", ".join(parts))
+
+
+def tied_copy_bytes(config: dict, tensors: list[Tensor], dtypes: dict[str, str]) -> int:
+    """Bytes of the lm_head copy (see lm_head_copy) in the files. Runtimes do not load it."""
+    if not lm_head_copy(config, tensors):
+        return 0
+    copies = [(name, shape) for name, shape in tensors if name.endswith("lm_head.weight")]
+    return stored_bytes(copies, dtypes) or 0
 
 
 def lm_head_copy(config: dict, tensors: list[Tensor]) -> int:
@@ -1311,13 +1320,14 @@ def quant_options(
         return [
             fit_at(
                 label,
-                model.original_gb,
+                model.original_gb - model.tied_copy_bytes / GB,
                 model,
                 hardware,
                 context,
                 False,
                 row_kind="stored",
                 kv_cache=kv_cache,
+                runtime=stored_runtime(model),
             )
         ]
     stored = model.stored_precision or "FP16"
@@ -1474,6 +1484,17 @@ def best_option(options: list[QuantOption]) -> QuantOption:
     return quantized[-1]
 
 
+# Already quantized checkpoints vLLM serves as they are (quantization labels of
+# quantization_label). bitsandbytes, MLX and unnamed methods stay with transformers.
+VLLM_STORED = ("AWQ", "GPTQ", "ModelOpt", "FP8", "MXFP4", "compressed-tensors")
+
+
+def stored_runtime(model: ModelSnapshot) -> str:
+    """The runtime for a repo's own quantized files: vLLM for the formats it serves."""
+    label = str(model.facts.quantization.value or "")
+    return VLLM if label.startswith(VLLM_STORED) else TRANSFORMERS
+
+
 def runtime_of(row_kind: str) -> str:
     """The runtime that serves a row: llama.cpp for GGUF, vLLM for AWQ, GPTQ and NVFP4,
     transformers for the original weights and bitsandbytes."""
@@ -1493,7 +1514,9 @@ def fit_at(
     use_measurements: bool = True,
     row_kind: str = "gguf",
     kv_cache: str = "f16",
+    runtime: str = "",
 ) -> QuantOption:
+    """runtime: who runs the row, when not the one of its kind (runtime_of)."""
     if model.params_b <= 0:
         hint = model.facts.parameters.note
         raise OcqError(
@@ -1503,7 +1526,7 @@ def fit_at(
         )
     # transformers expands MLA's compressed cache and keeps 16 bits; llama.cpp and vLLM keep it
     # compressed, and store the cache type asked for in their own format.
-    runtime = runtime_of(row_kind)
+    runtime = runtime or runtime_of(row_kind)
     value_bytes = kv_value_bytes(kv_cache, runtime, hardware.vllm_fp8_kv_cache)
     kv_bytes = model.kv_cache_bytes(context, runtime, value_bytes=value_bytes)
     context_gb = 0.0
@@ -1513,7 +1536,7 @@ def fit_at(
     required = weights_gb + context_gb
     # vLLM serves AWQ, GPTQ and NVFP4 with tensor parallel; llama.cpp and transformers split
     # by layers.
-    split = TENSOR_PARALLEL if row_kind in VLLM_ROWS else LAYER_SPLIT
+    split = TENSOR_PARALLEL if runtime == VLLM else LAYER_SPLIT
     heads = model.num_attention_heads if model.architecture_known else None
     # vLLM on NVIDIA works with a share of each card's total memory and only on the GPU.
     vllm = runtime == VLLM and hardware.has_cuda
@@ -1606,6 +1629,7 @@ def fit_at(
         gpu_split=pool.split if pool else "",
         experts_in_ram=experts_ram_layers,
         note=note,
+        runtime=runtime,
     )
 
 

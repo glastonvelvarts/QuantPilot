@@ -445,6 +445,8 @@ class QuantOption:
     experts_in_ram: int = 0
     # Why the runtime cannot run this row here, when that is not just the memory it needs.
     note: str = ""
+    # The runtime the row was rated for: llama.cpp, vLLM or transformers.
+    runtime: str = ""
 
     @property
     def runnable(self) -> bool:
@@ -510,6 +512,9 @@ class ModelSnapshot:
     # each tensor in the file whose header was read (by Hugging Face style name).
     gguf_files: tuple[tuple[str, int], ...] = ()
     gguf_tensor_bytes: dict[str, int] = field(default_factory=dict, repr=False)
+    # Bytes the weight files store but no runtime loads: an lm_head that config.json ties to the
+    # input embeddings (the runtime uses the embeddings in its place).
+    tied_copy_bytes: int = 0
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
