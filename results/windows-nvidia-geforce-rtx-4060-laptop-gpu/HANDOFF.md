@@ -208,3 +208,46 @@ Still open: 6 (verify does not predict llama.cpp's own layer split), 7 (Gemma's 
 MiB on CUDA), 8 (llama.cpp crash, Granite MoE + q8_0 at 16k), 12 (did not fail in 30 runs under
 load on the Mac), and llama-server's working memory for MLA models (DeepSeek reserved 754 MiB at
 64k on the Mac, more than the estimate).
+
+## NVIDIA PC re-test of `phase-4-nvidia-fixes`, 2026-11-08
+
+`retest/`. 354 tests pass on Windows, ruff clean.
+
+**gpt-oss-20b: fixed.** `feasibility` gives `--n-cpu-moe 11`, for the local file and for
+`ggml-org/gpt-oss-20b-GGUF`. With 11, llama.cpp needs 7,030 MiB (6,500 weights + 114 KV + 416
+compute, llama-completion at 4k) of the 7,106 MiB it sees free, 60 MiB left; verify matches
+(KV +0.00, GPU weights -0.03, CPU +0.00). With 10 it needs 7,434 MiB and 0 MiB is left, so 11 is
+the first that fits. llama-bench, tok/s:
+
+| `--n-cpu-moe` | prompt | generate |
+|---|---|---|
+| 10 | 474.1 ± 28.7 | 17.9 ± 0.3 |
+| 11 | 449.1 ± 13.0 | 16.4 ± 0.2 |
+| 12 | 444.8 ± 2.1 | 14.9 ± 0.6 |
+
+No drop at 11 that would show a spill. Every run today was about 15% slower than the first session
+(10 gave 21.2 / 545 then), on AC power; not found why. The shown `<= 70` is far above 16.4.
+
+**Qwen2.5-7B Q4_K_M at 131k: one layer off.** llama.cpp puts 14/29 layers on the GPU (2,172 MiB
+weights, 3,328 MiB of the KV cache, 426 compute; 1,164 MiB left free). QuantPilot's share is
+0.5155 of 29 = 14.95 layers. The KV cache matches (7,168.00). The speed bound went from `<= 45` to
+`<= 29`; measured at 14 layers: 13.72 ± 0.46.
+
+**vLLM (Qwen/Qwen2.5-1.5B-Instruct-AWQ, WSL2): fixed, one new gap.**
+- At the default 0.92 vLLM fails as before (6.88 GiB free after its CUDA context), and QuantPilot
+  now says so: Too Tight, "7.5 GB is free, about 6.9 GB once vLLM has started CUDA".
+- The AWQ row is rated for vLLM, and its weights are 1.07 GB without the tied `lm_head` copy;
+  vLLM logs `Model loading took 1.1 GiB`.
+- At 0.8 vLLM starts every time: KV 4.5 GiB → 168,576 tokens at 4k; at 32k f16 4.47 GiB →
+  167,408 tokens, fp8 4.47 GiB → 335,104 tokens (2.00×).
+- **Gap:** `feasibility` has no way to rate at 0.8, so on an 8 GB card every vLLM row is Too Tight
+  although vLLM serves it at 0.8 (also the AWQ / GPTQ rows of `meta-llama/Llama-3.2-1B-Instruct`).
+  It could take `--gpu-memory-utilization`, or rate at the highest share that starts and name the
+  flag, as it does for `--n-cpu-moe`.
+- Small: the header then reads "1.47 of 0.00 GB (999%)".
+
+**Gated repos: fixed.** `meta-llama/Llama-3.1-8B-Instruct` (not accepted) gives the new message
+with the license link (`retest/llama-gated.txt`). Meta has accepted this account for Llama 3.2 1B
+now; `feasibility` of it works.
+
+**`ocq models`: fixed.** 10 models, all text generation (`retest/models.txt`).
