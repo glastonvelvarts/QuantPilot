@@ -264,3 +264,28 @@ now; `feasibility` of it works.
   and check it starts and the KV token count, then `feasibility` of the AWQ and
   `meta-llama/Llama-3.2-1B-Instruct` AWQ / GPTQ rows.
 - **Still open:** the Qwen 7B 131k layer split (14 placed, 14.95 predicted), item 6.
+
+## NVIDIA PC re-test of `0ba7c29` (vLLM at the highest share that starts), 2026-11-08
+
+`retest-2/`. 356 tests pass on Windows, ruff clean. `scripts/vllm_check.sh` takes `SHARE=0.85`.
+
+**vLLM at 0.85: starts, fixed.** Qwen/Qwen2.5-1.5B-Instruct-AWQ, WSL2, 7,630-7,689 MiB free:
+
+| run | vLLM | KV cache | tokens |
+|---|---|---|---|
+| default (0.92) | fails: 6.88 GiB free < 7.36 | - | - |
+| 0.85, 4k | starts | 4.9 GiB | 183,552 |
+| 0.85, 32k, f16 | starts | 4.87 GiB | 182,384 |
+| 0.85, 32k, fp8 (Triton) | starts | 4.87 GiB | 365,056 (2.00×) |
+
+4.87 GiB / 182,384 tokens = 28,671 B per token (vLLM prints GiB to two decimals), QuantPilot
+28,672. vLLM sees 6.88 GiB free and 0.85 asks for 6.8 GiB: 0.08 GiB of room. QuantPilot's note
+says "about 6.9-7.0 GB once vLLM has started CUDA".
+
+`feasibility` of the AWQ repo at each setting: Perfect at 0.85, "1.47 of 6.80 GB (22%)" at 4k,
+2.23 at 32k f16, 1.80 at 32k fp8, with "Rated at --gpu-memory-utilization 0.85, the highest
+that starts".
+
+**Llama-3.2-1B-Instruct AWQ / GPTQ rows: fixed.** Perfect (gpu) at 0.85, on Windows (`vLLM
+v0.32.0` default, vLLM not installed) and in WSL2 (the installed vLLM's): AWQ 4-bit 1.33, GPTQ
+4-bit 1.33, GPTQ 8-bit 1.81 GB. Before: Too Tight, unfit.
