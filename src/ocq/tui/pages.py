@@ -778,9 +778,15 @@ class QuantizePage(Page):
         self.query_one("#plan").display = False
         self.query_one("#result").display = False
         self.query_one("#running").display = True
-        self.query_one("#stage", Static).update(Text(f"Quantizing {ref} ...", "bold"))
+        stage = self.query_one("#stage", Static)
+        stage.update(Text(f"Quantizing {ref} ...", "bold"))
         progress = self.query_one(ProgressLog)
         progress.clear()
+
+        def step(line: str) -> None:  # the latest progress line, under the title
+            stage.update(Text.assemble((f"Quantizing {ref}\n", "bold"), (line[:120], "dim")))
+
+        progress.on_line = step
         self.qp.job_started("Quantizing")
         self.app.begin_capture_print(progress)
         self.quantize(ref, key, goal, context)
