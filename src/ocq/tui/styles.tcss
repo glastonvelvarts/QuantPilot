@@ -227,6 +227,51 @@ Collapsible {
     background: transparent;
 }
 
+/* This PC: quantization tools */
+
+.section {
+    text-style: bold;
+    margin: 1 0 1 0;
+}
+
+#tools {
+    height: auto;
+}
+
+.tool {
+    height: 1;
+}
+
+.tool-name {
+    width: 21;
+    color: $text-muted;
+}
+
+.tool-state {
+    width: 22;
+}
+
+.tool-state.ok {
+    color: $success;
+}
+
+.tool-state.off {
+    color: $text-muted;
+}
+
+.tool Button {
+    min-width: 11;
+}
+
+#install-log {
+    height: 10;
+    margin-top: 1;
+    border: round $border;
+    background: $surface;
+    padding: 0 1;
+    color: $text-muted;
+}
+
 /* Status bar --------------------------------------------------------------------------- */
 
 #status {
@@ -307,6 +352,7 @@ ModalScreen {
 App.-ascii .card,
 App.-ascii .dialog,
 App.-ascii #progress,
+App.-ascii #install-log,
 App.-ascii TextArea {
     border: ascii $border;
 }

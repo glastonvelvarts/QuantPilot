@@ -22,6 +22,7 @@ from textual.widgets import (
     Collapsible,
     DataTable,
     Input,
+    Label,
     LoadingIndicator,
     Static,
     Switch,
@@ -78,6 +79,13 @@ FORMATS = (
     ]
 )
 FORMAT_KEYS = {key for _, key in FORMATS}
+TOOL_ORDER = (
+    QuantAlgorithm.GGUF,
+    QuantAlgorithm.AWQ,
+    QuantAlgorithm.GPTQ,
+    QuantAlgorithm.BNB,
+    QuantAlgorithm.NVFP4,
+)
 
 
 def context_options(default: int) -> list[tuple[str, int]]:
@@ -201,10 +209,10 @@ class Page(Vertical):
             widget.loading = False
         problems = self.query(".problem")
         if problems:
-            problems.first(Static).update(Text(message))
+            problems.first(Static).update(Text(words.plain(message)))
             problems.first().display = True
         else:
-            self.notify(message, severity="error")
+            self.notify(words.plain(message), severity="error")
 
     @on(Input.Submitted)
     def submitted(self, event: Input.Submitted) -> None:
@@ -242,8 +250,14 @@ class PcPage(Page):
     def compose_body(self) -> ComposeResult:
         with Results(classes="results"):
             yield Static("", id="pc-info")
+            yield Static("Quantization tools", classes="section")
+            yield Vertical(id="tools")
+            yield ProgressLog(id="install-log")
         with Horizontal(classes="actions"):
             yield Action("Refresh", id="refresh")
+
+    def on_mount(self) -> None:
+        self.query_one("#install-log").display = False
 
     def opened(self) -> None:
         if not self.loaded:
@@ -258,7 +272,7 @@ class PcPage(Page):
     @background("pc")
     def load(self) -> None:
         from ocq.plan import free_disk_gb
-        from ocq.quantizers import backend_status
+        from ocq.tui.install import tool_state
 
         hw = self.qp.hardware(fresh=True)
         grid = Table.grid(padding=(0, 3))
@@ -278,17 +292,37 @@ class PcPage(Page):
         if speed:
             grid.add_row("Memory speed", f"{speed:.0f} GB/s")
         grid.add_row("Free disk", f"{free_disk_gb(Path.cwd()):.0f} GB")
-        grid.add_row("", "")
-        grid.add_row(Text("Quantization tools", "bold"), "")
-        for status in backend_status(hw):
-            state = Text("Ready", "green") if status.ready else Text("Not installed", "dim")
-            grid.add_row(status.algorithm.value.upper(), state)
-        self.app.call_from_thread(self.show, grid)
+        tools = [tool_state(algorithm, hw) for algorithm in TOOL_ORDER]
+        self.app.call_from_thread(self.show, grid, tools)
 
-    def show(self, grid: Table) -> None:
+    def show(self, grid: Table, tools: list) -> None:
+        from ocq.tui.install import MISSING, READY
+
         info = self.query_one("#pc-info", Static)
         info.update(grid)
         info.loading = False
+        box = self.query_one("#tools", Vertical)
+        box.remove_children()
+        for tool in tools:
+            state = "ok" if tool.state == READY else "off"
+            row = Horizontal(
+                Label(tool.name, classes="tool-name"),
+                Label(tool.message, classes=f"tool-state {state}"),
+                classes="tool",
+            )
+            if tool.state == MISSING:
+                row.compose_add_child(Action("Install", name=tool.algorithm.value))
+            box.mount(row)
+
+    @on(Button.Pressed, ".tool Button")
+    def install_pressed(self, event: Button.Pressed) -> None:
+        log = self.query_one("#install-log", ProgressLog)
+
+        def started() -> None:
+            log.clear()
+            log.display = True
+
+        self.qp.ask_install(QuantAlgorithm(event.button.name), log, started, lambda *_: self.run())
 
 
 # Model lists ------------------------------------------------------------------------------
@@ -607,6 +641,7 @@ class QuantizePage(Page):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.plan_for: tuple | None = None  # the form values the shown plan was made for
+        self.tool = QuantAlgorithm.GGUF  # what the Install button on the plan installs
 
     def compose_body(self) -> ComposeResult:
         s = self.qp.settings
@@ -622,6 +657,7 @@ class QuantizePage(Page):
             with Card(id="plan", classes="card"):
                 yield Static("", id="plan-text")
                 yield Action("Start", variant="primary", id="start")
+                yield Action("Install", variant="primary", id="install")
             with Vertical(id="running"):
                 yield Static("", id="stage")
                 yield ProgressLog(id="progress")
@@ -667,7 +703,7 @@ class QuantizePage(Page):
         self.app.call_from_thread(self.show_plan, plan, (ref, key, goal, context))
 
     def show_plan(self, plan, form: tuple) -> None:
-        from ocq.quantizers import get_quantizer
+        from ocq.tui.install import MISSING, READY, tool_state
 
         self.query_one(".busy").display = False
         self.plan_for = form
@@ -681,12 +717,39 @@ class QuantizePage(Page):
                        words.speed(predicted)]  # fmt: skip
             text.append("  " + "  |  ".join(d for d in details if d != "-"))
         text.append(f"\nSaves to {plan.output_dir}", "dim")
+        tool = tool_state(plan.quant_config.algorithm, self.qp.hardware())
         for warning in plan.warnings:
+            if tool.state == MISSING and words.warning(warning).endswith(
+                "not installed on this PC."
+            ):
+                continue  # the Install button says it
             text.append(f"\n{words.warning(warning)}", "yellow")
         self.query_one("#plan-text", Static).update(text)
-        ready, _ = get_quantizer(plan.quant_config.algorithm).check(self.qp.hardware())
-        self.query_one("#start").display = ready  # the warning above says what is missing
+        self.query_one("#start").display = tool.state == READY
+        install = self.query_one("#install", Button)
+        install.display = tool.state == MISSING
+        install.label = f"Install {tool.name} tools"
+        self.tool = tool.algorithm
         self.query_one("#plan").display = True
+
+    @on(Button.Pressed, "#install")
+    def install(self) -> None:
+        log = self.query_one(ProgressLog)
+
+        def started() -> None:
+            self.query_one("#plan").display = False
+            self.query_one("#stage", Static).update(Text("Installing ...", "bold"))
+            log.clear()
+            self.query_one("#running").display = True
+
+        def done(state, problem: str) -> None:
+            self.query_one("#running").display = False
+            if problem:
+                self.failed(problem)
+            else:
+                self.run()  # review again, now with the tools in place
+
+        self.qp.ask_install(self.tool, log, started, done)
 
     @on(Button.Pressed, "#start")
     def start(self) -> None:

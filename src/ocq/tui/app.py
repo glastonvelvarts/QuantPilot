@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -37,7 +37,8 @@ from ocq.tui.pages import (
     VerifyPage,
 )
 from ocq.tui.settings import SETTINGS_FILE, Settings, load_settings, save_settings
-from ocq.tui.widgets import Confirm, KeysScreen, ModelField
+from ocq.tui.widgets import Confirm, KeysScreen, ModelField, ProgressLog
+from ocq.types import QuantAlgorithm
 
 # (page id, menu label). None draws a line between groups.
 MENU = (
@@ -91,7 +92,7 @@ class QuantPilotApp(App):
     TITLE = "QuantPilot"
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (100, "-wide")]
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
+        Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("question_mark", "keys", "Keys"),
         Binding("escape", "menu", "Menu", show=False),
         Binding("ctrl+r", "run", "Run", show=False),
@@ -275,6 +276,72 @@ class QuantPilotApp(App):
     def job_finished(self, what: str, ok: bool) -> None:
         self.busy = False
         self.query_one(StatusBar).set(Text(what, "green" if ok else "red"))
+
+    # Installing a quantization tool (This PC and the Quantize page both use this).
+
+    INSTALLS = {
+        QuantAlgorithm.GGUF: "PyTorch, Transformers and llama.cpp",
+        QuantAlgorithm.AWQ: "PyTorch and LLM Compressor",
+        QuantAlgorithm.GPTQ: "PyTorch and LLM Compressor",
+        QuantAlgorithm.NVFP4: "PyTorch and LLM Compressor",
+        QuantAlgorithm.BNB: "PyTorch and bitsandbytes",
+    }
+
+    def ask_install(
+        self,
+        algorithm: QuantAlgorithm,
+        log: ProgressLog,
+        started: Callable[[], None],
+        done: Callable[[Any, str], None],
+    ) -> None:
+        """Asks first, then installs in the background. `done(state, problem)` afterwards."""
+        from ocq.tui.install import NAMES
+
+        if self.busy:
+            self.notify("Wait for the running job to finish.", severity="warning")
+            return
+        name = NAMES[algorithm]
+
+        def answer(yes: bool | None) -> None:
+            if yes:
+                started()
+                self.job_started(f"Installing the {name} tools")
+                self.install_worker(algorithm, log, done)
+
+        self.push_screen(
+            Confirm(
+                f"Install the {name} tools?",
+                f"Downloads {self.INSTALLS[algorithm]}, a few GB. It can take several minutes.",
+                "Install",
+            ),
+            answer,
+        )
+
+    @work(thread=True, group="install")
+    def install_worker(
+        self, algorithm: QuantAlgorithm, log: ProgressLog, done: Callable[[Any, str], None]
+    ) -> None:
+        from ocq.tui.install import install
+
+        def say(line: str) -> None:
+            self.call_from_thread(log.write, Text(line))
+
+        try:
+            state, problem = install(algorithm, self.hardware(), say), ""
+        except Exception as exc:  # the app must stay up
+            state, problem = None, str(exc) or type(exc).__name__
+        self.call_from_thread(self.installed, state, problem, done)
+
+    def installed(self, state, problem: str, done: Callable[[Any, str], None]) -> None:
+        from ocq.tui.install import READY
+
+        ok = state is not None and state.state == READY
+        if ok:
+            self.job_finished(f"{state.name} tools installed", True)
+        else:
+            problem = problem or (state.message if state else "The install did not finish.")
+            self.job_finished("Install failed", False)
+        done(state, problem)
 
     # Keys and the command palette.
 

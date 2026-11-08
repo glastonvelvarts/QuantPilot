@@ -257,7 +257,7 @@ def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
         page = app.query_one(QuantizePage)
         page.begin(*page.plan_for)
         await settle(app, pilot)
-        seen["progress"] = [line.text for line in app.query_one(ProgressLog).lines]
+        seen["progress"] = [line.text for line in app.query_one("#progress", ProgressLog).lines]
         seen["result"] = text_of(app, "#result")
         seen["busy"] = app.busy
 
@@ -417,3 +417,107 @@ def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, 
         "quantize-pick",
         "nav",
     ]
+
+
+def test_core_messages_lose_cli_advice():
+    assert words.plain("Ollama has no model x:1. ocq models lists the ones on this PC.") == (
+        "Ollama has no model x:1."
+    )
+    assert words.plain("llama.cpp needs the OpenMP runtime. Run: sudo apt install libgomp1") == (
+        "llama.cpp needs the OpenMP runtime."
+    )
+
+
+def test_tool_state_says_ready_missing_or_not_for_this_pc(monkeypatch):
+    from ocq.quantizers import gguf
+    from ocq.tui import install
+
+    monkeypatch.setattr(gguf.GGUFQuantizer, "is_available", classmethod(lambda cls: False))
+    monkeypatch.setattr(gguf, "has_openmp_runtime", lambda: True)
+    assert install.tool_state(QuantAlgorithm.GGUF, HARDWARE).state == install.MISSING
+    assert install.tool_state(QuantAlgorithm.BNB, HARDWARE).message == "Needs an NVIDIA GPU"
+    monkeypatch.setattr(gguf.GGUFQuantizer, "is_available", classmethod(lambda cls: True))
+    assert install.tool_state(QuantAlgorithm.GGUF, HARDWARE).state == install.READY
+
+
+def test_install_reads_the_extra_from_quantpilots_metadata():
+    from ocq.tui import install
+
+    assert any(req.startswith("torch") for req in install.requirements("gguf"))
+    command, folder = install.install_command("gguf")
+    assert "gguf" in " ".join(command)
+
+
+def test_this_pc_installs_a_missing_tool(tmp_path: Path, monkeypatch):
+    from ocq.tui import install
+
+    states = {"gguf": install.MISSING}
+
+    def fake_state(algorithm, hardware):
+        state = states.get(algorithm.value, install.UNSUPPORTED)
+        message = {install.MISSING: "Not installed", install.READY: "Ready"}.get(state, "-")
+        return install.ToolState(algorithm, state, message)
+
+    def fake_install(algorithm, hardware, say):
+        say("Collecting torch")
+        states[algorithm.value] = install.READY
+        return fake_state(algorithm, hardware)
+
+    monkeypatch.setattr(install, "tool_state", fake_state)
+    monkeypatch.setattr(install, "install", fake_install)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("pc")
+        await settle(app, pilot)
+        button = app.query_one("#pc .tool Button")
+        seen["before"] = button.name
+        await pilot.click(button)
+        await pilot.pause()
+        await pilot.click(app.screen.query_one("#yes"))  # the "Install?" question
+        await settle(app, pilot)
+        seen["log"] = [line.text for line in app.query_one("#install-log", ProgressLog).lines]
+        seen["status"] = text_of(app, "#status-text")
+        seen["after"] = [str(label.render()) for label in app.query("#pc .tool-state")]
+        seen["buttons"] = len(app.query("#pc .tool Button"))
+
+    run_app(tmp_path, steps)
+    assert seen["before"] == "gguf"
+    assert seen["log"] == ["Collecting torch"]
+    assert seen["status"] == "GGUF tools installed"
+    assert seen["after"][0] == "Ready" and seen["buttons"] == 0
+
+
+def test_quantize_offers_to_install_missing_tools(tmp_path: Path, monkeypatch):
+    from ocq.tui import install
+
+    fake_model(monkeypatch, ["GGUF backend not installed. Run: uv sync --extra gguf"])
+    monkeypatch.setattr(
+        install, "tool_state", lambda a, hw: install.ToolState(a, install.MISSING, "Not installed")
+    )
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        await pilot.press(*"org/model", "enter")
+        await settle(app, pilot)
+        seen["shown"] = app.query_one("#plan").display
+        seen["problem"] = app.query_one("#quantize .problem").display
+        seen["card"] = text_of(app, "#plan-text")
+        seen["start"] = app.query_one("#start").display
+        seen["install"] = str(app.query_one("#install").label)
+
+    run_app(tmp_path, steps)
+    assert seen["shown"] and not seen["problem"]
+    assert not seen["start"]
+    assert seen["install"] == "Install GGUF tools"
+    assert "not installed" not in seen["card"]  # the button says it
+
+
+def test_ctrl_c_quits(tmp_path: Path):
+    async def steps(app, pilot):
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert not app.is_running
+
+    run_app(tmp_path, steps)
