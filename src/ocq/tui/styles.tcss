@@ -1,4 +1,4 @@
-/* QuantPilot TUI. Colors come from the theme ($primary, $accent...), so every theme works. */
+/* QuantPilot. Colors come from the theme ($primary, $accent...), so every theme works. */
 
 Screen {
     layout: vertical;
@@ -9,30 +9,13 @@ Screen {
 
 #masthead {
     height: auto;
-    padding: 1 2 0 2;
-}
-
-#banner {
-    width: 100%;
-    text-align: center;
-    color: $accent;
-    text-style: bold;
-}
-
-#masthead.slim {
     padding: 0 2;
     background: $panel;
 }
 
-#masthead.slim #banner {
-    text-align: left;
-}
-
-#tagline {
-    width: 100%;
-    text-align: center;
-    color: $text-muted;
-    padding-bottom: 1;
+#banner {
+    color: $accent;
+    text-style: bold;
 }
 
 /* Menu and pages ----------------------------------------------------------------------- */
@@ -42,7 +25,7 @@ Screen {
 }
 
 #nav {
-    width: 22;
+    width: 20;
     height: 100%;
     border: none;
     border-right: solid $border;
@@ -61,28 +44,53 @@ Screen {
 
 .page {
     height: 100%;
-    padding: 1 2 0 2;
+    padding: 1 3 0 3;
 }
 
 .page-title {
-    color: $primary;
+    color: $text;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* Home */
+
+#home-box {
+    width: 100%;
+    height: 100%;
+    align: center middle;
+}
+
+#home-banner {
+    width: 100%;
+    text-align: center;
+    color: $accent;
     text-style: bold;
 }
 
-.page-help {
+#home-tagline {
+    width: 100%;
+    text-align: center;
     color: $text-muted;
-    margin-bottom: 1;
+    margin-top: 1;
 }
 
 #home-hw {
-    margin-bottom: 1;
+    width: 100%;
+    text-align: center;
+    color: $text-muted;
+    margin: 2 0;
 }
 
-#home-steps {
+#home-actions {
+    width: 100%;
     height: auto;
-    margin: 0;
-    padding: 0;
-    background: transparent;
+    align-horizontal: center;
+}
+
+#home-actions Button {
+    margin: 0 1;
+    min-width: 18;
 }
 
 /* Forms -------------------------------------------------------------------------------- */
@@ -92,20 +100,7 @@ Screen {
     grid-size: 3;
     grid-columns: 1fr 1fr 1fr;
     grid-rows: auto;
-    grid-gutter: 0 2;
-}
-
-.field {
-    height: auto;
-}
-
-.field-label {
-    color: $text-muted;
-    padding: 0 1;
-}
-
-.wide {
-    column-span: 3;
+    grid-gutter: 1 2;
 }
 
 Screen.-narrow .form {
@@ -113,12 +108,24 @@ Screen.-narrow .form {
     grid-columns: 1fr 1fr;
 }
 
-Screen.-narrow .wide {
-    column-span: 2;
+.field {
+    height: auto;
 }
 
-Screen.-narrow #nav {
-    width: 16;
+ListPage > .form {
+    margin-bottom: 1;
+}
+
+.field-label {
+    color: $text-muted;
+}
+
+.wide {
+    column-span: 3;
+}
+
+Screen.-narrow .wide {
+    column-span: 2;
 }
 
 .model-field {
@@ -131,20 +138,12 @@ Screen.-narrow #nav {
 
 .model-field Button {
     width: auto;
-    min-width: 8;
+    min-width: 10;
     margin-left: 1;
 }
 
 #model_folders {
     height: 5;
-}
-
-Collapsible.more {
-    height: auto;
-    margin-top: 1;
-    padding: 0;
-    background: transparent;
-    border: none;
 }
 
 .actions {
@@ -154,36 +153,78 @@ Collapsible.more {
 
 .actions Button {
     margin-right: 2;
+    min-width: 12;
 }
 
 /* Results ------------------------------------------------------------------------------ */
 
-OutputLog {
+.results {
     height: 1fr;
-    min-height: 5;
+}
+
+.busy {
+    height: 3;
+    display: none;
+    color: $accent;
+}
+
+.card {
+    height: auto;
+    border: round $accent;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+.card.bad {
+    border: round $error;
+}
+
+.card Button {
+    margin-top: 1;
+}
+
+.results DataTable {
+    height: auto;
+    max-height: 24;
+    margin-bottom: 1;
+}
+
+ListPage > DataTable {
+    height: 1fr;
+}
+
+.empty {
+    color: $text-muted;
+    padding: 1 0;
+    display: none;
+}
+
+.problem {
+    color: $error;
+    padding: 1 0;
+}
+
+#running {
+    height: auto;
+}
+
+#stage {
+    margin-bottom: 1;
+}
+
+#progress {
+    height: 12;
     border: round $border;
     background: $surface;
     padding: 0 1;
+    color: $text-muted;
 }
 
-OutputLog:focus {
-    border: round $accent;
-}
-
-DataTable {
-    height: 1fr;
-    min-height: 5;
-    border: round $border;
-}
-
-DataTable:focus {
-    border: round $accent;
-}
-
-.table-note {
+Collapsible {
     height: auto;
-    max-height: 4;
-    padding: 0 1;
+    border: none;
+    padding: 0;
+    background: transparent;
 }
 
 /* Status bar --------------------------------------------------------------------------- */
@@ -222,7 +263,7 @@ ModalScreen {
 }
 
 .dialog {
-    width: 76;
+    width: 64;
     max-width: 95%;
     height: auto;
     max-height: 85%;
@@ -231,23 +272,18 @@ ModalScreen {
     padding: 1 2;
 }
 
-.dialog.help {
-    width: 90;
+.dialog.keys {
+    width: 44;
 }
 
 .dialog-title {
     text-style: bold;
-    color: $primary;
     margin-bottom: 1;
-}
-
-.dialog-hint {
-    color: $text-muted;
-    margin-top: 1;
 }
 
 .dialog-body {
     margin-bottom: 1;
+    color: $text-muted;
 }
 
 .dialog-buttons {
@@ -256,45 +292,37 @@ ModalScreen {
 
 .dialog-buttons Button {
     margin-right: 2;
+    min-width: 10;
 }
 
 .dialog OptionList {
     height: auto;
     max-height: 20;
+    border: none;
+    background: transparent;
 }
 
-.dialog Markdown {
-    height: auto;
-    max-height: 30;
-    overflow-y: auto;
-}
+/* Simple borders, for consoles that cannot draw lines (Settings) ----------------------- */
 
-/* Plain ASCII borders, for consoles that cannot draw lines (Settings) ------------------ */
-
-App.-ascii OutputLog,
-App.-ascii DataTable,
-App.-ascii .dialog {
-    border: ascii $border;
-}
-
-App.-ascii OutputLog:focus,
-App.-ascii DataTable:focus {
-    border: ascii $accent;
-}
-
-/* Fields and buttons are one line with no border, so only the arrow needs hiding. */
-App.-ascii SelectCurrent .arrow {
-    display: none;
-}
-
+App.-ascii .card,
+App.-ascii .dialog,
+App.-ascii #progress,
 App.-ascii TextArea {
     border: ascii $border;
 }
 
-App.-ascii TextArea:focus {
+App.-ascii .card {
     border: ascii $accent;
+}
+
+App.-ascii .card.bad {
+    border: ascii $error;
 }
 
 App.-ascii #nav {
     border-right: ascii $border;
+}
+
+App.-ascii SelectCurrent .arrow {
+    display: none;
 }

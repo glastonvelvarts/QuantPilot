@@ -1,20 +1,33 @@
-"""The full-screen app: banner, saved settings, running commands, and the pages themselves."""
+"""The full-screen app: banner, words, saved settings, and the pages with stand-in data."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from ocq import cli
+from ocq import cli, model_analyzer, pipeline, plan
 from ocq.discovery import LocalModel
-from ocq.tui import runner
-from ocq.tui.app import FeasibilityPage, ModelPicker, PlanPage, QuantPilotApp, quote
+from ocq.tui import pages, words
+from ocq.tui.app import MENU, QuantPilotApp
 from ocq.tui.banner import BANNER, BANNER_WIDTH, COMPACT, banner_text
+from ocq.tui.pages import AUTO, CheckPage, QuantizePage, format_choices, format_key
 from ocq.tui.settings import Settings, load_settings, save_settings
-from ocq.types import OcqError
+from ocq.tui.widgets import ModelPicker, ProgressLog
+from ocq.types import (
+    Fact,
+    FactKind,
+    FitLevel,
+    HardwareProfile,
+    ModelFacts,
+    QuantAlgorithm,
+    QuantConfig,
+    QuantOption,
+    RunMode,
+)
 
 # Banner ------------------------------------------------------------------------------------
 
@@ -32,6 +45,56 @@ def test_banner_falls_back_to_one_line_when_the_terminal_is_small():
 
 def test_banner_lines_have_one_length_so_centering_keeps_the_letters_together():
     assert {len(line) for line in banner_text(120, 40).splitlines()} == {BANNER_WIDTH}
+
+
+# Words -------------------------------------------------------------------------------------
+
+
+def option(label="Q4_K_M", kind="gguf", fit=FitLevel.PERFECT, tps=120.0, gb=0.6, bits=4.9):
+    return QuantOption(
+        label=label,
+        bits=bits,
+        weights_gb=gb - 0.1,
+        context_gb=0.1,
+        exact=True,
+        memory_required_gb=gb,
+        memory_available_gb=8.0,
+        fit_level=fit,
+        run_mode=RunMode.GPU,
+        estimated_tps=tps,
+        row_kind=kind,
+    )
+
+
+def test_words_for_fit_speed_and_size():
+    assert words.fit(FitLevel.MARGINAL).plain == "Tight"
+    assert words.speed(option(tps=120)) == "up to 120 tok/s"
+    assert words.speed(option(fit=FitLevel.TOO_TIGHT)) == "-"
+    assert words.gb(0.25) == "250 MB" and words.gb(4.26) == "4.3 GB"
+    assert words.context(8192) == "8K tokens"
+
+
+def test_warnings_lose_their_command_lines():
+    assert words.warning("GGUF backend not installed. Run: uv sync --extra gguf") == (
+        "GGUF tools are not installed on this PC."
+    )
+    assert words.warning("serve it in WSL2, or quantize to GGUF (-b gguf) to run it here.") == (
+        "serve it in WSL2, or quantize to GGUF to run it here."
+    )
+
+
+def test_fit_table_rows_map_to_the_format_dropdown():
+    assert format_key(option("Q4_K_M")) == "gguf:Q4_K_M"
+    assert format_key(option("GPTQ 8-bit", kind="gptq")) == "gptq:8"
+    assert format_key(option("BNB 4-bit double", kind="bnb")) == "bnb:4"
+    assert format_key(option("BF16", kind="stored")) is None
+    choices = format_choices("gguf:Q5_K_M", 8192, "q8_0")
+    assert (choices.algorithm, choices.gguf_type, choices.context) == (
+        QuantAlgorithm.GGUF,
+        "Q5_K_M",
+        8192,
+    )
+    assert format_choices(AUTO, 4096, "f16").algorithm is None
 
 
 # Settings ----------------------------------------------------------------------------------
@@ -57,9 +120,9 @@ def test_a_wrong_value_is_dropped_without_resetting_the_others(tmp_path: Path):
     path.write_text(json.dumps(values), encoding="utf-8")
     settings = load_settings(path)
     assert settings.theme == "nord"
-    assert settings.context == Settings().context  # not a number
-    assert settings.show_banner is True  # 1 is not true/false
-    assert settings.kv_cache == "f16"  # not a cache type
+    assert settings.context == Settings().context
+    assert settings.show_banner is True
+    assert settings.kv_cache == "f16"
 
 
 def test_recent_models_are_newest_first_without_repeats():
@@ -69,55 +132,24 @@ def test_recent_models_are_newest_first_without_repeats():
     assert settings.recent_models == ["a/one", "b/two"]
 
 
-# Runner ------------------------------------------------------------------------------------
-
-
-def test_runner_shows_what_a_command_prints_and_puts_the_console_back():
-    saved = cli.console
-    out = []
-
-    def command(name: str) -> None:
-        cli.console.print(f"hello {name}")
-
-    assert runner.run_command(command, out.append, 80, name="tui")
-    assert [text.plain for text in out] == ["hello tui"]
-    assert cli.console is saved
-
-
-def test_runner_turns_errors_into_a_message_and_false():
-    out = []
-
-    def broken() -> None:
-        raise OcqError("no such model")
-
-    assert not runner.run_command(broken, out.append, 80)
-    assert out[-1].plain == "Error: no such model"
-    assert not runner.busy()
-
-
-def test_runner_tables_keep_their_width_and_can_be_plain_ascii():
-    from rich.table import Table
-
-    def wide_table() -> None:
-        table = Table("Level", "Backend", "Weights")
-        table.add_row("Q4_K_M", "gguf " + "x" * 80, "0.10")
-        cli.console.print(table)
-        cli.console.print("word " * 40)
-
-    out = []
-    runner.run_command(wide_table, out.append, 60, ascii_only=True)
-    table, text = (t.plain.splitlines() for t in out)
-    assert max(map(len, table)) > 60  # not squeezed into the box
-    assert max(map(len, text)) <= 60  # text still wraps
-    assert table[0].startswith("+") and all(ord(c) < 128 for c in "".join(table))
-
-
 # The app -----------------------------------------------------------------------------------
+
+HARDWARE = HardwareProfile(
+    total_ram_gb=16.0,
+    available_ram_gb=8.0,
+    cpu_cores=8,
+    cpu_name="Test CPU",
+    has_gpu=False,
+    backend="CPU",
+    unified_memory=False,
+    os_name="Linux",
+)
 
 
 def run_app(tmp_path: Path, steps, size=(130, 42)) -> QuantPilotApp:
     async def go() -> QuantPilotApp:
         app = QuantPilotApp(settings_path=tmp_path / "tui.json", look_on_start=False)
+        app.hardware = lambda fresh=False: HARDWARE  # no probing in tests
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
             await steps(app, pilot)
@@ -126,104 +158,139 @@ def run_app(tmp_path: Path, steps, size=(130, 42)) -> QuantPilotApp:
     return asyncio.run(go())
 
 
-def test_arrow_keys_in_the_menu_open_the_pages(tmp_path: Path):
+async def settle(app, pilot) -> None:
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def fake_model(monkeypatch, warnings=()):
+    """resolve_model, quant_options and generate_plan for a model that is not quantized."""
+    options = [
+        option("BF16", kind="stored", bits=16, gb=1.2, tps=60),
+        option("Q8_0", bits=8.5, gb=0.7, tps=100),
+        option("Q4_K_M", bits=4.9, gb=0.5, tps=150),
+    ]
+    facts = ModelFacts(parameters=Fact(1_000_000_000, "config", FactKind.EXACT))
+    snapshot = SimpleNamespace(
+        model_id="org/model", is_quantized=False, gguf_files=(), facts=facts, original_gb=2.0
+    )
+    config = QuantConfig(algorithm=QuantAlgorithm.GGUF, bits=8, group_size=0, gguf_type="Q8_0")
+    made = SimpleNamespace(
+        model_id="org/model",
+        predicted=options[1],
+        warnings=list(warnings),
+        quant_config=config,
+        output_dir=Path("/out/org--model"),
+    )
+    monkeypatch.setattr(model_analyzer, "resolve_model", lambda *a, **k: snapshot)
+    monkeypatch.setattr(model_analyzer, "quant_options", lambda *a, **k: options)
+    monkeypatch.setattr(plan, "generate_plan", lambda *a, **k: made)
+    monkeypatch.setattr(model_analyzer, "recommend_models", lambda *a, **k: [])
+    return made
+
+
+def text_of(app, selector: str) -> str:
+    return str(app.query_one(selector).render())
+
+
+def test_menu_arrow_keys_open_the_pages_in_order(tmp_path: Path):
     seen = []
 
     async def steps(app, pilot):
-        seen.append(app.query_one("ContentSwitcher").current)
-        await pilot.press("down")
-        seen.append(app.query_one("ContentSwitcher").current)
-        await pilot.press("down", "down")
-        seen.append(app.query_one("ContentSwitcher").current)
+        for _ in range(4):
+            seen.append(app.query_one("ContentSwitcher").current)
+            await pilot.press("down")
 
     run_app(tmp_path, steps)
-    assert seen == ["home", "pc", "recommend"]
+    order = [item[0] for item in MENU if item]
+    assert seen == order[:4]
 
 
-def test_feasibility_form_gives_the_same_options_as_the_flags(tmp_path: Path):
-    built = {}
-
-    async def steps(app, pilot):
-        app.show_page("feasibility", focus=True)
-        page = app.query_one(FeasibilityPage)
-        await pilot.press(*"org/model")
-        page.query_one("#context").value = 8192
-        page.query_one("#kv").value = "q8_0"
-        await pilot.pause()
-        built["result"] = page.build()
-
-    run_app(tmp_path, steps)
-    function, options, args = built["result"]
-    assert function is cli.cmd_feasibility
-    assert options == {
-        "model": "org/model",
-        "model_path": None,
-        "llmfit_bin": None,
-        "context": 8192,
-        "kv_cache": "q8_0",
-    }
-    assert args == ["feasibility", "org/model", "-c", "8192", "--kv-cache", "q8_0"]
-
-
-def test_plan_form_leaves_auto_choices_to_quantpilot(tmp_path: Path):
-    built = {}
+def test_check_recommends_a_format_in_plain_words(tmp_path: Path, monkeypatch):
+    fake_model(monkeypatch, ["GGUF backend not installed. Run: uv sync --extra gguf"])
+    seen = {}
 
     async def steps(app, pilot):
-        app.show_page("plan")
-        page = app.query_one(PlanPage)
-        page.set_model("org/model")
-        page.query_one("#backend").value = "gguf"
-        page.query_one("#double").value = "off"
-        page.query_one("#samples").value = "64"
-        await pilot.pause()
-        built["result"] = page.build()
-
-    run_app(tmp_path, steps)
-    function, options, args = built["result"]
-    assert function is cli.cmd_plan
-    assert options["backend"] == "gguf"
-    assert options["bits"] is None and options["gguf_type"] is None
-    assert options["double_quant"] is False and options["samples"] == 64
-    assert args == ["plan", "org/model", "-b", "gguf", "--samples", "64", "--single-quant", "-c",
-                    "4096"]  # fmt: skip
-
-
-def test_a_wrong_number_is_reported_not_run(tmp_path: Path):
-    async def steps(app, pilot):
-        app.show_page("plan")
-        page = app.query_one(PlanPage)
-        page.set_model("org/model")
-        page.query_one("#samples").value = "lots"
-        page.run()
-        await pilot.pause()
-        assert not page.has_run
-
-    run_app(tmp_path, steps)
-
-
-def test_running_a_page_shows_the_command_line_and_the_output(tmp_path: Path, monkeypatch):
-    def fake_feasibility(**options) -> None:
-        cli.console.print(f"fits: {options['model']}")
-        print("a plain progress line")
-
-    monkeypatch.setattr(cli, "cmd_feasibility", fake_feasibility)
-    lines = []
-
-    async def steps(app, pilot):
-        app.show_page("feasibility", focus=True)
+        app.show_page("check", focus=True)
         await pilot.press(*"org/model", "enter")
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-        lines.extend(line.text for line in app.query_one(FeasibilityPage).output.lines)
+        await settle(app, pilot)
+        seen["card"] = text_of(app, "#pick-text")
+        seen["rows"] = app.query_one("#options").row_count
+        await pilot.click(app.query_one("#quantize-pick"))
+        await settle(app, pilot)
+        seen["page"] = app.query_one("ContentSwitcher").current
+        seen["format"] = app.query_one("#quantize #format").value
 
-    app = run_app(tmp_path, steps)
-    assert lines[0] == "Same as: ocq feasibility org/model -c 4096"
-    assert "fits: org/model" in lines and "a plain progress line" in lines
-    assert app.settings.recent_models == ["org/model"]
-    assert json.loads((tmp_path / "tui.json").read_text())["recent_models"] == ["org/model"]
+    run_app(tmp_path, steps)
+    assert "Recommended for this PC" in seen["card"] and "GGUF Q8_0 (8-bit)" in seen["card"]
+    assert "Fits easily" in seen["card"] and "up to 100 tok/s" in seen["card"]
+    assert "GGUF tools are not installed on this PC." in seen["card"]
+    assert "uv sync" not in seen["card"]
+    assert seen["rows"] == 3
+    assert (seen["page"], seen["format"]) == ("quantize", "gguf:Q8_0")
 
 
-def test_picker_lists_models_on_this_pc_and_fills_the_field(tmp_path: Path):
+def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
+    made = fake_model(monkeypatch)
+
+    def fake_run(ref, goal, output, **kwargs):
+        print("Converting to GGUF ...")
+        print("Quantizing to Q8_0 ...")
+        quantization = SimpleNamespace(
+            success=True, message="", artifact_size_gb=0.7, artifact_path=Path("/out/m.gguf")
+        )
+        validation = SimpleNamespace(passed=True, checks=[])
+        bench = SimpleNamespace(tokens_per_second=95.0, sample_output="Hello there.")
+        return SimpleNamespace(
+            plan=made, quantization=quantization, validation=validation, benchmark=bench
+        )
+
+    monkeypatch.setattr(pipeline, "run_optimize", fake_run)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        await pilot.press(*"org/model", "enter")
+        await settle(app, pilot)
+        seen["plan"] = text_of(app, "#plan-text")
+        page = app.query_one(QuantizePage)
+        page.begin(*page.plan_for)
+        await settle(app, pilot)
+        seen["progress"] = [line.text for line in app.query_one(ProgressLog).lines]
+        seen["result"] = text_of(app, "#result")
+        seen["busy"] = app.busy
+
+    run_app(tmp_path, steps)
+    assert "GGUF Q8_0 (8-bit)" in seen["plan"] and "Saves to" in seen["plan"]
+    assert seen["progress"] == ["Converting to GGUF ...", "Quantizing to Q8_0 ..."]
+    assert seen["result"].startswith("Done") and "95 tok/s measured" in seen["result"]
+    assert not seen["busy"]
+
+
+def test_no_page_shows_flags_commands_or_llmfit(tmp_path: Path, monkeypatch):
+    fake_model(monkeypatch)
+    monkeypatch.setattr(pages, "local_option", lambda *a: None)
+    shown = []
+
+    async def steps(app, pilot):
+        for item in MENU:
+            if item:
+                app.show_page(item[0])
+                await settle(app, pilot)
+        app.query_one(CheckPage).set_model("org/model")
+        app.query_one(CheckPage).run()
+        await settle(app, pilot)
+        for widget in app.query("Static, Label, Button"):
+            shown.append(str(widget.render()))
+
+    run_app(tmp_path, steps)
+    text = "\n".join(shown)
+    for word in (" --", "ocq ", "llmfit", "Same as", "uv sync"):
+        assert word not in text, word
+
+
+def test_browse_lists_models_on_this_pc_and_fills_the_field(tmp_path: Path):
     model = LocalModel(
         label="qwen3:0.6b",
         ref="ollama:qwen3:0.6b",
@@ -240,7 +307,7 @@ def test_picker_lists_models_on_this_pc_and_fills_the_field(tmp_path: Path):
         app.known_models = [model]
         app.show_page("verify", focus=True)
         page = app.page
-        await pilot.pause()  # let the page lay out before clicking on it
+        await pilot.pause()
         await pilot.click(page.query_one(".pick"))  # every page has one: this page's
         await pilot.pause()
         assert isinstance(app.screen, ModelPicker)
@@ -252,7 +319,7 @@ def test_picker_lists_models_on_this_pc_and_fills_the_field(tmp_path: Path):
     assert picked["value"] == "ollama:qwen3:0.6b"
 
 
-def test_settings_page_saves_and_applies_at_once(tmp_path: Path):
+def test_settings_save_and_apply_at_once(tmp_path: Path):
     async def steps(app, pilot):
         app.show_page("settings")
         app.query_one("#theme").value = "nord"
@@ -268,17 +335,39 @@ def test_settings_page_saves_and_applies_at_once(tmp_path: Path):
 
 def test_small_terminal_gets_the_one_line_banner(tmp_path: Path):
     async def steps(app, pilot):
-        assert str(app.query_one("#banner").render()) == COMPACT
+        assert text_of(app, "#home-banner") == COMPACT
 
     run_app(tmp_path, steps, size=(80, 24))
 
 
-def test_quote_only_quotes_when_a_shell_needs_it():
-    assert quote("org/model") == "org/model"
-    assert quote("C:\\My Models\\a.gguf") == '"C:\\My Models\\a.gguf"'
+def test_home_shows_the_big_banner_when_there_is_room(tmp_path: Path):
+    async def steps(app, pilot):
+        assert text_of(app, "#home-banner").splitlines()[0].rstrip() == BANNER[0].rstrip()
+        assert not app.query_one("#masthead").display  # no second name at the top
+
+    run_app(tmp_path, steps, size=(120, 40))
 
 
 def test_ocq_without_a_terminal_prints_the_help():
     result = CliRunner().invoke(cli.app, [])
     assert result.exit_code == 0
-    assert "ocq tui" in result.output or "tui" in result.output
+    assert "tui" in result.output
+
+
+def test_a_failing_job_shows_a_message_and_the_app_stays_up(tmp_path: Path, monkeypatch):
+    def offline(*args, **kwargs):
+        raise ConnectionError("network is unreachable")
+
+    monkeypatch.setattr(model_analyzer, "resolve_model", offline)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("check", focus=True)
+        await pilot.press(*"org/model", "enter")
+        await settle(app, pilot)
+        seen["problem"] = text_of(app, "#check .problem")
+        seen["running"] = app.is_running
+
+    run_app(tmp_path, steps)
+    assert seen["problem"] == "Something went wrong: network is unreachable"
+    assert seen["running"]
