@@ -50,7 +50,7 @@ BASE_TYPE = {
 # Used when a tensor's width is not a multiple of the block size.
 FALLBACK = {"Q2_K": "Q4_0", "Q3_K": "Q4_0", "Q4_K": "Q5_0", "Q5_K": "Q5_1", "Q6_K": "Q8_0"}
 
-# llama.cpp evaluates this many tokens at once and keeps their output scores in memory.
+# The working memory counted for vLLM and transformers rows: the output scores of 512 tokens.
 EVAL_BATCH = 512
 
 
@@ -280,6 +280,43 @@ def kv_cache_bytes(layers: int, kv_heads: int, head_dim: int, context: int) -> i
 
 def output_buffer_bytes(vocab_size: int) -> int:
     return vocab_size * EVAL_BATCH * 4
+
+
+def ffn_width(tensors: list[Tensor], experts: int = 0, experts_per_token: int = 0) -> int:
+    """The widest feed-forward layer one token runs through: the input width of the down
+    projection (down_proj, w2, Granite's output_linear), times experts_per_token for routed
+    experts. 0 when no such tensor is found."""
+    widest = 0
+    for name, shape in tensors:
+        if len(shape) < 2 or QUANT_METADATA.search(name) or name.endswith(("bias", "_bias")):
+            continue
+        if tensor_role(name) != "ffn_down" and ".w2." not in name:
+            continue
+        # gpt-oss's MXFP4 experts: [experts, rows, blocks, 16 bytes of 32 4-bit weights].
+        width = shape[2] * shape[3] * 2 if len(shape) == 4 else shape[-1]
+        if experts and experts_per_token and routed_expert(name, shape, experts):
+            width *= experts_per_token
+        widest = max(widest, width)
+    return widest
+
+
+# llama-server (b11429) on a separate GPU needs two buffers besides the weights and the cache:
+#   output   one row of logits (vocabulary x 4 bytes) per conversation;
+#   compute  the attention mask (context x 512 tokens x 2 bytes; a second one for sliding
+#            window layers) and the intermediates of one 512-token batch. On CUDA, for 9 models
+#            (dense, MoE, Mamba hybrids, gpt-oss), those took 3.7 to 9 times the widest
+#            feed-forward layer x 512 tokens x 4 bytes. 9 is used: an upper bound, at most
+#            90 MiB over (Gemma 2 2B), against 500 MiB for 512 rows of logits before.
+UBATCH = 512
+FFN_INTERMEDIATES = 9
+
+
+def llama_server_buffers_bytes(
+    vocab_size: int, context: int, ffn: int, sliding_window: bool, conversations: int
+) -> int:
+    output = conversations * vocab_size * 4
+    masks = context * UBATCH * 2 * (2 if sliding_window else 1)
+    return output + masks + UBATCH * 4 * FFN_INTERMEDIATES * ffn
 
 
 # Tensors a quantized checkpoint stores next to its weights: scales, zero points, group

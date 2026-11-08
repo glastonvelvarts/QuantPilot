@@ -43,6 +43,7 @@ def predict_speed(
     gpu_read_speed: float | None = None,
     read_fraction: float = 1.0,
     ram_read_gb: float = 0.0,
+    gpu_share: float | None = None,
 ) -> tuple[float, str]:
     """Returns tokens per second and where the number comes from.
 
@@ -53,7 +54,14 @@ def predict_speed(
         return 0.0, UPPER_BOUND
 
     limit = bandwidth_limit(
-        weights_gb, run_mode, vram_gb, hardware, gpu_read_speed, read_fraction, ram_read_gb
+        weights_gb,
+        run_mode,
+        vram_gb,
+        hardware,
+        gpu_read_speed,
+        read_fraction,
+        ram_read_gb,
+        gpu_share,
     )
     device = {RunMode.GPU: "gpu", RunMode.CPU: "cpu"}.get(run_mode)
     runs = [run for run in load() if run["device"] == device] if use_measurements else []
@@ -74,11 +82,13 @@ def bandwidth_limit(
     gpu_read_speed: float | None = None,
     read_fraction: float = 1.0,
     ram_read_gb: float = 0.0,
+    gpu_share: float | None = None,
 ) -> float:
     """Each new token reads every weight it uses once, so memory bandwidth caps the speed.
 
     gpu_read_speed is how fast the GPUs in use read the weights together (see GpuPool);
-    without it, the largest GPU's speed.
+    without it, the largest GPU's speed. gpu_share: the share of the layers on the GPU when
+    the model does not fit (GPU_OFFLOAD); without it, as much of the weights as fit in vram_gb.
     """
     gpu = hardware.primary_gpu
     gpu_speed = gpu_read_speed or 0.0
@@ -94,7 +104,7 @@ def bandwidth_limit(
         return gpu_speed / read_gb
     if run_mode == RunMode.GPU_OFFLOAD and gpu_speed and cpu_speed:
         # The part that did not fit in VRAM is read from RAM.
-        on_gpu = min(vram_gb, weights_gb) / weights_gb
+        on_gpu = gpu_share if gpu_share is not None else min(vram_gb, weights_gb) / weights_gb
         return 1 / (read_gb * on_gpu / gpu_speed + read_gb * (1 - on_gpu) / cpu_speed)
     if cpu_speed:
         return cpu_speed / read_gb

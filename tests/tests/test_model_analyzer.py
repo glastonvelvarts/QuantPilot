@@ -99,6 +99,10 @@ def options_by_label(model, hardware, context=4096) -> dict:
     return {option.label: option for option in quant_options(model, hardware, context)}
 
 
+# llama-server's output and compute buffers for Qwen2.5-1.5B at 4096 tokens, MiB.
+LLAMA_SERVER_4K_MIB = 4 * 151936 * 4 / 2**20 + 4096 * 512 * 2 / 2**20 + 9 * 8960 * 512 * 4 / 2**20
+
+
 def test_exact_snapshot_from_tensor_shapes(qwen_tensors):
     snap = qwen_snapshot(qwen_tensors, make_hardware(vram_gb=8))
     assert snap.params_b == pytest.approx(1.5437, abs=0.0001)
@@ -113,8 +117,10 @@ def test_memory_is_weights_plus_context(qwen_tensors):
     option = options_by_label(qwen_snapshot(qwen_tensors, hardware), hardware)["Q4_K_M"]
     assert option.exact
     assert option.weights_gb * 1024 == pytest.approx(934.69, abs=0.01)
-    # 4096 tokens: 112 MiB of keys and values + 296.75 MiB of output scores
-    assert option.context_gb * 1024 == pytest.approx(112 + 296.75, abs=0.01)
+    # 4096 tokens: 112 MiB of keys and values, then llama-server's buffers: 4 rows of logits
+    # (2.32 MiB), the attention mask (4 MiB) and 9 x the 8960-wide feed-forward x 512 tokens.
+    assert option.context_gb * 1024 == pytest.approx(112 + LLAMA_SERVER_4K_MIB, abs=0.01)
+    # Tied embeddings: the table is the output layer too, so all of it is on the GPU.
     assert option.memory_required_gb == option.weights_gb + option.context_gb
 
 
@@ -123,12 +129,15 @@ def test_bigger_context_needs_more_memory(qwen_tensors):
     model = qwen_snapshot(qwen_tensors, hardware)
     small = options_by_label(model, hardware, context=4096)["Q4_K_M"]
     large = options_by_label(model, hardware, context=32768)["Q4_K_M"]
-    assert (large.context_gb - small.context_gb) * 1024 == pytest.approx(896 - 112, abs=0.01)
+    # The cache, and the attention mask: 2 bytes per token for each of the 512 batch rows.
+    mask = (32768 - 4096) * 512 * 2 / 2**20
+    assert (large.context_gb - small.context_gb) * 1024 == pytest.approx(896 - 112 + mask, abs=0.01)
 
 
 def test_fit_uses_free_vram_not_total(qwen_tensors):
     roomy = make_hardware(ram_gb=16, vram_gb=8, free_vram_gb=7.5)
-    busy = make_hardware(ram_gb=16, vram_gb=8, free_vram_gb=1.0)
+    # 2.5 GB free leaves 0.95 GB: 0.55 for the CUDA context, 1 GB kept free by llama.cpp.
+    busy = make_hardware(ram_gb=16, vram_gb=8, free_vram_gb=2.5)
     assert options_by_label(qwen_snapshot(qwen_tensors, roomy), roomy)["Q4_K_M"].run_mode == (
         RunMode.GPU
     )
@@ -146,7 +155,8 @@ def test_model_that_does_not_fit_is_unfit(qwen_tensors):
 
 
 def test_best_option_is_highest_quality_that_fits_comfortably(qwen_tensors):
-    hardware = make_hardware(vram_gb=8, free_vram_gb=2.0)
+    # 3.5 GB free: 1.95 GB for the model once CUDA and llama.cpp's headroom are taken off.
+    hardware = make_hardware(vram_gb=8, free_vram_gb=3.5)
     best = best_option(quant_options(qwen_snapshot(qwen_tensors, hardware), hardware))
     assert best.label == "Q6_K"
     assert best.fit_level == FitLevel.GOOD
@@ -334,7 +344,7 @@ def test_nested_config_gives_the_same_memory_as_a_flat_one(qwen_tensors, key):
     flat_q4 = options_by_label(flat, hardware)["Q4_K_M"]
     nested_q4 = options_by_label(nested, hardware)["Q4_K_M"]
     assert nested_q4.context_gb == pytest.approx(flat_q4.context_gb)
-    assert nested_q4.context_gb * 1024 == pytest.approx(112 + 296.75, abs=0.01)
+    assert nested_q4.context_gb * 1024 == pytest.approx(112 + LLAMA_SERVER_4K_MIB, abs=0.01)
     assert nested_q4.exact
 
 
@@ -471,9 +481,9 @@ def test_tensor_shapes_give_the_context_memory_when_config_has_no_counts(qwen_te
     assert snap.facts.kv_cache.value == 28 * 2 * 256 * 2  # layers x (K + V widths) x 2 bytes
     assert snap.facts.kv_cache.kind == FactKind.ESTIMATE
     q4 = options_by_label(snap, hardware)["Q4_K_M"]
-    # Same as with Qwen's config: 112 MiB of keys and values + 296.75 MiB of output scores.
+    # Same as with Qwen's config: 112 MiB of keys and values + llama-server's buffers.
     assert q4.context_known
-    assert q4.context_gb * 1024 == pytest.approx(112 + 296.75, abs=0.01)
+    assert q4.context_gb * 1024 == pytest.approx(112 + LLAMA_SERVER_4K_MIB, abs=0.01)
     assert q4.fit_level == FitLevel.PERFECT
 
 
@@ -507,12 +517,13 @@ def test_known_architecture_keeps_its_context_memory(qwen_tensors):
 def test_72b_runs_fully_on_two_3090s_split_by_layers():
     one, two = nvidia_pc(RTX_3090), nvidia_pc(RTX_3090, RTX_3090_BUSY)
     snap = real_snapshot(QWEN_72B, two)
-    on_one = options_by_label(real_snapshot(QWEN_72B, one), one)["Q4_K_M"]
-    on_two = options_by_label(snap, two)["Q4_K_M"]
+    on_one = options_by_label(real_snapshot(QWEN_72B, one), one)["Q3_K_M"]
+    on_two = options_by_label(snap, two)["Q3_K_M"]
     assert on_one.run_mode == RunMode.GPU_OFFLOAD
     assert on_two.run_mode == RunMode.GPU  # was GPU_OFFLOAD: only one card counted
     assert on_two.gpu_count == 2
-    assert on_two.memory_available_gb == pytest.approx(23.44 + 22.46)
+    # Each card: free - 0.55 GB CUDA context - 1 GB llama.cpp keeps free.
+    assert on_two.memory_available_gb == pytest.approx(23.44 + 22.46 - 2 * 1.55)
     # The cards take turns, so the limit is one card's speed, not double. Each token reads
     # the weights minus the input embedding table (one row of it).
     read_gb = on_two.weights_gb * snap.read_fraction
@@ -561,12 +572,14 @@ def test_vllm_does_not_start_when_its_share_of_the_gpu_is_not_free(qwen_tensors)
     assert options["Q4_K_M"].fit_level == FitLevel.PERFECT
 
 
-def test_vllm_does_not_spill_into_ram(qwen_tensors):
-    # 1 GiB of VRAM: llama.cpp keeps some layers in RAM, vLLM cannot.
-    small = nvidia_pc("NVIDIA GeForce RTX 3090, 1024, 1024, 8.6")
-    options = options_by_label(qwen_snapshot(qwen_tensors, small), small)
+def test_vllm_does_not_spill_into_ram():
+    # Qwen2.5-72B at 8 bits on one idle 24 GB card: llama.cpp keeps some layers in RAM, vLLM
+    # starts (23.44 - 0.55 GB free >= 0.92 x 24) but cannot hold the model.
+    card = nvidia_pc(RTX_3090, ram_gb=96)
+    options = options_by_label(real_snapshot(QWEN_72B, card), card)
     assert options["Q8_0"].run_mode == RunMode.GPU_OFFLOAD
     assert options["GPTQ 8-bit"].fit_level == FitLevel.TOO_TIGHT
+    assert not options["GPTQ 8-bit"].note
 
 
 def test_the_installed_vllm_default_is_read_from_its_source(tmp_path, monkeypatch):
@@ -726,10 +739,14 @@ def test_fit_uses_the_cache_of_the_runtime_that_serves_the_row():
     hardware = nvidia_pc(RTX_3090)
     rows = options_by_label(real_snapshot(DEEPSEEK_V2_LITE, hardware), hardware)
     # GGUF (llama.cpp) keeps the compressed MLA cache, bitsandbytes (transformers) expands it.
-    # The output buffer is the same for both, so the difference is the two caches.
+    # Take each runtime's working memory off, and the difference is the two caches.
+    from ocq.model_analyzer import working_bytes
+
+    snap = real_snapshot(DEEPSEEK_V2_LITE, hardware)
     compressed, expanded = 27 * 576 * 2, 27 * 16 * (192 + 128) * 2
-    difference = rows["BNB 4-bit double"].context_gb - rows["Q4_K_M"].context_gb
-    assert difference * 1024**3 == pytest.approx((expanded - compressed) * 4096)
+    bnb = rows["BNB 4-bit double"].context_gb * 1024**3 - working_bytes(snap, 4096, TRANSFORMERS)
+    gguf = rows["Q4_K_M"].context_gb * 1024**3 - working_bytes(snap, 4096, LLAMA_CPP)
+    assert bnb - gguf == pytest.approx((expanded - compressed) * 4096)
 
 
 # Hybrids: only attention layers keep a cache that grows with the context. Reading the wrong
@@ -884,15 +901,16 @@ def test_n_cpu_moe_counts_dense_layers_too():
     full = options_by_label(
         build_snapshot(DEEPSEEK_V2_LITE, meta, config, tensors, probe, dtypes=dtypes), probe
     )["Q4_K_M"]
+    # Free memory just short of the model once CUDA has started (0.55 GB).
     just_short = (
-        f"NVIDIA GeForce RTX 3090, 24576, {int((full.memory_required_gb - 0.05) * 1024)}, 8.6"
+        f"NVIDIA GeForce RTX 3090, 24576, {int((full.memory_required_gb + 0.5) * 1024)}, 8.6"
     )
     snap, hardware = moe_on(DEEPSEEK_V2_LITE, just_short)
     assert options_by_label(snap, hardware)["Q4_K_M"].experts_in_ram == 2
 
 
 def test_no_expert_offload_for_dense_models_or_unified_memory(qwen_tensors):
-    tiny_vram = "NVIDIA GeForce RTX 3060, 12288, 500, 8.6"
+    tiny_vram = "NVIDIA GeForce RTX 3060, 12288, 2500, 8.6"  # 0.89 GB for llama.cpp
     dense, hardware = moe_on(QWEN, tiny_vram)
     assert options_by_label(dense, hardware)["Q4_K_M"].run_mode == RunMode.GPU_OFFLOAD
     mac = HardwareProfile(
@@ -1034,3 +1052,17 @@ def test_a_gated_repo_says_so_and_links_the_license(monkeypatch, tmp_path):
     assert "meta-llama/Llama-3.2-1B is gated" in str(error.value)
     assert "https://huggingface.co/meta-llama/Llama-3.2-1B" in str(error.value)
     assert "set HF_TOKEN" in str(error.value)
+
+
+def test_a_model_too_big_for_the_gpu_is_as_fast_as_its_layers_in_ram_allow(qwen_tensors):
+    # The share of layers on the GPU is the free memory over weights and cache together: the
+    # cache of a long context pushes layers out too. Qwen2.5-7B Q4_K_M at 131k on the RTX 4060
+    # was shown at the all-GPU speed (<= 45 tok/s); llama.cpp put 14 of 29 layers on the GPU.
+    hardware = make_hardware(ram_gb=32, vram_gb=8, free_vram_gb=2.5)
+    q4 = options_by_label(qwen_snapshot(qwen_tensors, hardware, 32768), hardware, 32768)["Q4_K_M"]
+    assert q4.run_mode == RunMode.GPU_OFFLOAD
+    on_gpu = (2.5 - 0.55 - 1.0) / q4.memory_required_gb  # tied embeddings: all of it counts
+    read = q4.weights_gb * qwen_snapshot(qwen_tensors, hardware).read_fraction
+    gpu, ram = 180.0, 89.6e9 / 1024**3
+    expected = 1 / (read * on_gpu / gpu + read * (1 - on_gpu) / ram)
+    assert q4.estimated_tps == pytest.approx(expected, abs=0.1)

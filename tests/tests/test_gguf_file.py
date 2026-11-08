@@ -246,3 +246,48 @@ def test_feasibility_of_a_gguf_repo_gives_the_n_cpu_moe_flag(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "MXFP4: --n-cpu-moe" in result.output
     assert "see ocq plan" not in result.output
+
+
+# llama-server b11429 on an RTX 4060 Laptop, 4 conversations: GPU compute buffer + output
+# buffer, MiB, at 4096 and 16384 tokens (results/windows-nvidia-.../server/summary.md).
+LLAMA_SERVER_CUDA = {
+    "Falcon-H1-0.5B-Instruct-IQ1_M": (31.64 + 0.50, 43.64 + 0.50),
+    "gemma-2-2b-it-IQ3_M": (80.02 + 3.91, 104.02 + 3.91),
+    "gemma-3-1b-it-Q2_K": (56.02 + 4.00, 68.02 + 4.00),
+    "gpt-oss-20b-MXFP4": (206.99 + 3.07, 218.99 + 3.07),
+    "granite-3.1-1b-a400m-instruct-Q2_K": (44.01 + 0.75, 56.01 + 0.75),
+    "granite-4.0-h-350m-Q2_K": (29.69 + 1.53, 41.69 + 1.53),
+    "jamba-reasoning-3b-Q4_K_M": (76.25 + 1.00, 88.25 + 1.00),
+    "LFM2-350M-Q4_0": (39.01 + 1.00, 51.01 + 1.00),
+    "olmoe-1b-7b-0924-instruct-q2_k": (84.01 + 0.77, 96.01 + 0.77),
+}
+
+
+@pytest.mark.parametrize("stem", sorted(LLAMA_SERVER_CUDA))
+def test_llama_server_working_memory_is_an_upper_bound_of_the_measured(stem):
+    from ocq.model_analyzer import working_bytes
+    from ocq.types import LLAMA_CPP
+
+    header, _ = real_header(stem)
+    snap = build_snapshot(stem, {}, config_from_gguf(header), hf_style_tensors(header), None)
+    for context, measured in zip((4096, 16384), LLAMA_SERVER_CUDA[stem], strict=True):
+        predicted = working_bytes(snap, context, LLAMA_CPP) / 2**20
+        assert measured <= predicted <= measured + 91, (context, predicted, measured)
+
+
+def test_gpt_oss_on_the_rtx_4060_keeps_11_layers_of_experts_in_ram():
+    # 7,610 MiB free, 7,106 once llama.cpp has started CUDA. GPU side: the weights but the
+    # input embeddings (in RAM) and the experts of N layers, the cache, llama-server's buffers.
+    # --n-cpu-moe 6 (the old plan) put 8,522 MiB of weights alone on the card.
+    from conftest import nvidia_pc
+
+    from ocq.model_analyzer import gguf_snapshot, quant_options
+    from ocq.types import RunMode
+
+    header, file_size = real_header("gpt-oss-20b-MXFP4")
+    laptop = nvidia_pc("NVIDIA GeForce RTX 4060 Laptop GPU, 8188, 7610, 8.9")
+    files = [("MXFP4", header.data_bytes)]
+    snap = gguf_snapshot("ggml-org/gpt-oss-20b-GGUF", {}, header, files, file_size, True)
+    (row,) = quant_options(snap, laptop)
+    assert row.run_mode == RunMode.GPU_EXPERTS_RAM
+    assert row.experts_in_ram == 11

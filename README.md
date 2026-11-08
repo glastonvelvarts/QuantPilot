@@ -418,7 +418,7 @@ weights on the GPU             2,410.10    2,410.10        +0.00   ok
 weights on the CPU (file range) 1,342.57   1,342.57        +0.00   ok
 ```
 
-Below the table it shows the **working memory** llama.cpp reserved for one batch (on the GPU and the CPU) and its logits buffer. QuantPilot does not predict that yet: on a Mac it ranged from about 90 MiB to 750 MiB depending on the model and the context, and it is being measured on NVIDIA GPUs first. `--save-log FILE` keeps llama.cpp's whole log.
+Below the table it shows the **working memory** llama.cpp reserved for one batch (on the GPU and the CPU) and its logits buffer. `verify` runs `llama-completion`, which reserves more than `llama-server` (the runtime QuantPilot plans for). `--save-log FILE` keeps llama.cpp's whole log.
 
 **On an NVIDIA PC**, these runs check the CUDA side (one small and one mixture-of-experts GGUF is enough):
 
@@ -437,8 +437,8 @@ By default it runs llama.cpp with QuantPilot's own plan for this PC (for a mixtu
 **Memory needed ≈ weights + context**
 
 - **Weights:** tensor names/shapes from safetensors (Hub metadata or local files). GGUF uses llama.cpp’s per-tensor rules; AWQ/GPTQ/BNB use packed linear-layer math plus their scales (single or double quantized for BNB 4-bit).  
-- **Context:** KV cache from `config.json` (layers, KV heads, head dim, and the layer kinds above) × `--context` at the `--kv-cache` type, cross-checked with the K and V projection shapes, plus a small output buffer.  
-- **Fit:** compared to **free VRAM and RAM right now**, not total installed memory, over every GPU the runtime would use.  
+- **Context:** KV cache from `config.json` (layers, KV heads, head dim, and the layer kinds above) × `--context` at the `--kv-cache` type, cross-checked with the K and V projection shapes, plus the runtime's working memory. For llama.cpp that is `llama-server`'s: one row of logits per conversation, the attention mask, and up to 9 × the widest feed-forward layer × 512 tokens × 4 bytes (an upper bound of what 9 models reserved on an RTX 4060, at most 90 MiB over).  
+- **Fit:** compared to **free VRAM and RAM right now**, not total installed memory, over every GPU the runtime would use. On an NVIDIA card, 0.55 GB less: what the runtime's CUDA context takes (measured with vLLM and llama.cpp). llama.cpp also keeps **1 GB free per GPU** by default (`--fit-target`) and moves layers to RAM to get it, and it keeps the input embedding table in RAM; QuantPilot plans the same. On an 8 GB card with 7.4 GB free, a model gets about 5.9 GB. With `--n-cpu-moe` llama.cpp keeps no such headroom, so the expert plan uses the 6.9 GB.  
 - **Speed:** memory bandwidth ÷ the bytes each token reads: the weights used per token (less for mixture-of-experts models, and only one row of the input embedding table).
 
 **Quantizing needs extra disk/RAM** beyond “running” the model (e.g. full weights on disk for GGUF convert, full model in RAM for AWQ/GPTQ calibration). `plan` warns about this.

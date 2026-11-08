@@ -359,10 +359,10 @@ def cmd_verify(
         )
     console.print(table)
     console.print(
-        f"Working memory llama.cpp reserved (not predicted yet): "
-        f"{log.gpu_compute_mib:,.2f} MiB on the GPU, {log.cpu_compute_mib:,.2f} MiB on the CPU, "
-        f"{log.output_mib:,.2f} MiB for the logits (llama-completion; llama-server reserves less, "
-        "it keeps 4 rows of logits instead of 512)"
+        f"Working memory llama.cpp reserved: {log.gpu_compute_mib:,.2f} MiB on the GPU, "
+        f"{log.cpu_compute_mib:,.2f} MiB on the CPU, {log.output_mib:,.2f} MiB for the logits. "
+        "This is llama-completion's; QuantPilot plans for llama-server, which reserves less "
+        "(an upper bound of it is in the context column of ocq feasibility)."
     )
     if save_log:
         console.print(f"[dim]llama.cpp's log: {save_log}[/dim]")

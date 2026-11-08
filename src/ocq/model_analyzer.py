@@ -26,18 +26,22 @@ from ocq.gguf_file import (
 from ocq.llmfit_bridge import LlmfitBridge, LlmfitError
 from ocq.local_model import fetch_local_model_files, gguf_files, parse_model_ref
 from ocq.model_size import (
+    BASE_TYPE,
     EMBEDDING,
+    OUTPUT,
     QUANT_METADATA,
     LayerBits,
     Tensor,
     bnb_scale_bits,
     bnb_weights_bytes,
     experts_in_names,
+    ffn_width,
     gguf_tensor_bytes,
     gguf_weights_bytes,
     group_size_that_fits,
     kv_value_bytes,
     layer_index,
+    llama_server_buffers_bytes,
     nvfp4_weights_bytes,
     output_buffer_bytes,
     packed_weights_bytes,
@@ -46,7 +50,7 @@ from ocq.model_size import (
     stored_bytes,
     weights_per_token,
 )
-from ocq.runtimes import VLLM_CUDA_CONTEXT_GB, vllm_budget, vllm_card_budget_gb
+from ocq.runtimes import LLAMA_FIT_TARGET_GB, usable_gb, vllm_budget, vllm_card_budget_gb
 from ocq.types import (
     CONVERSATIONS,
     DTYPE_BITS,
@@ -1548,9 +1552,13 @@ def fit_at(
     kv_bytes = model.kv_cache_bytes(context, runtime, value_bytes=value_bytes)
     context_gb = 0.0
     if kv_bytes is not None:
-        context_gb = (kv_bytes + output_buffer_bytes(model.vocab_size)) / GB
+        context_gb = (kv_bytes + working_bytes(model, context, runtime)) / GB
 
     required = weights_gb + context_gb
+    # llama.cpp on a separate GPU keeps the input embeddings in RAM, and fits the model itself
+    # with --fit-target of headroom on every card (see runtimes.py).
+    llama_gpu = runtime == LLAMA_CPP and not hardware.unified_memory
+    gpu_required = required - (embeddings_in_ram_gb(model, label, weights_gb) if llama_gpu else 0)
     # vLLM serves AWQ, GPTQ and NVFP4 with tensor parallel; llama.cpp and transformers split
     # by layers.
     split = TENSOR_PARALLEL if runtime == VLLM else LAYER_SPLIT
@@ -1561,7 +1569,7 @@ def fit_at(
     budget = (
         (lambda card, free: vllm_card_budget_gb(card, free, vllm_rule.utilization))
         if vllm_rule
-        else None
+        else usable_gb
     )
     pool = hardware.gpu_pool(split, heads, budget)
     note = ""
@@ -1571,36 +1579,40 @@ def fit_at(
             f"vLLM starts only with {vllm_rule.utilization:.0%} of the GPU's "
             f"{card.vram_gb:.1f} GB free ({vllm_rule.source}); "
             f"{hardware.card_free_gb(card):.1f} GB is free, about "
-            f"{hardware.card_free_gb(card) - VLLM_CUDA_CONTEXT_GB:.1f} GB once vLLM has started "
+            f"{usable_gb(card, hardware.card_free_gb(card)):.1f} GB once vLLM has started "
             "CUDA. Lower --gpu-memory-utilization or close what else uses the GPU."
         )
     if pool and pool.split == LAYER_SPLIT:
         # Layers on a slower card slow every token down. When the model fits on the best card
         # alone and that card is faster than the split, one card is the better setup.
-        single = hardware.gpu_pool(ONE_GPU)
-        if required <= single.free_gb and single.read_speed > pool.read_speed:
+        single = hardware.gpu_pool(ONE_GPU, budget=usable_gb)
+        if gpu_required <= single.free_gb and single.read_speed > pool.read_speed:
             pool = single
     vram = pool.free_gb if pool else 0.0
     ram = hardware.available_ram_gb
+    # What a model may use when llama.cpp lays it out itself.
+    fits = max(vram - LLAMA_FIT_TARGET_GB * pool.count, 0.0) if llama_gpu and pool else vram
 
     experts_ram_layers, experts_ram_gb = 0, 0.0
     offload = None
-    if vram and required > vram and not hardware.unified_memory and row_kind == "gguf":
-        offload = experts_to_ram(model, label, required - vram, ram, weights_gb)
-    if vram and required <= vram:
-        run_mode, available = RunMode.GPU, vram
+    if vram and gpu_required > fits and not hardware.unified_memory and row_kind == "gguf":
+        # Given --n-cpu-moe, llama.cpp keeps no headroom: the plan fits the experts itself.
+        offload = experts_to_ram(model, label, gpu_required - vram, ram, weights_gb)
+    used = required
+    if vram and gpu_required <= fits:
+        run_mode, available, used = RunMode.GPU, fits, gpu_required
     elif offload:
         run_mode, available = RunMode.GPU_EXPERTS_RAM, vram + ram
         experts_ram_layers, experts_ram_gb = offload
     elif vllm and pool:
         # vLLM does not spill into RAM by default (cpu_offload_gb is 0) or run on the CPU.
         run_mode, available = RunMode.GPU, vram
-    elif vram and not hardware.unified_memory and required <= vram + ram:
-        run_mode, available = RunMode.GPU_OFFLOAD, vram + ram
+    elif fits and not hardware.unified_memory and required <= fits + ram:
+        run_mode, available = RunMode.GPU_OFFLOAD, fits + ram
     else:
         run_mode, available = RunMode.CPU, ram
 
-    utilization = required / available * 100 if available > 0 else 999.0
+    utilization = used / available * 100 if available > 0 else 999.0
     if utilization > 100:
         fit_level, run_mode = FitLevel.TOO_TIGHT, RunMode.UNFIT
     elif run_mode == RunMode.GPU_OFFLOAD or utilization > 85:
@@ -1625,6 +1637,8 @@ def fit_at(
         gpu_read_speed=pool.read_speed if pool else 0.0,
         read_fraction=model.read_fraction,
         ram_read_gb=experts_ram_gb * model.experts_per_token / model.experts if offload else 0.0,
+        # Whole layers, with their share of the cache, fill the GPU; the rest runs from RAM.
+        gpu_share=min(fits / gpu_required, 1.0) if gpu_required > 0 else 1.0,
     )
     return QuantOption(
         label=label,
@@ -1633,7 +1647,7 @@ def fit_at(
         context_gb=context_gb,
         exact=bool(model.tensors) and kv_bytes is not None,
         context_known=kv_bytes is not None,
-        memory_required_gb=required,
+        memory_required_gb=used,
         memory_available_gb=available,
         fit_level=fit_level,
         run_mode=run_mode,
@@ -1648,6 +1662,33 @@ def fit_at(
         note=note,
         runtime=runtime,
     )
+
+
+def working_bytes(model: ModelSnapshot, context: int, runtime: str) -> int:
+    """Memory a runtime needs besides the weights and the cache. llama.cpp: llama-server's
+    output and compute buffers; else 512 rows of logits."""
+    ffn = ffn_width(list(model.tensors), model.experts, model.experts_per_token)
+    if runtime != LLAMA_CPP or not ffn:
+        return output_buffer_bytes(model.vocab_size)
+    sliding = any(layer.window for layer in model.kv_layers)
+    return llama_server_buffers_bytes(model.vocab_size, context, ffn, sliding, CONVERSATIONS)
+
+
+def embeddings_in_ram_gb(model: ModelSnapshot, gguf_type: str, weights_gb: float) -> float:
+    """GB of the GGUF's input embedding table, which llama.cpp keeps in RAM on a separate GPU
+    (the token lookup runs on the CPU; verify checks it). A tied table is the output layer too,
+    so it is also on the GPU: 0 then."""
+    if not any(name.endswith(OUTPUT) for name, _ in model.tensors):
+        return 0.0
+    if model.gguf_tensor_bytes:
+        scale = weights_gb * GB / sum(model.gguf_tensor_bytes.values())
+        sizes = {name: size * scale for name, size in model.gguf_tensor_bytes.items()}
+    elif gguf_type in BASE_TYPE:
+        heads_per_kv_head = max(model.num_attention_heads // max(model.num_kv_heads, 1), 1)
+        sizes = gguf_tensor_bytes(list(model.tensors), gguf_type, heads_per_kv_head)
+    else:
+        return 0.0
+    return sum(size for name, size in sizes.items() if name.endswith(EMBEDDING)) / GB
 
 
 def experts_to_ram(
