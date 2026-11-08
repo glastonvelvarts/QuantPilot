@@ -37,6 +37,19 @@ Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate
 
 `optimize` defaults to **dry run**. Add **`--execute`** to really quantize.
 
+### The full-screen app
+
+Run **`ocq`** with no command (or **`ocq tui`**) to do all of the above from menus instead of flags:
+
+- **Up / Down** move through the menu, **Enter** opens a page, **Tab** moves between fields, and every fixed choice (context, cache type, goal, backend, bits...) is a dropdown.
+- **Pick** lists the models already on this PC; typing a model name suggests them too.
+- In **My models** and **Suggestions**, Enter on a row opens "what fits", "inspect", "plan" or "verify" for that model.
+- Each page shows the `ocq` command it ran (`Same as: ocq feasibility ... -c 8192`), so you can copy it into a script.
+- **Settings**: theme (21 themes, including `ansi-dark` / `ansi-light`, which use your terminal's own colors), default context, cache type and goal, extra model folders, and **plain ASCII borders** for old consoles that show question marks instead of lines. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
+- **?** shows every key, **Ctrl+P** jumps to any page or changes the theme, **q** quits.
+
+The banner uses only plain ASCII characters, so it looks the same on Windows, macOS and Linux. Piped or redirected, `ocq` still prints the help text, and every command and flag works as before.
+
 ---
 
 ## Install

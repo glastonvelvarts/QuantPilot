@@ -1,0 +1,300 @@
+/* QuantPilot TUI. Colors come from the theme ($primary, $accent...), so every theme works. */
+
+Screen {
+    layout: vertical;
+    background: $background;
+}
+
+/* Banner ------------------------------------------------------------------------------- */
+
+#masthead {
+    height: auto;
+    padding: 1 2 0 2;
+}
+
+#banner {
+    width: 100%;
+    text-align: center;
+    color: $accent;
+    text-style: bold;
+}
+
+#masthead.slim {
+    padding: 0 2;
+    background: $panel;
+}
+
+#masthead.slim #banner {
+    text-align: left;
+}
+
+#tagline {
+    width: 100%;
+    text-align: center;
+    color: $text-muted;
+    padding-bottom: 1;
+}
+
+/* Menu and pages ----------------------------------------------------------------------- */
+
+#main {
+    height: 1fr;
+}
+
+#nav {
+    width: 22;
+    height: 100%;
+    border: none;
+    border-right: solid $border;
+    background: $surface;
+    padding: 1 0;
+}
+
+#nav:focus {
+    border-right: solid $accent;
+}
+
+#pages {
+    width: 1fr;
+    height: 100%;
+}
+
+.page {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+.page-title {
+    color: $primary;
+    text-style: bold;
+}
+
+.page-help {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#home-hw {
+    margin-bottom: 1;
+}
+
+#home-steps {
+    height: auto;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+}
+
+/* Forms -------------------------------------------------------------------------------- */
+
+.form {
+    height: auto;
+    grid-size: 3;
+    grid-columns: 1fr 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 2;
+}
+
+.field {
+    height: auto;
+}
+
+.field-label {
+    color: $text-muted;
+    padding: 0 1;
+}
+
+.wide {
+    column-span: 3;
+}
+
+Screen.-narrow .form {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+}
+
+Screen.-narrow .wide {
+    column-span: 2;
+}
+
+Screen.-narrow #nav {
+    width: 16;
+}
+
+.model-field {
+    height: auto;
+}
+
+.model-field Input {
+    width: 1fr;
+}
+
+.model-field Button {
+    width: auto;
+    min-width: 8;
+    margin-left: 1;
+}
+
+#model_folders {
+    height: 5;
+}
+
+Collapsible.more {
+    height: auto;
+    margin-top: 1;
+    padding: 0;
+    background: transparent;
+    border: none;
+}
+
+.actions {
+    height: auto;
+    margin: 1 0;
+}
+
+.actions Button {
+    margin-right: 2;
+}
+
+/* Results ------------------------------------------------------------------------------ */
+
+OutputLog {
+    height: 1fr;
+    min-height: 5;
+    border: round $border;
+    background: $surface;
+    padding: 0 1;
+}
+
+OutputLog:focus {
+    border: round $accent;
+}
+
+DataTable {
+    height: 1fr;
+    min-height: 5;
+    border: round $border;
+}
+
+DataTable:focus {
+    border: round $accent;
+}
+
+.table-note {
+    height: auto;
+    max-height: 4;
+    padding: 0 1;
+}
+
+/* Status bar --------------------------------------------------------------------------- */
+
+#status {
+    height: 1;
+    background: $panel;
+    padding: 0 1;
+}
+
+#spinner {
+    width: 6;
+    height: 1;
+    display: none;
+    color: $accent;
+}
+
+#status.running #spinner {
+    display: block;
+}
+
+#status-text {
+    width: 1fr;
+}
+
+#status-hw {
+    width: auto;
+    color: $text-muted;
+}
+
+/* Pop-ups ------------------------------------------------------------------------------ */
+
+ModalScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+.dialog {
+    width: 76;
+    max-width: 95%;
+    height: auto;
+    max-height: 85%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+.dialog.help {
+    width: 90;
+}
+
+.dialog-title {
+    text-style: bold;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+.dialog-hint {
+    color: $text-muted;
+    margin-top: 1;
+}
+
+.dialog-body {
+    margin-bottom: 1;
+}
+
+.dialog-buttons {
+    height: auto;
+}
+
+.dialog-buttons Button {
+    margin-right: 2;
+}
+
+.dialog OptionList {
+    height: auto;
+    max-height: 20;
+}
+
+.dialog Markdown {
+    height: auto;
+    max-height: 30;
+    overflow-y: auto;
+}
+
+/* Plain ASCII borders, for consoles that cannot draw lines (Settings) ------------------ */
+
+App.-ascii OutputLog,
+App.-ascii DataTable,
+App.-ascii .dialog {
+    border: ascii $border;
+}
+
+App.-ascii OutputLog:focus,
+App.-ascii DataTable:focus {
+    border: ascii $accent;
+}
+
+/* Fields and buttons are one line with no border, so only the arrow needs hiding. */
+App.-ascii SelectCurrent .arrow {
+    display: none;
+}
+
+App.-ascii TextArea {
+    border: ascii $border;
+}
+
+App.-ascii TextArea:focus {
+    border: ascii $accent;
+}
+
+App.-ascii #nav {
+    border-right: ascii $border;
+}
