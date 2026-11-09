@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ocq import processes
 from ocq.gguf_file import TENSOR_TYPES, GgufHeader, GgufTensor, read_local
 from ocq.model_analyzer import GB, kv_copies, llama_layers_on_gpu, working_bytes
 from ocq.model_size import kv_value_bytes
@@ -365,12 +366,14 @@ def run_llama(
         log = Path(folder) / "llama-server.log"
         with open(log, "wb") as out, open(log, "rb") as reader:
             try:
-                process = subprocess.Popen(
-                    command,
-                    stdout=out,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    env={**os.environ, **(env or {})},
+                process = processes.started(
+                    subprocess.Popen(
+                        command,
+                        stdout=out,
+                        stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
+                        env={**os.environ, **(env or {})},
+                    )
                 )
             except OSError as exc:
                 raise OcqError(f"Could not run {tool.name}: {exc}") from exc
@@ -393,6 +396,7 @@ def run_llama(
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+                processes.ended(process)
         # The log can hold half a UTF-8 character; only its memory lines matter here.
         return log.read_bytes().decode("utf-8", errors="replace")
 

@@ -480,7 +480,11 @@ def model_sources(
     at the smallest type are not read, only named with why."""
     from ocq.discovery import find_models
 
-    found = [model for model in find_models(extra_dirs) if model.complete and readable(model)]
+    found = [
+        model
+        for model in find_models(extra_dirs, skip_missing=True)
+        if model.complete and readable(model)
+    ]
     by_ref = {model.ref.lower(): model for model in found}
     if request.models:
         sources = []

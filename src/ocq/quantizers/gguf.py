@@ -13,6 +13,7 @@ import sys
 import threading
 from pathlib import Path
 
+from ocq import processes
 from ocq.quantizers.base import model_slug, model_weights_dir
 from ocq.quantizers.llama_cpp import converter_script, missing_library, tool_path
 from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, PROMPT_TOKENS, Quantizer
@@ -66,7 +67,7 @@ class GGUFQuantizer(Quantizer):
             flush=True,
         )
         metadata = workspace / "metadata.json"
-        metadata.write_text(json.dumps(gguf_metadata(plan.model_id)))
+        metadata.write_text(json.dumps(gguf_metadata(plan.model_id, plan.model.weights_dir)))
         run_tool(
             [
                 sys.executable,
@@ -201,13 +202,16 @@ QUANTIZED_BY = "QuantPilot"
 HF = "https://huggingface.co/"
 
 
-def gguf_metadata(model_id: str) -> dict:
+def gguf_metadata(model_id: str, folder: Path | None = None) -> dict:
     """What the GGUF says about itself (the converter's --metadata): QuantPilot made it, from
-    this repo, so it is compared with its original wherever the file is moved. Its name is the
-    model's, not the cache folder's (a commit hash when it came from the Hugging Face cache)."""
+    this repo, or from this folder for a model of your own (general.source.url, file://), so
+    it is compared with its original wherever the file is moved. Its name is the model's, not
+    the cache folder's (a commit hash when it came from the Hugging Face cache)."""
     metadata = {"general.quantized_by": QUANTIZED_BY, "general.name": model_id.split("/")[-1]}
     if not model_id.startswith(("local/", "ollama/")) and "/" in model_id:
         metadata["general.source.repo_url"] = HF + model_id
+    elif folder is not None:
+        metadata["general.source.url"] = folder.resolve().as_uri()
     return metadata
 
 
@@ -242,15 +246,23 @@ def run_tool(
     if progress:
         completed = run_showing_progress(command, environment)
     else:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            env=environment,
+        process = processes.started(
+            subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                env=environment,
+            )
         )
+        try:
+            out, err = process.communicate()
+        finally:
+            processes.ended(process)
+        completed = subprocess.CompletedProcess(command, process.returncode, out, err)
     log.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
         library = missing_library(completed.stdout + completed.stderr, completed.returncode)
@@ -263,15 +275,17 @@ def run_tool(
 
 def run_showing_progress(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
     """subprocess.run with both outputs captured, printing their progress lines as they come."""
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
+    process = processes.started(
+        subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
     )
     kept: dict[str, list[str]] = {"out": [], "err": []}
     shown = threading.Event()
@@ -295,7 +309,10 @@ def run_showing_progress(command: list[str], env: dict[str, str]) -> subprocess.
     ]
     for reader in readers:
         reader.start()
-    code = process.wait()
+    try:
+        code = process.wait()
+    finally:
+        processes.ended(process)
     for reader in readers:
         reader.join()
     if shown.is_set():

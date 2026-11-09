@@ -227,3 +227,133 @@ def test_a_local_gguf_file_is_inspected_and_not_quantized_again(tmp_path):
     assert (row.label, row.row_kind) == ("Q8_0", "gguf")
     with pytest.raises(OcqError, match="already GGUF"):
         generate_plan(snap.model_id, make_hardware(), snap, OptimizationGoal.BALANCED, tmp_path)
+
+
+# + Add your model: what a chosen folder holds ----------------------------------------------
+
+
+def saved_model_folder(folder: Path, weights: bool = True, tokenizer: bool = True) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    _, config, tensors, dtypes = real_model(QWEN)
+    (folder / "config.json").write_text(json.dumps(config))
+    if weights:
+        write_safetensors(folder / "model.safetensors", tensors, dtypes)
+    if tokenizer:
+        (folder / "tokenizer.json").write_text("{}")
+    return folder
+
+
+def test_a_folder_saved_with_save_pretrained_can_be_added(tmp_path):
+    from ocq.local_model import check_model
+
+    found = check_model(saved_model_folder(tmp_path / "my-finetune"))
+    assert found.ok and found.folder == tmp_path / "my-finetune"
+    assert [fine for fine, _ in found.lines] == [True, True, True]
+    assert found.lines[0][1] == "config.json (Qwen2ForCausalLM)"
+    assert found.lines[1][1].startswith("Weights: 1 file, ")
+    assert found.label.startswith("Qwen2ForCausalLM, ")
+
+
+@pytest.mark.parametrize(
+    ("setup", "said"),
+    [
+        ("adapter", "A LoRA adapter, not a whole model"),
+        ("no config", "No readable config.json"),
+        ("bin", "Only .bin weights"),
+        ("no weights", "No weights (*.safetensors)"),
+        ("shard missing", "Weights: 1 of 2 files are missing"),
+        ("no tokenizer", "No tokenizer"),
+        ("nothing", "Nothing is there"),
+        ("text file", "Choose a model folder or a .gguf file"),
+    ],
+)
+def test_what_is_missing_is_said_and_it_cannot_be_added(tmp_path, setup, said):
+    from ocq.local_model import check_model
+
+    folder = tmp_path / "model"
+    if setup == "adapter":
+        folder.mkdir()
+        (folder / "adapter_config.json").write_text("{}")
+        (folder / "adapter_model.safetensors").write_bytes(b"x")
+    elif setup == "no config":
+        saved_model_folder(folder)
+        (folder / "config.json").unlink()
+    elif setup == "bin":
+        saved_model_folder(folder, weights=False)
+        (folder / "pytorch_model.bin").write_bytes(b"x")
+    elif setup == "no weights":
+        saved_model_folder(folder, weights=False)
+    elif setup == "shard missing":
+        saved_model_folder(folder, weights=False)
+        index = {"weight_map": {"a": "model-1.safetensors", "b": "model-2.safetensors"}}
+        (folder / "model.safetensors.index.json").write_text(json.dumps(index))
+        (folder / "model-1.safetensors").write_bytes(b"x")
+    elif setup == "no tokenizer":
+        saved_model_folder(folder, tokenizer=False)
+    elif setup == "text file":
+        folder = tmp_path / "notes.txt"
+        folder.write_text("hello")
+    found = check_model(folder)
+    assert not found.ok and found.folder is None
+    assert any(said in what for fine, what in found.lines if not fine), found.lines
+
+
+def test_gguf_files_can_be_added_by_their_folder(tmp_path):
+    from test_discovery import tiny_gguf
+
+    from ocq.local_model import check_model
+
+    gguf = tmp_path / "models" / "mine-Q4_K_M.gguf"
+    gguf.parent.mkdir()
+    gguf.write_bytes(tiny_gguf())
+    found = check_model(gguf)
+    assert found.ok and found.folder == gguf.parent and found.label.startswith("GGUF file, ")
+    found = check_model(gguf.parent)
+    assert found.ok and found.label.startswith("1 GGUF file, ")
+
+
+def test_a_model_folder_that_is_gone_is_left_out_in_the_app(tmp_path):
+    from ocq.discovery import find_models
+
+    with pytest.raises(OcqError, match="Folder not found"):
+        find_models([tmp_path / "moved"])  # ocq models --dir: say so
+    others = find_models()
+    assert find_models([tmp_path / "moved"], skip_missing=True) == others  # the app: the others
+
+
+def test_a_folder_without_its_weights_says_which_and_how_much(tmp_path):
+    # /Documents/trained-model/qwen-awq-4bit on the M1: config, tokenizer and the index of a
+    # 7B AWQ, its two weight files not copied. It said "Could not read safetensors file".
+    folder = saved_model_folder(tmp_path / "qwen-awq-4bit", weights=False)
+    index = {
+        "metadata": {"total_size": 5_573_316_608},
+        "weight_map": {
+            "a": "model-00001-of-00002.safetensors",
+            "b": "model-00002-of-00002.safetensors",
+        },
+    }
+    (folder / "model.safetensors.index.json").write_text(json.dumps(index))
+    problem = validate_hf_folder(folder)
+    assert "is missing 2 of its 2 weight files (model-00001-of-00002.safetensors, " in problem
+    assert "5.19 GB in all" in problem and problem.endswith(
+        "Copy the weight files into the folder."
+    )
+    with pytest.raises(OcqError, match="missing 2 of its 2 weight files"):
+        parse_model_ref(str(folder))
+
+
+def test_a_quantized_folder_of_your_own_points_to_the_one_it_was_made_from(tmp_path):
+    from conftest import QWEN_AWQ
+
+    from ocq.plan import already_quantized
+
+    folder = tmp_path / "qwen-awq-4bit"
+    folder.mkdir()
+    _, config, tensors, dtypes = real_model(QWEN_AWQ)
+    config["_name_or_path"] = "outputs/qwen-merged-16bit"  # what transformers 4 saved
+    (folder / "config.json").write_text(json.dumps(config))
+    write_safetensors(folder / "model.safetensors", tensors, dtypes)
+    (folder / "tokenizer.json").write_text("{}")
+    message = already_quantized(resolve_model(str(folder), None, use_llmfit=False))
+    assert message.startswith("local/qwen-awq-4bit is already quantized (AWQ 4-bit)")
+    assert "It was made from outputs/qwen-merged-16bit (its config.json says so)" in message

@@ -58,9 +58,10 @@ src/ocq/
 ```sh
 uv run --with pillow python scripts/screenshots.py --gguf <a .gguf on this PC>
 uv run --with pillow python scripts/screenshots.py --banner-only   # only the banner
+uv run --with pillow python scripts/screenshots.py --own-model     # only + Add your model (own-model.gif)
 ```
 
-It needs Chrome (or `rsvg-convert`). The banner is 1280 x 640: also set it as the repository's social preview (Settings, General, Social preview).
+The own-model pictures are made in a demo home folder holding only a copy of SmolLM2 as `my-finetune` (your own folders stay out of the picture, your history untouched). It needs Chrome (or `rsvg-convert`). The banner is 1280 x 640: also set it as the repository's social preview (Settings, General, Social preview).
 
 ## Making a release
 

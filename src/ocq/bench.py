@@ -177,16 +177,19 @@ def save(
     )
 
 
-def made_from(path: Path) -> str | None:
-    """The repo a model QuantPilot made was quantized from, so its runs and quality count for
-    that repo's recommendations and it is compared with its original: from what QuantPilot
-    wrote in it (the GGUF's metadata, a folder's quantpilot.json), else from the folder it was
-    made in (ocq-output/<org>--<name>/artifact/, before QuantPilot wrote that down). None for
-    any other model."""
+def provenance_of(path: Path) -> tuple[str | None, Path | None]:
+    """(the model a file or folder QuantPilot made was quantized from, its original folder when
+    that was a model of your own on this PC). From what QuantPilot wrote in it (the GGUF's
+    metadata, a folder's quantpilot.json), else from the folder it was made in
+    (ocq-output/<org>--<name>/artifact/, before QuantPilot wrote that down). (None, None) for
+    any other model. The model is a repo id, or local/<folder name> for your own."""
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+
     from ocq.local_model import provenance
     from ocq.quantizers.gguf import HF, QUANTIZED_BY
 
-    source = ""
+    source, folder = "", None
     if path.is_file() and path.suffix.lower() == ".gguf":
         try:
             from ocq.gguf_file import read_local
@@ -196,25 +199,40 @@ def made_from(path: Path) -> str | None:
             settings = {}
         if settings.get("general.quantized_by") == QUANTIZED_BY:
             source = str(settings.get("general.source.repo_url", "")).removeprefix(HF)
+            url = str(settings.get("general.source.url", ""))
+            if url.startswith("file:"):
+                folder = Path(url2pathname(unquote(urlparse(url).path)))
     elif path.is_dir():
-        source = str(provenance(path).get("source", ""))
-    if source and "/" in source and not source.startswith(("local/", "ollama/", "http")):
-        return source.strip("/")
+        made = provenance(path)
+        source = str(made.get("source", ""))
+        folder = Path(made["source_path"]) if made.get("source_path") else None
+    if folder is not None:
+        original = folder if (folder / "config.json").is_file() else None
+        return f"local/{folder.name}", original
+    if source and "/" in source and not source.startswith(("ollama/", "http")):
+        return source.strip("/"), None
     if path.parent.name != "artifact" or "--" not in path.parent.parent.name:
-        return None
-    return path.parent.parent.name.replace("--", "/", 1)
+        return None, None
+    return path.parent.parent.name.replace("--", "/", 1), None
+
+
+def made_from(path: Path) -> str | None:
+    """The model a file or folder QuantPilot made came from (see provenance_of)."""
+    return provenance_of(path)[0]
 
 
 def file_gb(snapshot: ModelSnapshot) -> float:
     return sum(size for _, size in snapshot.gguf_files) / measurements.GB
 
 
-def make_reference(repo: str, hardware: HardwareProfile, piece, log_dir: Path) -> dict:
-    """Measures the reference a repo's formats are compared with: its original weights, from
-    the Hugging Face cache, converted to a 16-bit GGUF and run in llama.cpp (whose perplexity
-    matches transformers'). When that does not fit in this PC's memory, Q8_0 made from it,
-    which loses almost nothing. The files are made in a folder of their own, then deleted.
-    Returns the saved result."""
+def make_reference(
+    repo: str, hardware: HardwareProfile, piece, log_dir: Path, folder: Path | None = None
+) -> dict:
+    """Measures the reference a model's formats are compared with: its original weights (from
+    the Hugging Face cache, or folder for a model of your own), converted to a 16-bit GGUF and
+    run in llama.cpp (whose perplexity matches transformers'). When that does not fit in this
+    PC's memory, Q8_0 made from it, which loses almost nothing. The files are made in a
+    folder of their own, then deleted. Returns the saved result."""
     import shutil
     import sys
 
@@ -225,7 +243,7 @@ def make_reference(repo: str, hardware: HardwareProfile, piece, log_dir: Path) -
     from ocq.quantizers.gguf import intermediate_precision, run_tool
     from ocq.quantizers.llama_cpp import converter_script, tool_path
 
-    folder = cached_hf_model(repo)
+    folder = folder or cached_hf_model(repo)
     if folder is None:
         raise OcqError(f"The original weights of {repo} are not on this PC to measure.")
     original = resolve_model(str(folder), hardware, None, 4096, "f16", use_llmfit=False)
@@ -316,6 +334,7 @@ class BenchOutcome:
     piece: object | None = None  # quality.Slice
     kept: object | None = None  # quality.MeasuredKept
     note: str = ""  # why there is nothing to compare with, or that this is the original
+    original: Path | None = None  # the original folder of a model of your own
 
 
 def run_benchmark(
@@ -354,7 +373,8 @@ def run_benchmark(
 
     if path.is_dir():
         path = path / snapshot.gguf_files[0][0]
-    model_id = made_from(path) or snapshot.model_id
+    made, original = provenance_of(path)
+    model_id = made or snapshot.model_id
     suite = STANDARD
     prompts = prompts_for(suite, snapshot.context_length)
     planned = max(context, max(prompts) + suite.tokens)  # llama-bench sizes the context so
@@ -381,7 +401,9 @@ def run_benchmark(
             model_id, option.label, LLAMA_CPP, hardware, measurements.placed(device)
         )
     )
-    outcome = BenchOutcome(model_id, option.label, option, device, report, runs, piece=piece)
+    outcome = BenchOutcome(
+        model_id, option.label, option, device, report, runs, piece=piece, original=original
+    )
     if on_speed:
         on_speed(outcome)
     if piece is None:
@@ -423,7 +445,8 @@ def transformers_quality(snapshot, path: Path, piece, hardware: HardwareProfile)
         o for o in quant_options(snapshot, hardware, 4096, "f16") if o.row_kind == "stored"
     )
     label = stored.label.removesuffix(" (as stored)").strip()
-    model_id = made_from(path) or snapshot.model_id
+    made, original = provenance_of(path)
+    model_id = made or snapshot.model_id
     device = "gpu" if hardware.has_cuda else "cpu"
     where = "the NVIDIA GPU" if hardware.has_cuda else "the CPU"
     print(f"{QUALITY_STEP} on {quality.DATASET}, in transformers on {where} ...", flush=True)
@@ -434,7 +457,9 @@ def transformers_quality(snapshot, path: Path, piece, hardware: HardwareProfile)
     except Exception as exc:  # the model's own code, CUDA kernels, out of memory
         raise OcqError(f"transformers could not measure it: {type(exc).__name__}: {exc}") from exc
     quality.record(result, piece, model=model_id, label=label, hardware=hardware, device=device)
-    outcome = BenchOutcome(model_id, label, stored, device, quality=result, piece=piece)
+    outcome = BenchOutcome(
+        model_id, label, stored, device, quality=result, piece=piece, original=original
+    )
     compare(outcome, hardware)
     return outcome
 
@@ -450,15 +475,15 @@ def compare(outcome: BenchOutcome, hardware: HardwareProfile) -> None:
         return
     print(f"{COMPARE_STEP} ...", flush=True)
     model_id = outcome.model_id
-    repo = model_id if not model_id.startswith(("local/", "ollama/")) else None
-    if (
-        repo
-        and quality.reference_for(repo, outcome.piece.name) is None
-        and cached_hf_model(repo) is not None
-    ):
-        print(f"Measuring the original of {repo} once, from the Hugging Face cache ...", flush=True)
+    # The original: the folder of a model of your own, or a repo's files in the HF cache.
+    original = outcome.original
+    where = "from its folder"
+    if original is None and not model_id.startswith(("local/", "ollama/")):
+        original, where = cached_hf_model(model_id), "from the Hugging Face cache"
+    if original is not None and quality.reference_for(model_id, outcome.piece.name) is None:
+        print(f"Measuring the original of {model_id} once, {where} ...", flush=True)
         try:
-            make_reference(repo, hardware, outcome.piece, quality.STORE.parent)
+            make_reference(model_id, hardware, outcome.piece, quality.STORE.parent, original)
         except OcqError as exc:
             outcome.note = f"Could not measure the original: {exc}"
     outcome.kept = quality.measured_kept(model_id, outcome.label)

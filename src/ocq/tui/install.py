@@ -13,6 +13,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ocq import processes
 from ocq.installation import install_command, requirements  # noqa: F401 (requirements: tests)
 from ocq.quantizers import get_quantizer
 from ocq.tui import words
@@ -62,21 +63,27 @@ def install(
     # A uv tool on Windows: the running ocq.exe cannot be replaced, so into its environment.
     command, folder = install_command(algorithm.value, hardware, in_place=os.name == "nt")
     say(f"Installing the {NAMES[algorithm]} tools ...")
-    process = subprocess.Popen(
-        command,
-        cwd=folder,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+    process = processes.started(
+        subprocess.Popen(
+            command,
+            cwd=folder,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     )
     assert process.stdout is not None
-    for line in process.stdout:
-        if line.strip():
-            say(line.rstrip())
-    if process.wait() != 0:
+    try:
+        for line in process.stdout:
+            if line.strip():
+                say(line.rstrip())
+        code = process.wait()
+    finally:
+        processes.ended(process)
+    if code != 0:
         raise RuntimeError(f"The installer stopped with exit code {process.returncode}.")
     importlib.invalidate_caches()  # let this process find the new packages
     if algorithm == QuantAlgorithm.GGUF:

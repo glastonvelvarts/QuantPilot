@@ -1,5 +1,6 @@
-"""Real quantization of a small model with every backend, then what it gives: its speed, its
-quality against the original, and (GGUF) llama.cpp's memory against QuantPilot's prediction.
+"""Real quantization of a small model with every backend, from the Hub and as a model of your
+own (a plain folder), then what it gives: its speed, its quality against the original, and
+(GGUF) llama.cpp's memory against QuantPilot's prediction.
 
 Run with: uv run pytest -m slow  (GitHub runs the GGUF one every night; the NVIDIA ones run on
 a PC with an NVIDIA GPU: make test-gpu)
@@ -27,13 +28,28 @@ LABELS = {
 }
 
 
+def own_model(folder):
+    """SmolLM2 as a model of your own: its files in a plain folder, as save_pretrained leaves
+    them (no Hugging Face cache, no repo name)."""
+    import shutil
+
+    from huggingface_hub import snapshot_download
+
+    snapshot = snapshot_download(MODEL, allow_patterns=["*.json", "*.safetensors", "*.txt"])
+    shutil.copytree(snapshot, folder, symlinks=False)
+    return folder
+
+
 @pytest.mark.slow
+@pytest.mark.parametrize("source", ["hub", "own"], ids=["hub", "own folder"])
 @pytest.mark.parametrize("algorithm", list(QuantAlgorithm), ids=lambda a: a.value)
-def test_quantize_measure_and_compare_with_the_original(algorithm, tmp_path):
+def test_quantize_measure_and_compare_with_the_original(algorithm, source, tmp_path):
     hardware = detect_hardware()
     ready, reason = get_quantizer(algorithm).check(hardware)
     if not ready:
         pytest.skip(reason)
+    model = MODEL if source == "hub" else str(own_model(tmp_path / "my-smollm2"))
+    expected = MODEL if source == "hub" else "local/my-smollm2"
 
     choices = QuantChoices(
         algorithm=algorithm, bits=4, calibration_samples=16, calibration_seq_len=256
@@ -42,7 +58,7 @@ def test_quantize_measure_and_compare_with_the_original(algorithm, tmp_path):
         choices = QuantChoices(algorithm=algorithm, gguf_type="Q4_K_M")
     # Not ocq-output/<org>--<name>/: what QuantPilot made says itself where it came from.
     made = tmp_path / "somewhere"
-    result = run_optimize(MODEL, OptimizationGoal.BALANCED, made, choices=choices)
+    result = run_optimize(model, OptimizationGoal.BALANCED, made, choices=choices)
 
     assert result.quantization.success, result.quantization.message
     assert result.validation.passed, result.validation.checks
@@ -57,7 +73,7 @@ def test_quantize_measure_and_compare_with_the_original(algorithm, tmp_path):
 
     # Its speed (GGUF), its quality, and the original's (made once from the Hugging Face cache).
     outcome = bench.run_benchmark(str(artifact), hardware, piece=quality.FIXED)
-    assert outcome.model_id == MODEL
+    assert outcome.model_id == expected  # the repo, or your own folder
     assert outcome.label.startswith(LABELS[algorithm])
     if algorithm == QuantAlgorithm.GGUF:
         assert outcome.speed.tokens_per_second > 0
@@ -68,7 +84,7 @@ def test_quantize_measure_and_compare_with_the_original(algorithm, tmp_path):
     assert 0.2 < outcome.kept.kept <= 1.0
 
     # The recommendation for this model now uses what was measured.
-    if algorithm == QuantAlgorithm.GGUF:
+    if algorithm == QuantAlgorithm.GGUF and source == "hub":
         result = recommend(RecommendationRequest(models=(MODEL,)), hardware)
         q4 = next(r.candidate for r in result.ranked if r.candidate.option.label == "Q4_K_M")
         kept, measured = kept_of(q4)

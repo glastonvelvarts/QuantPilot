@@ -1045,3 +1045,56 @@ def test_a_gguf_picked_from_a_list_can_be_benchmarked():
         "check", "quantize", "bench", "verify",
     ]  # fmt: skip
     assert [key for _, key in ModelActions("org/model", False).actions] == ["check", "quantize"]
+
+
+# + Add your model ------------------------------------------------------------------------
+
+
+def test_add_your_model_checks_the_folder_adds_it_and_asks_what_to_do(tmp_path, monkeypatch):
+    from test_local_model import saved_model_folder
+
+    from ocq import discovery
+    from ocq.tui.widgets import AddModel, ModelActions
+
+    offline_engine(monkeypatch)
+    monkeypatch.setattr(discovery, "find_models", lambda *a, **k: [])
+    folder = saved_model_folder(tmp_path / "my-finetune")
+    adapter = tmp_path / "my-lora"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}")
+    benched, seen = [], {}
+    monkeypatch.setattr(
+        QuantPilotApp, "open_bench", lambda app, ref, measure="": benched.append((ref, measure))
+    )
+
+    async def steps(app, pilot):
+        app.show_page("models", focus=True)
+        await settle(app, pilot)
+        seen["empty"] = text_of(app, "#models .empty")
+        app.query_one("#add-model").press()
+        await pilot.pause()
+        dialog = app.screen
+        assert isinstance(dialog, AddModel)
+        field = dialog.query_one("#add-path")
+        field.value = str(adapter)  # a LoRA adapter: said, and Add stays off
+        await pilot.pause()
+        seen["adapter"] = str(dialog.query_one("#add-check").render())
+        seen["adapter add"] = dialog.query_one("#add-ok").disabled
+        field.value = str(folder)
+        await pilot.pause()
+        seen["folder"] = str(dialog.query_one("#add-check").render())
+        dialog.query_one("#add-ok").press()
+        await pilot.pause()
+        menu = app.screen
+        seen["menu"] = isinstance(menu, ModelActions) and [key for _, key in menu.actions]
+        seen["folders"] = list(app.settings.model_folders)
+        menu.dismiss("quality")
+        await settle(app, pilot)
+
+    run_app(tmp_path, steps)
+    assert "Press + Add your model" in seen["empty"]
+    assert "A LoRA adapter, not a whole model" in seen["adapter"] and seen["adapter add"]
+    assert "✓ config.json (Qwen2ForCausalLM)" in seen["folder"] and "Ready to add" in seen["folder"]
+    assert seen["menu"] == ["check", "quantize", "quality"]
+    assert seen["folders"] == [str(folder.resolve())]
+    assert benched == [(str(folder), "fixed")]  # its quality: the reference of its formats

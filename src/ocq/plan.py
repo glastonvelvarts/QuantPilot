@@ -143,7 +143,28 @@ def already_quantized(model: ModelSnapshot) -> str:
         base = base[0] if len(base) == 1 else None
     if base:
         return f"{message}; quantize the original instead: ocq optimize {base}"
+    made = made_from_folder(model)
+    if made:
+        return (
+            f"{message}. It was made from {made} (its config.json says so): quantize that "
+            "folder instead, the model before it was quantized."
+        )
     return f"{message}. Quantize the original model instead. (ocq feasibility shows if it fits.)"
+
+
+def made_from_folder(model: ModelSnapshot) -> str:
+    """What a model folder of your own was saved from (config.json's _name_or_path, which
+    transformers 4 kept): for a quantized folder, usually the model before it was quantized."""
+    import json
+
+    if model.weights_dir is None:
+        return ""
+    try:
+        config = json.loads((Path(model.weights_dir) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    made = str(config.get("_name_or_path") or "").strip()
+    return made if made and Path(made).name != Path(model.weights_dir).name else ""
 
 
 def experts_note(model: ModelSnapshot, option: QuantOption) -> str:

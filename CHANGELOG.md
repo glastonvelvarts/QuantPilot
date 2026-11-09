@@ -4,9 +4,25 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-09
+
 ### Changed
 
 - README: how to open the app, for each way of installing QuantPilot (`ocq`, `uvx quantpilot`, `uv run ocq`).
+
+### Added
+
+- **+ Add your model** on the app's My models page: a folder browser that checks what you pick (config.json, the weights, the tokenizer; a LoRA adapter or `.bin` weights are explained), then lists the model with the others and asks what to do with it. Models on the PC that are not GGUF can have their quality measured from that menu.
+- The real tests quantize every format also from a plain folder, as a model of your own.
+
+### Fixed
+
+- Quitting the app (Ctrl+C) is instant again: it no longer waits, after the screen has closed, for the model lookups still running in the background (up to 30 s while Discover or Check a model was loading). Quitting during a quantize, a benchmark or an install stops the programs it started (llama.cpp's tools, the installer) instead of leaving them running.
+- A model folder that was moved or deleted no longer empties My models and the recommendations: it is left out.
+- A model folder whose weight files were not copied with it says which are missing and how big they are, instead of "Could not read safetensors file".
+- A quantized model folder of your own, refused as any quantized model is, names the folder it was made from (its config.json's `_name_or_path`) to quantize instead.
+- After a quantize, Check it, Benchmark it and Verify it show the new file by its short path (`ocq-output/...`).
+- A model of your own (a folder saved with `save_pretrained`) is now compared with its original: what QuantPilot makes from it records the folder (in the GGUF, `general.source.url`; in `quantpilot.json`, `source_path`), and `ocq bench --quality` measures the original once from there. It said the original was not on the PC.
 
 ## [1.5.0] - 2026-11-09
 
@@ -43,5 +59,6 @@ The first release on PyPI: `uv tool install quantpilot`.
 - Installs with `uv tool install quantpilot`, `uvx quantpilot` or pip on Linux, macOS and Windows, Python 3.10 to 3.13; quantization tools as extras, added the way QuantPilot was installed.
 - On Windows the CLI writes UTF-8, so its status marks (✓, ✗) show in consoles set to cp1252, the default of many terminals and of CI; where they cannot, plain `+` and `x`.
 
-[Unreleased]: https://github.com/glastonvelvarts/QuantPilot/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/glastonvelvarts/QuantPilot/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/glastonvelvarts/QuantPilot/compare/v1.5.0...v1.5.2
 [1.5.0]: https://github.com/glastonvelvarts/QuantPilot/releases/tag/v1.5.0

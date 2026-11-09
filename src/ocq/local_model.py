@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from ocq.model_size import Tensor
@@ -52,7 +53,23 @@ def validate_hf_folder(path: Path) -> str | None:
             f"{path} is not a HuggingFace-style model folder (missing config.json). "
             "Save the full model with save_pretrained()."
         )
-    if not weight_files(path):
+    files = weight_files(path)
+    missing = [file.name for file in files if not file.is_file()]
+    if missing:
+        try:
+            index = json.loads((path / "model.safetensors.index.json").read_text(encoding="utf-8"))
+            size = f", {index['metadata']['total_size'] / 1024**3:.2f} GB in all"
+        except (OSError, ValueError, KeyError, TypeError):
+            size = ""
+        shown = ", ".join(missing[:3]) + (
+            f" and {len(missing) - 3} more" if len(missing) > 3 else ""
+        )
+        return (
+            f"{path} is missing {len(missing)} of its {len(files)} weight files ({shown}{size}, "
+            "as model.safetensors.index.json lists them): only the config and the tokenizer "
+            "are there. Copy the weight files into the folder."
+        )
+    if not files:
         if list(path.glob("*.bin")):
             return (
                 f"{path} only has PyTorch .bin weights. Re-save it as safetensors: load it with "
@@ -201,3 +218,72 @@ def cached_hf_model(repo: str) -> Path | None:
     if not files or not all(file.is_file() for file in files) or not has_tokenizer(folder):
         return None
     return folder
+
+
+@dataclass(frozen=True)
+class ModelCheck:
+    """What a folder (or file) chosen as a model of your own holds, for people to read."""
+
+    ok: bool  # it can be added: QuantPilot can read, check, quantize and benchmark it
+    label: str  # what it is: "LlamaForCausalLM, 0.27 GB" or "2 GGUF files, 5.1 GB"
+    lines: tuple[tuple[bool, str], ...]  # each thing checked: (fine, what)
+    folder: Path | None = None  # what to add to the model folders
+
+
+def check_model(path: Path) -> ModelCheck:
+    """Whether path is a model QuantPilot can work with: a folder saved with save_pretrained
+    (config.json, safetensors weights, a tokenizer), a folder of GGUF files, or a .gguf file.
+    Says what is missing, and what to do about a LoRA adapter or .bin weights."""
+    path = path.expanduser()
+    if not path.exists():
+        return ModelCheck(False, "", ((False, "Nothing is there"),))
+    if path.is_file():
+        if path.suffix.lower() != ".gguf":
+            return ModelCheck(False, "", ((False, "Choose a model folder or a .gguf file"),))
+        size = path.stat().st_size / 1024**3
+        return ModelCheck(True, f"GGUF file, {size:.2f} GB", ((True, "A GGUF file"),), path.parent)
+    ggufs = gguf_files(path)
+    if ggufs and not (path / "config.json").is_file():
+        size = sum(f.stat().st_size for f in ggufs) / 1024**3
+        what = f"{len(ggufs)} GGUF file{'s' * (len(ggufs) > 1)}, {size:.2f} GB"
+        return ModelCheck(True, what, ((True, what),), path)
+    if (path / "adapter_config.json").is_file() and not (path / "config.json").is_file():
+        return ModelCheck(False, "", (
+            (False, "A LoRA adapter, not a whole model"),
+            (False, "Merge it into its base model first (PEFT merge_and_unload(), or Unsloth "
+                    "save_pretrained_merged()), then save that"),
+        ))  # fmt: skip
+    lines: list[tuple[bool, str]] = []
+    try:
+        config = json.loads((path / "config.json").read_text(encoding="utf-8"))
+        kind = ", ".join(config.get("architectures") or []) or config.get("model_type", "")
+        lines.append((True, f"config.json ({kind or 'a model'})"))
+    except (OSError, ValueError):
+        lines.append((False, "No readable config.json: save the model with save_pretrained()"))
+        kind = ""
+    try:
+        files = weight_files(path)
+    except OcqError:
+        files = []
+    present = [f for f in files if f.is_file()]
+    size = sum(f.stat().st_size for f in present) / 1024**3
+    if files and len(present) == len(files):
+        count = f"{len(files)} file{'s' * (len(files) > 1)}"
+        lines.append((True, f"Weights: {count}, {size:.2f} GB"))
+    elif files:
+        lines.append(
+            (False, f"Weights: {len(files) - len(present)} of {len(files)} files are missing")
+        )
+    elif list(path.glob("*.bin")):
+        lines.append((False, "Only .bin weights: load it and save_pretrained() it again "
+                             "(safetensors)"))  # fmt: skip
+    else:
+        lines.append((False, "No weights (*.safetensors)"))
+    if has_tokenizer(path):
+        lines.append((True, "Tokenizer"))
+    else:
+        lines.append((False, "No tokenizer: tokenizer.save_pretrained() into the same folder"))
+    ok = all(fine for fine, _ in lines)
+    return ModelCheck(
+        ok, f"{kind}, {size:.2f} GB" if ok else "", tuple(lines), path if ok else None
+    )
