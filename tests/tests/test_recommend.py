@@ -4,6 +4,7 @@ data/."""
 
 import math
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from conftest import (
@@ -145,7 +146,7 @@ def test_a_catalog_repo_already_downloaded_is_read_from_disk_once(tmp_path, monk
     sources = [s for s in model_sources(RecommendationRequest())[0] if s.label == coder.repo]
     assert len(sources) == 1
     assert sources[0].local and sources[0].tags == coder.tags
-    assert sources[0].ref.endswith("snapshots/abc123")  # the folder on disk, not the Hub
+    assert Path(sources[0].ref).parts[-2:] == ("snapshots", "abc123")  # on disk, not the Hub
 
 
 def test_named_models_are_the_only_sources(ollama_pc):

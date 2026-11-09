@@ -18,7 +18,8 @@ TOKEN = "hf_abcdefghijklmnopqrstuvwxyz1234"
 def test_saving_makes_a_private_file_and_keeps_its_other_lines(tmp_path):
     path = tmp_path / "ocq" / ".env"
     env_file.save("HF_TOKEN", TOKEN, path)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600  # its owner only
+    if os.name != "nt":  # Windows has no Unix modes; the user's profile folder is private
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600  # its owner only
     assert path.read_text().startswith("# Keys for QuantPilot")
     path.write_text(path.read_text() + "# mine\nexport OTHER_KEY='kept'\n")
     env_file.save("HF_TOKEN", "hf_newtokenvalue0000", path)
