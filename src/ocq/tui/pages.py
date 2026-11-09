@@ -788,6 +788,7 @@ class QuantizePage(Page):
         self.presets: dict[tuple, str] = {}
         # Form values with the Recommended format -> the (format, cache type) review chose.
         self.resolved: dict[tuple, tuple[str, str]] = {}
+        self.made: Path | None = None  # the file the last run made, or the plan finds made
 
     def compose_body(self) -> ComposeResult:
         s = self.qp.settings
@@ -802,8 +803,10 @@ class QuantizePage(Page):
         with Results(classes="results"):
             with Card(id="plan", classes="card"):
                 yield Static("", id="plan-text")
-                yield Action("Start", variant="primary", id="start")
-                yield Action("Install", variant="primary", id="install")
+                with Horizontal(classes="card-actions"):
+                    yield Action("Check it", variant="primary", id="check-existing")
+                    yield Action("Start", variant="primary", id="start")
+                    yield Action("Install", variant="primary", id="install")
             with Vertical(id="running"):
                 yield Static("", id="stage")
                 yield StepTracker(id="steps")
@@ -812,7 +815,11 @@ class QuantizePage(Page):
                 )
                 yield Static("", id="step-detail")
                 yield ProgressLog(id="progress")
-            yield Card("", id="result", classes="card")
+            with Card(id="result", classes="card"):
+                yield Static("", id="result-text")
+                with Horizontal(classes="card-actions"):
+                    yield Action("Check it", variant="primary", id="check-made")
+                    yield Action("Verify it", id="verify-made")
             yield Static("", classes="problem")
 
     def on_mount(self) -> None:
@@ -878,7 +885,8 @@ class QuantizePage(Page):
             snapshot.model_id, hw, snapshot, OptimizationGoal.BALANCED, default_output(ref),
             format_choices(made_key, context, kv_cache),
         )  # fmt: skip
-        self.app.call_from_thread(self.show_plan, plan, form, snapshot.num_layers)
+        made = made_file(plan)
+        self.app.call_from_thread(self.show_plan, plan, form, snapshot.num_layers, made)
 
     def resolve_format(self, form: tuple, hw) -> tuple[str, str]:
         """(format, cache type) to make. Recommended: the engine's best option for this model
@@ -903,7 +911,7 @@ class QuantizePage(Page):
         reasons = engine.explain_model(result, ref)
         raise OcqError(f"Nothing fits this PC. {reasons[-1].text}")
 
-    def show_plan(self, plan, form: tuple, num_layers: int = 0) -> None:
+    def show_plan(self, plan, form: tuple, num_layers: int = 0, made: Path | None = None) -> None:
         from ocq.tui.install import MISSING, READY, tool_state
 
         self.query_one(".busy").display = False
@@ -917,7 +925,11 @@ class QuantizePage(Page):
             details = [words.gb(predicted.memory_required_gb), words.place(predicted),
                        words.layers(predicted, num_layers), words.speed(predicted)]  # fmt: skip
             text.append("  " + "  |  ".join(d for d in details if d != "-"))
-        text.append(f"\nSaves to {plan.output_dir}", "dim")
+        if made:
+            text.append("\nAlready made: ", "bold green")
+            text.append(str(made), "dim")
+        else:
+            text.append(f"\nSaves to {plan.output_dir}", "dim")
         tool = tool_state(plan.quant_config.algorithm, self.qp.hardware())
         for warning in plan.warnings:
             if tool.state == MISSING and words.warning(warning).endswith(
@@ -926,12 +938,27 @@ class QuantizePage(Page):
                 continue  # the Install button says it
             text.append(f"\n{words.warning(warning)}", "yellow")
         self.query_one("#plan-text", Static).update(text)
-        self.query_one("#start").display = tool.state == READY
+        self.made = made
+        start = self.query_one("#start", Button)
+        start.display = tool.state == READY
+        start.label = "Make it again" if made else "Start"
+        start.variant = "default" if made else "primary"
+        self.query_one("#check-existing").display = made is not None
         install = self.query_one("#install", Button)
         install.display = tool.state == MISSING
         install.label = f"Install {tool.name} tools"
         self.tool = tool.algorithm
         self.query_one("#plan").display = True
+
+    @on(Button.Pressed, "#check-made, #check-existing")
+    def check_made(self) -> None:
+        if self.made:
+            self.qp.open_with_model("check", str(self.made))
+
+    @on(Button.Pressed, "#verify-made")
+    def verify_made(self) -> None:
+        if self.made:
+            self.qp.open_with_model("verify", str(self.made))
 
     @on(Button.Pressed, "#install")
     def install(self) -> None:
@@ -980,6 +1007,7 @@ class QuantizePage(Page):
         self.query_one("#plan").display = False
         self.query_one("#result").display = False
         self.show_running("quantize")
+        self.query_one("#review", Button).focus()  # Start is hidden now: keep the keys working
         stage = self.query_one("#stage", Static)
         stage.update(Text(f"Quantizing {ref} ...", "bold"))
         progress = self.query_one(ProgressLog)
@@ -1039,9 +1067,31 @@ class QuantizePage(Page):
         self.qp.job_finished("Quantized" if ok else "Quantizing failed", ok)
         self.show_running("steps")  # the steps and their times stay above the result
         card = self.query_one("#result", Card)
-        card.update(result_text(result, problem))
+        self.query_one("#result-text", Static).update(result_text(result, problem))
         card.set_class(not ok, "bad")
         card.display = True
+        made = result.quantization.artifact_path if result and result.quantization else ""
+        made_ok = bool(made) and result.quantization.success and Path(made).exists()
+        self.made = Path(made) if made_ok else None
+        self.query_one("#check-made").display = made_ok
+        self.query_one("#verify-made").display = made_ok and made.endswith(".gguf")
+        # The keys need a visible place to be: the result's first action, else Review.
+        self.query_one("#check-made" if made_ok else "#review", Button).focus()
+
+
+def made_file(plan) -> Path | None:
+    """The GGUF file this plan makes, when it is there already (ocq optimize names it
+    <model>-<type>.gguf). Other formats share one folder per model, so they are not told apart."""
+    from ocq.quantizers.base import model_slug
+
+    if plan.quant_config.algorithm != QuantAlgorithm.GGUF:
+        return None
+    path = (
+        plan.output_dir
+        / "artifact"
+        / f"{model_slug(plan.model_id)}-{plan.quant_config.gguf_type}.gguf"
+    )
+    return path if path.is_file() else None
 
 
 def result_text(result, problem: str) -> Text:

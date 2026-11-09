@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ocq import hardware, measurements, model_analyzer, recommend
+from ocq import discovery, hardware, measurements, model_analyzer, recommend
 from ocq.types import DTYPE_BITS
 
 # Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
@@ -27,6 +27,8 @@ def private_caches(tmp_path, monkeypatch):
         raise OSError("no network in tests")
 
     monkeypatch.setattr(recommend, "fetch_hub_listing", no_network)
+    # Nor the files ocq optimize made in the folder the tests run from.
+    monkeypatch.setattr(discovery, "quantpilot_dirs", lambda: [])
     # Nor the GPU driver of the PC they run on.
     monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 

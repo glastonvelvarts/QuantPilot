@@ -432,3 +432,21 @@ def test_encoders_speech_models_and_embedding_packages_are_not_listed(tmp_path, 
 
     found = {m.label for m in discovery.hf_cache_models()}
     assert found == {"Qwen/Qwen2.5-0.5B", "google/gemma-3-4b-it", "org/model-GGUF/model-Q8_0.gguf"}
+
+
+def test_the_files_quantpilot_made_are_found(tmp_path):
+    output = tmp_path / "ocq-output"
+    made = output / "Qwen--Qwen3.5-0.8B" / "artifact"
+    made.mkdir(parents=True)
+    (made / "Qwen--Qwen3.5-0.8B-Q4_K_M.gguf").write_bytes(tiny_gguf(15))  # 15: Q4_K_M
+    workspace = output / "Qwen--Qwen3.5-0.8B" / "workspace"  # in-between files: not models
+    workspace.mkdir()
+    (workspace / "model-bf16.gguf").write_bytes(tiny_gguf(32))
+
+    (model,) = discovery.quantpilot_models([output])
+    assert (model.label, model.source, model.quantization) == (
+        "Qwen--Qwen3.5-0.8B-Q4_K_M.gguf",
+        "QuantPilot",
+        "Q4_K_M",
+    )
+    assert model.complete and model.path.parent == made

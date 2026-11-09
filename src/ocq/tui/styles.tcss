@@ -183,6 +183,16 @@ Screen.-narrow .wide {
     margin-top: 1;
 }
 
+.card-actions {
+    height: auto;
+    margin-top: 1;
+}
+
+.card-actions Button {
+    margin-top: 0;
+    margin-right: 2;
+}
+
 .results DataTable {
     height: auto;
     max-height: 24;

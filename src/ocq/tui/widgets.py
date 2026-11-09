@@ -56,14 +56,20 @@ class TextField(Input):
 
 
 class RowTable(DataTable):
-    """Up/Down move through the rows; Up on the first row leaves the table, Left goes back to
-    the menu unless the table is scrolled sideways."""
+    """Up/Down move through the rows; Up on the first row and Down on the last leave the
+    table, Left goes back to the menu unless the table is scrolled sideways."""
 
     def action_cursor_up(self) -> None:
         if self.cursor_row <= 0:
             step_focus(self, -1)
         else:
             super().action_cursor_up()
+
+    def action_cursor_down(self) -> None:
+        if self.cursor_row >= self.row_count - 1:
+            step_focus(self, 1)  # on to what is below the table
+        else:
+            super().action_cursor_down()
 
     def action_cursor_left(self) -> None:
         if self.scroll_x <= 0:

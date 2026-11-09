@@ -384,7 +384,7 @@ def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
         page.begin(*page.plan_for)
         await settle(app, pilot)
         seen["progress"] = [line.text for line in app.query_one("#progress", ProgressLog).lines]
-        seen["result"] = text_of(app, "#result")
+        seen["result"] = text_of(app, "#result-text")
         seen["steps"] = text_of(app, "#steps")
         seen["bar shown"] = app.query_one("#step-bar").display
         seen["busy"] = app.busy
@@ -732,3 +732,104 @@ def test_arrow_keys_move_between_the_buttons_of_a_question(tmp_path: Path):
     run_app(tmp_path, steps)
     assert seen == ["no", "yes", "no", "yes", "no", "yes"]
     assert answers == [True]
+
+
+def finished_run(monkeypatch, artifact: Path, release):
+    """A quantization that made `artifact` (a real file), without running anything. It ends
+    when `release` (a threading.Event) is set."""
+    made = fake_model(monkeypatch)
+
+    def fake_run(ref, goal, output, **kwargs):
+        release.wait(10)
+        quantization = SimpleNamespace(
+            success=True, message="", artifact_size_gb=0.7, artifact_path=str(artifact)
+        )
+        validation = SimpleNamespace(passed=True, checks=[])
+        bench = SimpleNamespace(tokens_per_second=95.0, sample_output="Hello.")
+        return SimpleNamespace(
+            plan=made, quantization=quantization, validation=validation, benchmark=bench
+        )
+
+    monkeypatch.setattr(pipeline, "run_optimize", fake_run)
+    return made
+
+
+def test_after_quantizing_the_keys_work_and_the_new_file_opens(tmp_path: Path, monkeypatch):
+    import threading
+
+    artifact = tmp_path / "org--model-Q8_0.gguf"
+    artifact.write_bytes(b"GGUF")
+    release = threading.Event()
+    finished_run(monkeypatch, artifact, release)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
+        await pilot.press(*"org/model", "enter")
+        await settle(app, pilot)
+        page = app.query_one(QuantizePage)
+        page.begin(*page.plan_for)
+        await pilot.pause()
+        seen["while running"] = app.focused.id  # Start is hidden: the keys still have a place
+        release.set()
+        await settle(app, pilot)
+        seen["after"] = app.focused.id
+        seen["verify shown"] = app.query_one("#verify-made").display
+        await pilot.press("right")
+        seen["right"] = app.focused.id  # the arrow keys move again
+        await pilot.press("up", "up")
+        seen["up"] = app.focused.id
+        app.query_one("#check-made").focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        seen["page"] = app.query_one("ContentSwitcher").current
+        seen["model"] = app.query_one("#check ModelField").value
+
+    run_app(tmp_path, steps)
+    assert seen["while running"] == "review"
+    assert seen["after"] == "check-made" and seen["verify shown"]
+    assert seen["right"] == "verify-made" and seen["up"] != "verify-made"
+    assert (seen["page"], seen["model"]) == ("check", str(artifact))
+
+
+def test_a_file_already_made_is_offered_before_making_it_again(tmp_path: Path, monkeypatch):
+    made = fake_model(monkeypatch)
+    made.output_dir = tmp_path / "out" / "org--model"
+    artifact = made.output_dir / "artifact" / "org--model-Q8_0.gguf"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"GGUF")
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
+        await pilot.press(*"org/model", "enter")
+        await settle(app, pilot)
+        seen["plan"] = text_of(app, "#plan-text")
+        seen["start"] = str(app.query_one("#start").label)
+        seen["check"] = app.query_one("#check-existing").display
+
+    run_app(tmp_path, steps)
+    assert f"Already made: {artifact}" in seen["plan"]
+    assert seen["start"] == "Make it again" and seen["check"]
+
+
+def test_down_on_the_last_row_of_a_table_moves_on(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
+    offline_engine(monkeypatch)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("check", focus=True)
+        await pilot.press(*QWEN, "enter")
+        await settle(app, pilot)
+        table = app.query_one("#options")
+        table.focus()
+        table.move_cursor(row=table.row_count - 1)
+        await pilot.press("down")
+        seen["after last row"] = [node.id for node in app.focused.ancestors_with_self]
+
+    run_app(tmp_path, steps)
+    assert "about" in seen["after last row"]  # About this model
