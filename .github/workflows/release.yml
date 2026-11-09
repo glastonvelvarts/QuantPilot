@@ -77,7 +77,9 @@ jobs:
           # the notes; otherwise the workflow makes it.
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-            gh release edit "$GITHUB_REF_NAME" --title "QuantPilot $version" --notes-file notes.md
+            # A draft made on the website is published too, and becomes the latest release.
+            gh release edit "$GITHUB_REF_NAME" --title "QuantPilot $version" --notes-file notes.md \
+              --draft=false --latest
           else
             gh release create "$GITHUB_REF_NAME" dist/* --title "QuantPilot $version" --notes-file notes.md
           fi
