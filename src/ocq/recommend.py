@@ -39,6 +39,7 @@ from ocq.model_size import kv_value_bytes
 from ocq.plan import free_disk_gb
 from ocq.quantizers.llama_cpp import TAG as LLAMA_CPP_TAG
 from ocq.quantizers.llama_cpp import converter_architectures
+from ocq.quantizers.protocol import PROMPT_TOKENS
 from ocq.types import (
     VLLM,
     FactKind,
@@ -60,6 +61,7 @@ class Objective(str, Enum):
     CONTEXT = "context"  # how much text fits in one conversation
     MEMORY = "memory"  # how much room is left for other programs
     THROUGHPUT = "throughput"  # conversations served at the same time
+    LATENCY = "latency"  # how soon the answer starts: the time to the first token
 
     def __str__(self) -> str:
         return self.value
@@ -118,6 +120,12 @@ WORKLOADS: dict[str, WorkloadProfile] = {
             "Long Context",
             (Objective.CONTEXT, Objective.QUALITY, Objective.MEMORY),
             context=131072,
+        ),
+        WorkloadProfile(
+            "low-latency",
+            "Low Latency",
+            (Objective.LATENCY, Objective.SPEED, Objective.QUALITY),
+            context=8192,
         ),
         WorkloadProfile(
             "throughput",
@@ -837,6 +845,8 @@ TIGHT = "uses most of the free memory"
 DEGRADED_FORMAT = "keeps less than half of the model's quality"
 SPECIALIST = "made for code"
 
+# A first token sooner than this feels immediate: used to word the latency reason.
+SNAPPY_SECONDS = 1.0
 LOST_ON_DRAWBACKS = "drawbacks"
 LOST_ON_TIE = "tie"
 
@@ -847,6 +857,7 @@ TOLERANCE = {
     Objective.CONTEXT: 0.0,  # already in whole steps (doubling)
     Objective.MEMORY: 0.10,
     Objective.THROUGHPUT: 0.10,
+    Objective.LATENCY: 0.10,
 }
 
 
@@ -981,7 +992,61 @@ def objective_values(
                 break
             conversations += 1
         values[Objective.THROUGHPUT] = conversations * option.estimated_tps
+    if Objective.LATENCY in wanted:
+        seconds, _ = first_token(candidate, hardware)
+        values[Objective.LATENCY] = 1 / seconds if seconds else 0.0  # unknown: last
     return values
+
+
+MEASURED_SETUP = "runs of this setup"
+
+
+def first_token(candidate: Candidate, hardware: HardwareProfile) -> tuple[float | None, str]:
+    """Seconds to the first token after a PROMPT_TOKENS prompt (reading it, then writing one)
+    and where that comes from: MEASURED_SETUP (runs of this very setup), MEASURED (learnt from
+    this PC's other runs), or None when nothing placed this way was measured here."""
+    option = candidate.option
+    runs = [
+        run
+        for run in runs_of(
+            candidate.model.model_id,
+            option.label,
+            candidate.runtime,
+            hardware,
+            placed_as(option.run_mode),
+        )
+        if run.get("prompt_tps")
+    ]
+    if runs:
+        reading = sum(run["prompt_tps"] for run in runs) / len(runs)
+        writing = sum(run["tps"] for run in runs) / len(runs)
+        basis = MEASURED_SETUP
+    elif option.prompt_tps:
+        reading, writing, basis = option.prompt_tps, option.estimated_tps, option.prompt_basis
+    else:
+        return None, ""
+    return PROMPT_TOKENS / reading + (1 / writing if writing else 0.0), basis
+
+
+PLACED_WORDS = {
+    "gpu": "on this PC's GPU",
+    "cpu": "on this PC's CPU",
+    "gpu+cpu": "split between this PC's GPU and CPU",
+    "gpu+experts": "with experts in RAM on this PC",
+}
+
+
+def latency_reason(candidate: Candidate, hardware: HardwareProfile) -> Reason:
+    seconds, basis = first_token(candidate, hardware)
+    if seconds is None:
+        where = PLACED_WORDS.get(placed_as(candidate.option.run_mode), "here")
+        text = f"Time to the first token not known: no model was benchmarked {where} yet"
+        return Reason(TRADEOFF, text)
+    source = "measured on this PC" if basis == MEASURED_SETUP else "estimated from runs on this PC"
+    return Reason(
+        GOOD if seconds < SNAPPY_SECONDS else TRADEOFF,
+        f"First token about {seconds:.2f} s after a {PROMPT_TOKENS} token prompt ({source})",
+    )
 
 
 def drawbacks(candidate: Candidate, workload: WorkloadProfile) -> list[str]:
@@ -1215,7 +1280,14 @@ def difference(
     elif objective == Objective.MEMORY:
         word = "less" if better else "more"
         gb = (a.option.memory_required_gb, b.option.memory_required_gb)
-        text = f"uses {word} memory ({gb[0]:.1f} vs {gb[1]:.1f} GB)"
+        digits = 2 if max(gb) < 1 else 1  # 0.15 vs 0.24 GB, not 0.2 vs 0.2
+        text = f"uses {word} memory ({gb[0]:.{digits}f} vs {gb[1]:.{digits}f} GB)"
+    elif objective == Objective.LATENCY:
+        if not mine or not theirs:
+            text = "first token time known" if better else "first token time not known yet"
+        else:
+            word = "sooner" if better else "later"
+            text = f"first token {word} ({1 / mine:.2f} vs {1 / theirs:.2f} s)"
     else:
         word = "more" if better else "less"
         text = f"serves {word} at once ({mine:.0f} vs {theirs:.0f} tok/s in all)"
@@ -1244,6 +1316,8 @@ def winner_reasons(
 ) -> tuple[Reason, ...]:
     candidate = best.candidate
     reasons = [fit_reason(candidate, hardware), speed_reason(candidate, hardware)]
+    if Objective.LATENCY in workload.priorities:
+        reasons.insert(0, latency_reason(candidate, hardware))
     room = best.values.get(Objective.CONTEXT, candidate.context)
     text = f"Holds the {tokens(candidate.context)} tokens of context asked for"
     if room > candidate.context:
@@ -1310,7 +1384,11 @@ def capital(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def confidence(recommendation: Recommendation, hardware: HardwareProfile) -> Confidence:
+def confidence(
+    recommendation: Recommendation,
+    hardware: HardwareProfile,
+    workload: WorkloadProfile | None = None,
+) -> Confidence:
     """What the advice rests on. Medium: the model read from its files, speed an upper bound.
     High: speed from runs on this PC. Very High: runs of this very setup. Low: a fact the
     advice depends on is estimated, or a check could not be made."""
@@ -1375,12 +1453,25 @@ def confidence(recommendation: Recommendation, hardware: HardwareProfile) -> Con
                 measured,
             )
         )
+    latency_known = True
+    if workload is not None and Objective.LATENCY in workload.priorities:
+        _, basis = first_token(candidate, hardware)
+        latency_known = bool(basis)
+        evidence.append(
+            Evidence(
+                {
+                    MEASURED_SETUP: "First token time from runs of this setup on this PC",
+                    MEASURED: "First token time from other models' runs on this PC",
+                }.get(basis, "First token time not measured on this PC yet"),
+                latency_known,
+            )
+        )
     evidence.append(Evidence("Quality estimated from size and format (not measured yet)", False))
     unchecked = [check for check in recommendation.checks if check.text.startswith("not checked")]
     for check in unchecked:
         evidence.append(Evidence(f"{check.name.capitalize()} {check.text}", False))
 
-    if not (sized and context_known and moe_known) or unchecked:
+    if not (sized and context_known and moe_known and latency_known) or unchecked:
         level = ConfidenceLevel.LOW
     elif runs:
         level = ConfidenceLevel.VERY_HIGH
@@ -1411,7 +1502,7 @@ def explain(
                 recommendation,
                 reasons=reasons,
                 warnings=(note,) if note else (),
-                confidence=confidence(recommendation, hardware),
+                confidence=confidence(recommendation, hardware, workload),
             )
         )
     return explained

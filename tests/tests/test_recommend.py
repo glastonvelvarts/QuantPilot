@@ -67,7 +67,7 @@ from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM, Fact, FactKind, FitLevel, O
 
 
 def test_workloads_rank_on_distinct_objectives():
-    assert len(WORKLOADS) == 7
+    assert len(WORKLOADS) == 8
     assert DEFAULT_WORKLOAD in WORKLOADS
     for key, profile in WORKLOADS.items():
         assert profile.key == key
@@ -82,6 +82,7 @@ def test_workloads_put_first_what_the_user_cares_about():
     assert WORKLOADS["coding"].priorities[:2] == (Objective.QUALITY, Objective.CONTEXT)
     assert WORKLOADS["throughput"].priorities[0] == Objective.THROUGHPUT
     assert WORKLOADS["throughput"].conversations > 1
+    assert WORKLOADS["low-latency"].priorities[0] == Objective.LATENCY
 
 
 def test_request_uses_the_workload_context_unless_given():
@@ -714,3 +715,98 @@ def test_catalog_models_too_big_even_at_q2_k_are_named_not_read(monkeypatch):
     assert why.startswith("Too big for this PC: even its smallest version needs about 258 GB")
     result = RecommendationResult(RecommendationRequest(), (), (), (), tuple(too_big))
     assert explain_model(result, "org/Huge-700B")[0].text == why
+
+
+# Time to the first token, the Low Latency workload (7C) -------------------------------------
+
+
+def test_prompt_speed_is_learnt_from_this_pcs_runs_placed_the_same_way():
+    from ocq.types import RunMode
+
+    gpu = make_hardware(vram_gb=8)
+    predict = measurements.predict_prompt_speed
+    assert predict(1.0, RunMode.GPU, gpu) == (0.0, "")  # nothing measured: not known
+
+    # One size measured: in proportion to the parameters a token uses.
+    measurements.record("gpu", 0.6, 80.0, prompt_tps=1000.0, active_params_b=1.0, hardware=gpu)
+    assert predict(2.0, RunMode.GPU, gpu) == (500.0, measurements.MEASURED)
+    assert predict(2.0, RunMode.CPU, gpu) == (0.0, "")  # a GPU run says nothing of the CPU
+
+    # Two sizes: a line, so a small model's fixed cost is not stretched to a big one.
+    measurements.record("gpu", 2.4, 30.0, prompt_tps=300.0, active_params_b=4.0, hardware=gpu)
+    tps, _ = predict(8.0, RunMode.GPU, gpu)
+    per_billion = (1 / 300 - 1 / 1000) / 3
+    assert tps == pytest.approx(1 / (1 / 1000 + per_billion * 7), abs=0.1)
+
+    # Runs of another PC, and runs that did not save their size, are not used.
+    elsewhere = make_hardware(ram_gb=128, vram_gb=8)
+    assert predict(2.0, RunMode.GPU, elsewhere) == (0.0, "")
+    measurements.record("cpu", 0.6, 20.0, prompt_tps=100.0, hardware=gpu)
+    assert predict(1.0, RunMode.CPU, gpu) == (0.0, "")
+
+
+def low_latency(models=(QWEN,), hardware=BIG_GPU):
+    request = RecommendationRequest(workload=WORKLOADS["low-latency"], models=tuple(models))
+    return recommend(request, hardware, disk_free_gb=1000)
+
+
+def test_low_latency_says_so_when_no_first_token_was_measured_here(saved_hub):
+    best = low_latency().best
+    assert texts(best.reasons)[0] == (
+        "Time to the first token not known: no model was benchmarked on this PC's GPU yet"
+    )
+    assert best.confidence.level == ConfidenceLevel.LOW
+    assert "First token time not measured on this PC yet" in [
+        e.text for e in best.confidence.evidence
+    ]
+
+
+def test_the_first_token_is_estimated_from_other_models_then_measured(saved_hub, monkeypatch):
+    from ocq import recommend as engine
+    from ocq.recommend import MEASURED_SETUP, first_token
+
+    monkeypatch.setattr(engine, "converter_architectures", lambda: frozenset({"Qwen2ForCausalLM"}))
+
+    measurements.record("gpu", 0.5, 300.0, prompt_tps=8000.0, active_params_b=0.5)
+    best = low_latency().best
+    seconds, basis = first_token(best.candidate, BIG_GPU)
+    active = model_analyzer.active_params_b(best.candidate.model)
+    option = best.candidate.option
+    assert basis == measurements.MEASURED
+    assert seconds == pytest.approx(
+        512 / (8000 * 0.5 / active) + 1 / option.estimated_tps, rel=1e-3
+    )
+    assert texts(best.reasons)[0] == (
+        f"First token about {seconds:.2f} s after a 512 token prompt (estimated from runs on "
+        "this PC)"
+    )
+    assert best.confidence.level != ConfidenceLevel.LOW
+
+    # Runs of this very setup: their own prompt speed.
+    for prompt in (2000.0, 2200.0):
+        measurements.record("gpu", option.weights_gb, 150.0, model=QWEN, label=option.label,
+                            runtime="llama.cpp", prompt_tps=prompt)  # fmt: skip
+    (same,) = [
+        r.candidate
+        for r in low_latency().ranked
+        if r.candidate.option.label == option.label
+        and r.candidate.kv_cache == best.candidate.kv_cache
+        and r.candidate.runtime == "llama.cpp"
+    ]
+    seconds, basis = first_token(same, BIG_GPU)
+    assert basis == MEASURED_SETUP
+    assert seconds == pytest.approx(512 / 2100 + 1 / 150)
+
+
+def test_low_latency_prefers_the_model_that_reads_the_prompt_sooner(saved_hub):
+    # A mixture of experts reads a prompt with its active parameters only, not all of them.
+    from ocq.recommend import first_token
+
+    measurements.record("gpu", 0.5, 300.0, prompt_tps=8000.0, active_params_b=0.5)
+    result = low_latency(models=(QWEN, QWEN3_MOE))
+    times = {}
+    for recommendation in result.ranked:
+        seconds, _ = first_token(recommendation.candidate, BIG_GPU)
+        times.setdefault(recommendation.candidate.model_ref, seconds)
+    assert result.best.candidate.model_ref == QWEN
+    assert times[QWEN] < times[QWEN3_MOE] < 15 * times[QWEN]  # 30B total, about 3B used

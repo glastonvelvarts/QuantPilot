@@ -37,19 +37,24 @@ def record(
     prompt_speeds: dict[int, float] | None = None,
     suite: str = "",
     file: str = "",
+    active_params_b: float = 0.0,
 ) -> None:
     """weights_gb is what one token reads: the whole file for a dense model, less for a
     mixture of experts (see ModelSnapshot.read_fraction). The other fields say what ran, so
     a recommendation can say it rests on earlier runs of the same setup. prompt_tps: how fast
     the prompt was read (PROMPT_TOKENS of it), which sets the time to the first token;
     prompt_speeds: the same at every prompt length the suite (bench.Suite) timed. file: the
-    model file's name, so a run also counts for that file found on disk (local/<file>)."""
+    model file's name, so a run also counts for that file found on disk (local/<file>).
+    active_params_b: the parameters each token uses (billions), which prompt reading's time
+    grows with (see predict_prompt_speed)."""
     runs = load()
     run = {"device": device, "weights_gb": weights_gb, "tps": tokens_per_second}
     run |= {"model": model, "label": label, "runtime": runtime}
     run |= {"context": context, "kv_cache": kv_cache}
     if file:
         run |= {"file": file}
+    if active_params_b > 0:
+        run |= {"active_params_b": active_params_b}
     run |= {"prompt_tps": prompt_tps, "runtime_version": runtime_version}
     if prompt_speeds:
         run |= {"prompt_speeds": {str(length): tps for length, tps in prompt_speeds.items()}}
@@ -236,8 +241,12 @@ def bandwidth_limit(
 def fit_runs(runs: list[dict]) -> tuple[float, float] | None:
     """Least squares line through (model size, seconds per token). Needs two different sizes."""
     runs = [r for r in runs if isinstance(r.get("weights_gb"), (int, float)) and speed_of(r) > 0]
-    sizes = [run["weights_gb"] for run in runs]
-    seconds = [1 / speed_of(run) for run in runs]
+    return fit_line([run["weights_gb"] for run in runs], [1 / speed_of(run) for run in runs])
+
+
+def fit_line(sizes: list[float], seconds: list[float]) -> tuple[float, float] | None:
+    """(fixed seconds, seconds per unit of size). None without two sizes far enough apart, or
+    when the larger size is not the slower one."""
     if len(sizes) < 2 or max(sizes) - min(sizes) < 0.05:
         return None
 
@@ -252,3 +261,42 @@ def fit_runs(runs: list[dict]) -> tuple[float, float] | None:
     if slope <= 0:
         return None
     return max(fixed, 0.0), slope
+
+
+def predict_prompt_speed(
+    active_params_b: float, run_mode: RunMode, hardware: HardwareProfile
+) -> tuple[float, str]:
+    """Tokens of a PROMPT_TOKENS prompt read per second, and where that comes from (MEASURED),
+    or (0, "") when this PC has no run placed this way to learn from.
+
+    Reading a prompt is limited by computing, not by memory speed: every token of it goes
+    through every weight the token uses, so the seconds per prompt token grow with the active
+    parameters. Learnt from this PC's llama.cpp runs placed the same way: a line through them
+    when they have two sizes, else in proportion to the one size measured. No other source:
+    how fast a GPU computes in llama.cpp is not something its specifications tell."""
+    placement = placed_as(run_mode)
+    if active_params_b <= 0 or not placement:
+        return 0.0, ""
+    runs = [
+        run
+        for run in load()
+        if placed(str(run.get("device", ""))) == placement
+        and run.get("runtime", "") in ("", LLAMA_CPP)
+        and on_this_pc(run, hardware)
+        and isinstance(run.get("active_params_b"), (int, float))
+        and run["active_params_b"] > 0
+        and isinstance(run.get("prompt_tps"), (int, float))
+        and run["prompt_tps"] > 0
+    ]
+    if not runs:
+        return 0.0, ""
+    sizes = [run["active_params_b"] for run in runs]
+    seconds = [1 / run["prompt_tps"] for run in runs]
+    fitted = fit_line(sizes, seconds)
+    if fitted:
+        fixed, per_billion = fitted
+        per_token = fixed + per_billion * active_params_b
+    else:
+        per_billion = sum(t / size for t, size in zip(seconds, sizes, strict=True)) / len(runs)
+        per_token = active_params_b * per_billion
+    return round(1 / per_token, 1), MEASURED

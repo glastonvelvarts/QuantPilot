@@ -447,6 +447,10 @@ class QuantOption:
     run_mode: RunMode
     estimated_tps: float
     speed_basis: str = ""
+    # Tokens of a 512 token prompt read per second (llama.cpp rows learnt from this PC's runs;
+    # see measurements.predict_prompt_speed), and where it comes from. 0: not known.
+    prompt_tps: float = 0.0
+    prompt_basis: str = ""
     # stored = checkpoint as saved; gguf = llama.cpp quant; awq/gptq/bnb = HF serving formats
     row_kind: str = "gguf"
     # False when config.json has no layer or head counts: context_gb is then 0, not measured,

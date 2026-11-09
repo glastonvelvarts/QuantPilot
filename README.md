@@ -126,7 +126,7 @@ Qwen/Qwen2.5-1.5B-Instruct
 
 ### Recommendations
 
-`ocq recommend` chooses the model, format, runtime and cache type for a kind of work (`--workload chat`, `coding`, `rag`, `agentic`, `reasoning`, `long-context` or `throughput`), from the models on this PC and a list of popular ones (or only the ones you name):
+`ocq recommend` chooses the model, format, runtime and cache type for a kind of work (`--workload chat`, `coding`, `rag`, `agentic`, `reasoning`, `long-context`, `low-latency` or `throughput`), from the models on this PC and a list of popular ones (or only the ones you name):
 
 ```
 ocq recommend --workload coding
@@ -139,6 +139,8 @@ ocq recommend Qwen/Qwen3.5-9B Qwen/Qwen3.5-4B -w rag --context 65536 --why opena
 4. The pick says why it won, what the next options would give and cost, and how sure it is (Low to Very High) with the evidence: what was read from the files, what was measured on this PC, what is estimated.
 
 Quality is an estimate until it is measured: each GGUF type's loss is llama.cpp's own measurement on Llama-3-8B, valued in parameters with llama.cpp's LLaMA 7B and 13B perplexities; AWQ, GPTQ and NVFP4 count as Q4_K_S, bitsandbytes and MLX 4-bit as Q4_0. Speed is the memory-bandwidth limit until runs on this PC teach the real figure; runs of the same setup raise the confidence.
+
+**Low Latency** ranks by the time to the first token after a 512 token prompt: reading the prompt, then writing one token. Reading a prompt is limited by computing, not memory speed, so its time grows with the parameters each token uses (a mixture of experts counts only its active ones). QuantPilot learns it from this PC's runs placed the same way (all on the GPU, on the CPU, ...): a line through two model sizes or more, else in proportion to the one measured. Every quantize and `ocq bench` adds a run. Until one exists, the pick says the time is not known and its confidence is Low.
 
 ---
 

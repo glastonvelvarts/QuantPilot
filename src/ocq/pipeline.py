@@ -7,7 +7,7 @@ from pathlib import Path
 from ocq import measurements
 from ocq.bench import QUICK
 from ocq.hardware import detect_hardware
-from ocq.model_analyzer import DEFAULT_CONTEXT, resolve_model
+from ocq.model_analyzer import DEFAULT_CONTEXT, active_params_b, resolve_model
 from ocq.plan import generate_plan
 from ocq.quantizers import get_quantizer
 from ocq.quantizers.protocol import PROMPT_TOKENS
@@ -53,6 +53,7 @@ def remember_speed(
         ),
         suite=QUICK.name,
         file=quantization.artifact_path.name if quantization.artifact_path else "",
+        active_params_b=active_params_b(plan.model),
     )
 
 

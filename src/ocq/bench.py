@@ -155,6 +155,7 @@ def save(
     kv_cache: str,
     hardware: HardwareProfile,
     file: str = "",
+    active_params_b: float = 0.0,
 ) -> None:
     """Into this PC's benchmark history (measurements.json)."""
     measurements.record(
@@ -172,6 +173,7 @@ def save(
         prompt_speeds=report.prompt_speeds,
         suite=suite.name,
         file=file,
+        active_params_b=active_params_b,
     )
 
 

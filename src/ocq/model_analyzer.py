@@ -1745,6 +1745,11 @@ def fit_at(
         # Whole layers, with their share of the cache, fill the GPU; the rest runs from RAM.
         gpu_share=gpu_share,
     )
+    prompt_tps, prompt_basis = (
+        measurements.predict_prompt_speed(active_params_b(model), run_mode, hardware)
+        if use_measurements and runtime == LLAMA_CPP
+        else (0.0, "")
+    )
     return QuantOption(
         label=label,
         bits=weights_gb * GB * 8 / (model.params_b * 1e9),
@@ -1758,6 +1763,8 @@ def fit_at(
         run_mode=run_mode,
         estimated_tps=speed,
         speed_basis=speed_basis,
+        prompt_tps=prompt_tps,
+        prompt_basis=prompt_basis,
         row_kind=row_kind,
         gpu_names=tuple(card.name for card in pool.cards)
         if pool and run_mode != RunMode.CPU
@@ -1769,6 +1776,11 @@ def fit_at(
         note=note,
         runtime=runtime,
     )
+
+
+def active_params_b(model: ModelSnapshot) -> float:
+    """Billions of parameters each token uses: all of them, or a mixture of experts' share."""
+    return model.params_b * model.read_fraction
 
 
 # A block's tensors: model.layers.12.mlp..., blk.12.ffn_up ...

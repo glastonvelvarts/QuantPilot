@@ -16,7 +16,7 @@ from ocq import measurements
 from ocq.engine import GGUF_TYPES
 from ocq.goals import goal_label
 from ocq.hardware import detect_hardware
-from ocq.model_analyzer import DEFAULT_CONTEXT, quant_options, resolve_model
+from ocq.model_analyzer import DEFAULT_CONTEXT, active_params_b, quant_options, resolve_model
 from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
@@ -468,6 +468,7 @@ def cmd_bench(
         kv_cache=kv_cache,
         hardware=hw,
         file=path.name,
+        active_params_b=active_params_b(snapshot),
     )
     print_bench(report, option, device, kv_cache, earlier + 1)
 
@@ -622,7 +623,7 @@ def cmd_recommend(
         typer.Option(
             "--workload",
             "-w",
-            help="chat, coding, rag, agentic, reasoning, long-context, throughput",
+            help="chat, coding, rag, agentic, reasoning, long-context, low-latency, throughput",
         ),
     ] = "chat",
     context: Annotated[
