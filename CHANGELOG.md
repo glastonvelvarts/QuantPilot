@@ -4,6 +4,8 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-09
+
 ### Changed
 
 - README: how to open the app, for each way of installing QuantPilot (`ocq`, `uvx quantpilot`, `uv run ocq`).
@@ -57,5 +59,6 @@ The first release on PyPI: `uv tool install quantpilot`.
 - Installs with `uv tool install quantpilot`, `uvx quantpilot` or pip on Linux, macOS and Windows, Python 3.10 to 3.13; quantization tools as extras, added the way QuantPilot was installed.
 - On Windows the CLI writes UTF-8, so its status marks (✓, ✗) show in consoles set to cp1252, the default of many terminals and of CI; where they cannot, plain `+` and `x`.
 
-[Unreleased]: https://github.com/glastonvelvarts/QuantPilot/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/glastonvelvarts/QuantPilot/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/glastonvelvarts/QuantPilot/compare/v1.5.0...v1.5.2
 [1.5.0]: https://github.com/glastonvelvarts/QuantPilot/releases/tag/v1.5.0
