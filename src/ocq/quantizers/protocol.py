@@ -76,6 +76,7 @@ class Quantizer(ABC):
         except Exception as exc:
             return self.failed(plan, self.describe_error(plan, exc))
 
+        print("Measuring the speed ...", flush=True)
         try:
             bench = self.benchmark(plan, str(artifact))
         except Exception as exc:

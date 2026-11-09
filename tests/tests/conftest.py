@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ocq import hardware, measurements, model_analyzer
+from ocq import discovery, env_file, hardware, measurements, model_analyzer, recommend
+from ocq.quantizers import llama_cpp
 from ocq.types import DTYPE_BITS
 
 # Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
@@ -20,6 +21,24 @@ def private_caches(tmp_path, monkeypatch):
     """Tests must not read or write the speed measurements and model cache of the real user."""
     monkeypatch.setattr(measurements, "STORE", tmp_path / "measurements.json")
     monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path / "models")
+    # Nor the recommendation engine's list of Hub models, nor the Hub itself.
+    monkeypatch.setattr(recommend, "HUB_CATALOG_CACHE", tmp_path / "hub_catalog.json")
+
+    def no_network(author, pipeline):
+        raise OSError("no network in tests")
+
+    monkeypatch.setattr(recommend, "fetch_hub_listing", no_network)
+    # Nor the files ocq optimize made in the folder the tests run from.
+    monkeypatch.setattr(discovery, "quantpilot_dirs", lambda: [])
+    # Nor the llama.cpp this PC happens to have downloaded: a test that needs its converter
+    # says which architectures it knows.
+    monkeypatch.delenv("OCQ_LLAMA_CPP", raising=False)
+    monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "llama.cpp")
+    # Nor the user's Hugging Face token, from the shell or from QuantPilot's .env file.
+    for name in env_file.HF_TOKEN_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(env_file, "ENV_FILE", tmp_path / "settings" / ".env")
+    monkeypatch.setattr(env_file, "from_file", set())
     # Nor the GPU driver of the PC they run on.
     monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 
@@ -159,6 +178,8 @@ NEMOTRON_H = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"  # hybrid_override_pattern, mix
 FALCON_H1 = "tiiuae/Falcon-H1-0.5B-Instruct"  # attention and Mamba side by side in every layer
 LLAMA4_SCOUT = "unsloth/Llama-4-Scout-17B-16E-Instruct"  # 3 of 4 layers chunked attention
 QWEN3_NEXT = "Qwen/Qwen3-Next-80B-A3B-Instruct"  # config.json only: every 4th layer attention
+# Gated DeltaNet linear attention in 18 of 24 layers, a vision tower and an MTP block.
+QWEN35 = "Qwen/Qwen3.5-0.8B"
 
 # Lines as `nvidia-smi --query-gpu=name,memory.total,memory.free,compute_cap` prints them.
 RTX_3090 = "NVIDIA GeForce RTX 3090, 24576, 24000, 8.6"

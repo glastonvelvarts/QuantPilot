@@ -18,11 +18,25 @@ UPPER_BOUND = "upper bound"
 MEASURED = "from runs on this PC"
 
 
-def record(device: str, weights_gb: float, tokens_per_second: float) -> None:
+def record(
+    device: str,
+    weights_gb: float,
+    tokens_per_second: float,
+    *,
+    model: str = "",
+    label: str = "",
+    runtime: str = "",
+    context: int = 0,
+    kv_cache: str = "",
+) -> None:
     """weights_gb is what one token reads: the whole file for a dense model, less for a
-    mixture of experts (see ModelSnapshot.read_fraction)."""
+    mixture of experts (see ModelSnapshot.read_fraction). The other fields say what ran, so
+    a recommendation can say it rests on earlier runs of the same setup."""
     runs = load()
-    runs.append({"device": device, "weights_gb": weights_gb, "tps": tokens_per_second})
+    run = {"device": device, "weights_gb": weights_gb, "tps": tokens_per_second}
+    run |= {"model": model, "label": label, "runtime": runtime}
+    run |= {"context": context, "kv_cache": kv_cache}
+    runs.append(run)
     STORE.parent.mkdir(parents=True, exist_ok=True)
     STORE.write_text(json.dumps(runs, indent=2))
 
@@ -32,6 +46,19 @@ def load() -> list[dict]:
         return json.loads(STORE.read_text())
     except (OSError, ValueError):
         return []
+
+
+def runs_of(model: str, label: str, runtime: str) -> list[dict]:
+    """Earlier runs on this PC of this model in this format and runtime (runs saved before
+    these fields were recorded have none, and never match)."""
+    return [
+        run
+        for run in load()
+        if run.get("model", "").lower() == model.lower()
+        and run.get("label", "").upper() == label.upper()
+        and run.get("runtime") == runtime
+        and run.get("tps", 0) > 0
+    ]
 
 
 def predict_speed(

@@ -35,6 +35,7 @@ HF_CACHE = "Hugging Face cache"
 LLAMA_CPP_CACHE = "llama.cpp cache"
 FOLDER = "folder"
 SOURCES = (OLLAMA, LM_STUDIO, HF_CACHE, LLAMA_CPP_CACHE)
+QUANTPILOT = "QuantPilot"  # files ocq optimize made (ocq-output/<model>/artifact)
 
 GGUF = "GGUF"
 SAFETENSORS = "safetensors"
@@ -581,8 +582,28 @@ def safetensors_quantization(folder: Path) -> str:
 # All of them -------------------------------------------------------------------------------
 
 
+def quantpilot_dirs() -> list[Path]:
+    """Where ocq optimize saves what it makes (cli.default_output): ./ocq-output."""
+    return existing([Path.cwd() / "ocq-output"])
+
+
+def quantpilot_models(roots: list[Path] | None = None) -> list[LocalModel]:
+    """The files QuantPilot made: each model's artifact folder (not its workspace, which holds
+    the in-between files while it works)."""
+    models: list[LocalModel] = []
+    for root in quantpilot_dirs() if roots is None else roots:
+        for made in sorted(root.glob("*/artifact")):
+            if gguf_files(made):
+                models += gguf_models(made, "", QUANTPILOT)
+            else:
+                name = made.parent.name.replace("--", "/", 1)
+                models += folder_models(made, name, QUANTPILOT)
+    return models
+
+
 def find_models(extra_dirs: list[Path] | None = None) -> list[LocalModel]:
     models = ollama_models() + lmstudio_models() + hf_cache_models() + llama_cpp_cache_models()
+    models += quantpilot_models()
     for folder in extra_dirs or []:
         if not folder.is_dir():
             raise OcqError(f"Folder not found: {folder}")
@@ -611,4 +632,5 @@ def searched_locations(extra_dirs: list[Path] | None = None) -> list[tuple[str, 
     places += [(LM_STUDIO, d) for d in lmstudio_dirs()]
     places += [(HF_CACHE, d) for d in hf_cache_dirs()]
     places += [(LLAMA_CPP_CACHE, d) for d in llama_cpp_cache_dirs()]
+    places += [(QUANTPILOT, d) for d in quantpilot_dirs()]
     return places + [(FOLDER, d) for d in extra_dirs or []]

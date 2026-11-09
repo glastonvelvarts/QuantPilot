@@ -91,6 +91,25 @@ def converter_script() -> Path:
     return folder / "convert_hf_to_gguf.py"
 
 
+REGISTER = re.compile(r"@ModelBase\.register\((.*?)\)", re.S)
+
+
+def converter_architectures() -> frozenset[str] | None:
+    """The model classes (config.json "architectures") llama.cpp's converter turns into GGUF,
+    read from its @ModelBase.register lines. None when the converter is not on this PC yet:
+    this never downloads it."""
+    own_source = os.environ.get("OCQ_LLAMA_CPP")
+    folder = Path(own_source).expanduser() if own_source else CACHE / "source"
+    script = folder / "convert_hf_to_gguf.py"
+    if not script.is_file() or (not own_source and not (folder / "ready").exists()):
+        return None
+    names: set[str] = set()
+    for path in [script, *sorted((folder / "conversion").glob("*.py"))]:
+        for args in REGISTER.findall(path.read_text("utf-8", errors="replace")):
+            names.update(re.findall(r'"([^"]+)"', args))
+    return frozenset(names)
+
+
 def release_folder(hardware: HardwareProfile) -> Path:
     build, archives = release_build(hardware)
     folder = CACHE / build

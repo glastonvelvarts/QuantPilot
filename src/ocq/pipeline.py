@@ -10,6 +10,7 @@ from ocq.model_analyzer import DEFAULT_CONTEXT, resolve_model
 from ocq.plan import generate_plan
 from ocq.quantizers import get_quantizer
 from ocq.types import (
+    LLAMA_CPP,
     BenchmarkResult,
     OptimizationGoal,
     OptimizationPlan,
@@ -30,7 +31,17 @@ def remember_speed(
     if benchmark.device not in ("gpu", "cpu"):
         return
     read_gb = quantization.artifact_size_gb * plan.model.read_fraction
-    measurements.record(benchmark.device, read_gb, benchmark.tokens_per_second)
+    config = plan.quant_config
+    measurements.record(
+        benchmark.device,
+        read_gb,
+        benchmark.tokens_per_second,
+        model=plan.model.model_id,
+        label=config.gguf_type,
+        runtime=LLAMA_CPP,
+        context=config.context,
+        kv_cache=config.kv_cache,
+    )
 
 
 def run_optimize(
@@ -52,6 +63,7 @@ def run_optimize(
         return OptimizeResult(plan=plan, dry_run=True)
 
     quantization, benchmark = get_quantizer(plan.quant_config.algorithm).run(plan)
+    print("Checking the result ...", flush=True)
     validation = validate_artifact(plan, quantization, benchmark)
     remember_speed(plan, quantization, benchmark)
 

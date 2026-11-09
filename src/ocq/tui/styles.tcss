@@ -183,6 +183,16 @@ Screen.-narrow .wide {
     margin-top: 1;
 }
 
+.card-actions {
+    height: auto;
+    margin-top: 1;
+}
+
+.card-actions Button {
+    margin-top: 0;
+    margin-right: 2;
+}
+
 .results DataTable {
     height: auto;
     max-height: 24;
@@ -204,8 +214,33 @@ ListPage > DataTable {
     padding: 1 0;
 }
 
+#chart {
+    height: auto;
+    border: round $border;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
 #running {
     height: auto;
+}
+
+#steps {
+    margin-bottom: 1;
+}
+
+#step-bar {
+    width: 100%;
+    margin-bottom: 0;
+}
+
+#step-bar Bar {
+    width: 1fr;
+}
+
+#step-detail {
+    color: $text-muted;
+    margin-bottom: 1;
 }
 
 #stage {
@@ -232,6 +267,23 @@ Collapsible {
 .section {
     text-style: bold;
     margin: 1 0 1 0;
+}
+
+#token-state {
+    margin-bottom: 1;
+}
+
+#token-entry {
+    height: auto;
+}
+
+#token-entry Input {
+    width: 1fr;
+    margin-right: 2;
+}
+
+#token-entry Button {
+    margin-right: 2;
 }
 
 #tools {
@@ -350,6 +402,7 @@ ModalScreen {
 /* Simple borders, for consoles that cannot draw lines (Settings) ----------------------- */
 
 App.-ascii .card,
+App.-ascii #chart,
 App.-ascii .dialog,
 App.-ascii #progress,
 App.-ascii #install-log,

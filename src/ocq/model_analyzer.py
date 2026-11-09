@@ -156,8 +156,13 @@ def resolve_model(
     llmfit_bin: str | None = None,
     context: int = DEFAULT_CONTEXT,
     kv_cache: str = "f16",
+    use_llmfit: bool = True,
 ) -> ModelSnapshot:
-    """Read a model's facts from its files. Without hardware, the fit is not computed."""
+    """Read a model's facts from its files. Without hardware, the fit is not computed.
+
+    use_llmfit: also ask llmfit's catalog about a Hugging Face repo (its use case, and a fallback
+    when the Hub cannot be reached). The recommendation engine turns it off: it reads the files.
+    """
     if model_ref.startswith("ollama:"):
         return ollama_snapshot(model_ref.removeprefix("ollama:"), hardware, context, kv_cache)
     display_id, local_dir = parse_model_ref(model_ref)
@@ -179,7 +184,7 @@ def resolve_model(
         )
 
     model_id = display_id
-    catalog = catalog_entry(model_id, llmfit_bin)
+    catalog = catalog_entry(model_id, llmfit_bin) if use_llmfit else None
     try:
         meta = fetch_hf_model(model_id)
     except OcqError:
@@ -266,7 +271,8 @@ def fetch_hf_model(model_id: str) -> dict:
         if exc.code in (401, 403, 404):
             raise OcqError(
                 f"Model {model_id!r} was not found on HuggingFace. Check the repo id (org/name). "
-                "If it is gated or private, accept its license and set HF_TOKEN."
+                "If it is gated or private, accept its license on its page, then add a token of "
+                "that account in Settings (or set HF_TOKEN)."
             ) from exc
         raise OcqError(f"HuggingFace API error {exc.code} for {model_id}") from exc
     except urllib.error.URLError as exc:
@@ -277,9 +283,9 @@ def gated_message(model_id: str) -> str:
     """Hugging Face shows a gated repo's files only to accounts that accepted its license."""
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     who = (
-        "The account of HF_TOKEN has not accepted it yet"
+        "The account of your Hugging Face token has not accepted it yet"
         if token
-        else "Accept it, then set HF_TOKEN to a token of that account"
+        else "Accept it, then add a read token of that account in Settings (or set HF_TOKEN)"
     )
     return (
         f"{model_id} is gated: its files can be read only after accepting its license at "
@@ -418,9 +424,15 @@ def gguf_snapshot(
     of every file of the model. whole: the header lists all tensors (not one part of a split).
     The settings become config.json's terms, so the same code sizes the context memory."""
     config = config_from_gguf(header)
+    stored = header.data_bytes  # on disk, every tensor
+    full_bytes = sum(t.nbytes or 0 for t in header.tensors)
+    header = header.loaded()  # what llama.cpp runs: no multi-token prediction blocks
+    loaded_bytes = sum(t.nbytes or 0 for t in header.tensors)
+    if whole and 0 < loaded_bytes < full_bytes:
+        # Each file's runtime weights, in the share this one keeps.
+        files = [(label, round(size * loaded_bytes / full_bytes)) for label, size in files]
     tensors = hf_style_tensors(header) if whole else []
     snapshot = build_snapshot(model_id, meta, config, tensors, None)
-    stored = header.data_bytes
     by_type: dict[str, int] = {}
     for tensor in header.tensors:
         by_type[tensor.type_name] = by_type.get(tensor.type_name, 0) + tensor.elements
@@ -972,7 +984,9 @@ def stored_bytes_fact(
 
 
 LAYER_NAME = re.compile(r"^(.*?)\.(?:layers|h|blocks)\.(\d+)\.")
-NOT_LANGUAGE_MODEL = re.compile(r"vision|visual|audio|image|speech|mm_projector")
+# Encoders for other inputs, and the multi-token prediction block (Qwen3.5's "mtp."): a draft
+# head the runtimes do not load to answer.
+NOT_LANGUAGE_MODEL = re.compile(r"vision|visual|audio|image|speech|mm_projector|(?:^|\.)mtp\b")
 
 
 def layers_in_names(tensors: list[Tensor]) -> int | None:
@@ -993,20 +1007,25 @@ KV_PROJECTION = re.compile(
 )
 
 
-def attention_from_tensors(tensors: list[Tensor]) -> tuple[int, int, int] | None:
+def attention_from_tensors(
+    tensors: list[Tensor], num_layers: int | None = None
+) -> tuple[int, int, int] | None:
     """(K+V values per token over all layers, layers with attention, vocabulary) from shapes.
 
     The K and V projections write keys and values, so their output width (first dimension,
     also in llm-compressor's weight_packed) is what each layer caches per token. Summed over
     every layer, so models where only some layers have attention come out right too.
     None when the names do not show separate k_proj and v_proj (fused qkv, MLA, Mamba) or
-    bitsandbytes flattened them.
+    bitsandbytes flattened them. Layers numbered past num_layers are multi-token prediction
+    blocks (GLM-4.5 keeps them as model.layers.N), which keep no cache when answering.
     """
     flattened = {name.split(".weight.")[0] + ".weight" for name, _ in tensors if ".weight." in name}
     width, layers, vocab = 0, set(), None
     for name, shape in tensors:
         match = KV_PROJECTION.match(name)
         if match and not NOT_LANGUAGE_MODEL.search(match.group(1)):
+            if num_layers and int(LAYER_NAME.match(name).group(2)) >= num_layers:
+                continue
             if len(shape) != 2 or name in flattened:
                 return None
             width += shape[0]
@@ -1146,15 +1165,24 @@ def state_per_layer(text: dict) -> tuple[int, str]:
     which kind. (0, "") when config.json does not describe one we know.
 
     As llama.cpp keeps it, in 32 bits (checked against its "llama_memory_recurrent" log for
-    Granite 4.0-H, Falcon-H1, Jamba and LFM2):
+    Granite 4.0-H, Falcon-H1, Jamba, LFM2 and Qwen3.5):
       Mamba-2   conv (d_conv - 1) x (d_inner + 2 x groups x d_state) + ssm d_state x d_inner
       Mamba-1   conv (d_conv - 1) x d_inner                          + ssm d_state x d_inner
       LFM2 conv (L_cache - 1) x hidden
-    Linear attention (Qwen3-Next) is not covered.
+    Linear attention (Gated DeltaNet: Qwen3-Next, Qwen3.5 and later) is Mamba-2's sum in
+    llama.cpp (llama_hparams n_embd_r and n_embd_s), with d_state the key head size, groups
+    the key heads and d_inner value heads x value head size: a convolution over queries, keys
+    and values, and a key x value matrix per value head.
     """
 
     def first(*keys, default=0):
         return next((text[key] for key in keys if text.get(key)), default)
+
+    if text.get("linear_key_head_dim") and text.get("linear_num_value_heads"):
+        d_state, groups = text["linear_key_head_dim"], text["linear_num_key_heads"]
+        d_inner = text["linear_value_head_dim"] * text["linear_num_value_heads"]
+        conv = (text.get("linear_conv_kernel_dim", 4) - 1) * (d_inner + 2 * groups * d_state)
+        return (conv + d_state * d_inner) * 4, "linear attention"
 
     if text.get("conv_L_cache"):
         return (text["conv_L_cache"] - 1) * text["hidden_size"] * 4, "convolution"
@@ -1245,7 +1273,7 @@ def kv_cache_fact(config: dict, tensors: list[Tensor]) -> Fact:
     """
     layers, layout, guessed = kv_layers_from(config)
     from_config = sum(layer.bytes_per_token for layer in layers) or None
-    shapes = attention_from_tensors(tensors)
+    shapes = attention_from_tensors(tensors, len(layers) or None)
     from_shapes = shapes[0] * 2 if shapes else (mla_width_from_tensors(tensors) * 2 or None)
     _, key = text_config(config)
     config_source = f"config.json {key}".strip()

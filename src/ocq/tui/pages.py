@@ -16,6 +16,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.color import Gradient
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import (
     Button,
@@ -24,12 +25,14 @@ from textual.widgets import (
     Input,
     Label,
     LoadingIndicator,
+    ProgressBar,
     Static,
     Switch,
     TextArea,
 )
 
-from ocq.model_analyzer import QUANTIZED_LEVELS, best_option
+from ocq import env_file
+from ocq.model_analyzer import QUANTIZED_LEVELS
 from ocq.tui import words
 from ocq.tui.banner import TAGLINE
 from ocq.tui.widgets import (
@@ -42,7 +45,10 @@ from ocq.tui.widgets import (
     ProgressLog,
     Results,
     RowTable,
+    StepTracker,
+    TextField,
     field,
+    meter_progress,
 )
 from ocq.types import (
     KV_CACHE_TYPES,
@@ -56,15 +62,9 @@ if TYPE_CHECKING:
     from ocq.tui.app import QuantPilotApp
 
 AUTO = "auto"
+BAR_GRADIENT = Gradient.from_colors("#22d3ee", "#3b82f6", "#a78bfa")
 CONTEXTS = (2048, 4096, 8192, 16384, 32768, 65536, 131072)
 KV_LABELS = {"f16": "Full", "q8_0": "Half (q8_0)", "q4_0": "Quarter (q4_0)"}
-GOALS = {
-    OptimizationGoal.BALANCED: "Balanced",
-    OptimizationGoal.SPEED: "Fastest",
-    OptimizationGoal.QUALITY: "Best quality",
-    OptimizationGoal.MEMORY: "Smallest",
-}
-USES = ("coding", "reasoning", "chat", "multimodal", "embedding")
 # Format dropdown on the Quantize page: "backend:level".
 FORMATS = (
     [("Recommended", AUTO)]
@@ -90,10 +90,6 @@ TOOL_ORDER = (
 
 def context_options(default: int) -> list[tuple[str, int]]:
     return [(words.context(value), value) for value in sorted({*CONTEXTS, default})]
-
-
-def goal_options() -> list[tuple[str, str]]:
-    return [(label, goal.value) for goal, label in GOALS.items()]
 
 
 def format_key(option) -> str | None:
@@ -451,39 +447,76 @@ def local_option(model, hw, context: int, kv_cache: str):
 
 
 class DiscoverPage(ListPage):
+    """Every model considered for a kind of work: the ones on this PC and the current ones on
+    the Hub. Those that run here come first, best first, with their best option; then the ones
+    that do not, with why."""
+
     TITLE = "Discover"
-    COLUMNS = ("Model", "Size", "Fit", "Speed")
+    COLUMNS = ("Model", "Best option", "Fit", "Speed", "Where", "Why not")
 
     def compose_filters(self) -> ComposeResult:
-        uses = [("Anything", AUTO)] + [(use.capitalize(), use) for use in USES]
         with Grid(classes="form"):
-            yield field("Good for", Dropdown(uses, value=AUTO, id="use"))
+            yield workload_field(self.qp.settings.workload)
 
-    @on(Dropdown.Changed, "#use")
-    def use_changed(self) -> None:
+    @on(Dropdown.Changed, "#workload")
+    def workload_changed(self, event: Dropdown.Changed) -> None:
+        if event.value != self.qp.settings.workload:
+            self.qp.settings.workload = str(event.value)
+            self.qp.save_settings()
         if self.loaded:
             self.run()
 
     def params(self) -> dict[str, Any]:
-        return {"use": self.value("use")}
+        return {"workload": self.value("workload")}
 
     @background("discover")
     def load(self, params: dict[str, Any]) -> None:
-        from ocq.model_analyzer import recommend_models
+        from ocq import recommend as engine
 
-        use = params["use"]
         hw = self.qp.hardware()
-        try:
-            models = recommend_models(hw, 15, None if use == AUTO else use, self.qp.llmfit_bin)
-        except OcqError:
-            models = []
-        rows = []
-        for i, model in enumerate(models):
-            fit = model.feasibility
-            size = f"{model.parameter_count}" if model.parameter_count else "-"
-            cells = [model.model_id, size, words.fit(fit.fit_level), words.speed(fit)]
-            rows.append((str(i), model.model_id, False, cells))
-        self.app.call_from_thread(self.fill, rows, "Nothing found. Try another choice above.")
+        request = engine.RecommendationRequest(engine.WORKLOADS[params["workload"]])
+        result = engine.recommend(request, hw, self.qp.settings.folders())
+        self.app.call_from_thread(self.fill, discover_rows(result), "No models found.")
+
+
+def discover_rows(result) -> list[tuple[str, str, bool, list]]:
+    """Rows for the Discover table: (key, model ref, is a GGUF file, cells)."""
+    from ocq import recommend as engine
+
+    rows = []
+    shown: set[str] = set()
+    for i, best in enumerate(engine.best_per_model(result)):
+        candidate, option = best.candidate, best.candidate.option
+        name = Text(candidate.model_id)
+        if i == 0:
+            name.append("  recommended", "dim")
+        where = "On this PC" if candidate.local else "Download"
+        cells = [name, option.label, words.fit(option.fit_level), words.speed(option), where, ""]
+        gguf = option.row_kind == "gguf" and not candidate.quantize
+        rows.append((f"r{i}", candidate.model_ref, gguf, cells))
+        shown.add(candidate.model_ref)
+    # Models with no option that runs here: the limit their closest option broke.
+    closest: dict[str, Any] = {}
+    for rejection in result.rejected:
+        ref = rejection.candidate.model_ref
+        if ref in shown:
+            continue
+        key = (rejection.failed[0].name == engine.RUNTIME, len(rejection.failed),
+               rejection.candidate.option.memory_required_gb)  # fmt: skip
+        if ref not in closest or key < closest[ref][0]:
+            closest[ref] = (key, rejection)
+    for i, (_, rejection) in enumerate(sorted(closest.values(), key=lambda item: item[0][2])):
+        candidate = rejection.candidate
+        fit = Text("Too big" if rejection.failed[0].name == engine.MEMORY else "Not here", "red")
+        where = "On this PC" if candidate.local else "Download"
+        why = Text(words.plain(rejection.failed[0].text), "dim")
+        cells = [Text(candidate.model_id, "dim"), "-", fit, "-", where, why]
+        rows.append((f"x{i}", candidate.model_ref, False, cells))
+    for i, (repo, reason) in enumerate(result.too_big):
+        why = Text(words.plain(reason.removeprefix("Too big for this PC: ")), "dim")
+        cells = [Text(repo, "dim"), "-", Text("Too big", "red"), "-", "Download", why]
+        rows.append((f"t{i}", repo, False, cells))
+    return rows
 
 
 # Check a model ----------------------------------------------------------------------------
@@ -494,14 +527,23 @@ class CheckPage(Page):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.format_rows: dict[str, str] = {}  # row key -> Format entry on the Quantize page
-        self.recommended = AUTO
+        self.format_rows: dict[str, tuple[str, int, str]] = {}  # row -> (format, context, cache)
+        self.pick: tuple[str, int, str] | None = None  # what Quantize to this opens with
         self.ref = ""
+        self.chart = None  # the chart last shown (FormatChart)
 
     def compose_body(self) -> ComposeResult:
         with Grid(classes="form"):
             yield field("Model", ModelField(), "wide")
-            yield self.context_field()
+            yield workload_field(self.qp.settings.workload)
+            yield field(
+                "Context",
+                Dropdown(
+                    [(FOR_WORKLOAD, 0), *((words.context(c), c) for c in CONTEXTS)],
+                    value=0,
+                    id="context",
+                ),
+            )
         with Horizontal(classes="actions"):
             yield Action("Check", variant="primary", id="check")
         yield LoadingIndicator(classes="busy")
@@ -509,6 +551,9 @@ class CheckPage(Page):
             with Card(id="pick", classes="card"):
                 yield Static("", id="pick-text")
                 yield Action("Quantize to this", variant="primary", id="quantize-pick")
+            with Collapsible(title="Why this pick", collapsed=True, id="why"):
+                yield Static("", id="why-text")
+            yield Static("", id="chart")
             yield RowTable(cursor_type="row", zebra_stripes=True, id="options")
             with Collapsible(title="About this model", collapsed=True, id="about"):
                 yield Static("", id="facts")
@@ -518,9 +563,15 @@ class CheckPage(Page):
         self.show_results(False)
 
     def show_results(self, shown: bool) -> None:
-        for selector in ("#pick", "#options", "#about"):
+        for selector in ("#pick", "#why", "#chart", "#options", "#about"):
             self.query_one(selector).display = shown
         self.query_one(".problem").display = False
+
+    @on(Dropdown.Changed, "#workload")
+    def workload_changed(self, event: Dropdown.Changed) -> None:
+        if event.value != self.qp.settings.workload:
+            self.qp.settings.workload = str(event.value)
+            self.qp.save_settings()
 
     @on(Button.Pressed, "#check")
     def run(self) -> None:
@@ -531,85 +582,176 @@ class CheckPage(Page):
         self.qp.remember(ref)
         self.show_results(False)
         self.query_one(".busy").display = True
-        self.load(ref, self.value("context"), self.qp.settings.kv_cache, self.qp.settings.goal)
+        self.load(ref, self.value("workload"), self.value("context"))
 
     @background("check")
-    def load(self, ref: str, context: int, kv_cache: str, goal: str) -> None:
+    def load(self, ref: str, workload: str, context: int) -> None:
+        from ocq import recommend as engine
         from ocq.cli import default_output
-        from ocq.model_analyzer import quant_options, resolve_model
         from ocq.plan import generate_plan
 
         hw = self.qp.hardware()
-        snapshot = resolve_model(ref, hw, self.qp.llmfit_bin, context, kv_cache)
-        options = quant_options(snapshot, hw, context, kv_cache)
-        plan = None
-        if not snapshot.is_quantized and not snapshot.gguf_files:
+        request = engine.RecommendationRequest(engine.WORKLOADS[workload], (ref,), context)
+        result = engine.recommend(request, hw, self.qp.settings.folders())
+        if not result.ranked and not result.rejected:
+            why = result.unread[0][1] if result.unread else "could not read this model."
+            raise OcqError(why[:1].upper() + why[1:])
+        warnings: list[str] = []
+        best = result.best
+        key = format_key(best.candidate.option) if best and best.candidate.quantize else None
+        if best and key:
+            # The plan's checks of quantizing itself: tools installed, disk, calibration.
+            candidate = best.candidate
             try:
-                choices = QuantChoices(context=context, kv_cache=kv_cache)
                 plan = generate_plan(
-                    snapshot.model_id, hw, snapshot, OptimizationGoal(goal),
-                    default_output(ref), choices,
+                    candidate.model.model_id, hw, candidate.model, OptimizationGoal.BALANCED,
+                    default_output(ref), format_choices(key, candidate.context, candidate.kv_cache),
                 )  # fmt: skip
-            except OcqError:
-                plan = None
-        self.app.call_from_thread(self.show, snapshot, options, plan)
+                warnings = list(plan.warnings)
+            except OcqError as exc:
+                warnings = [str(exc)]
+        self.app.call_from_thread(self.show, result, warnings)
 
-    def show(self, snapshot, options, plan) -> None:
+    def show(self, result, warnings: list[str]) -> None:
+        from ocq import recommend as engine
+
         self.query_one(".busy").display = False
-        quantizable = plan is not None
-        name = None
-        if plan and plan.predicted:
-            best = plan.predicted
-            title = "Recommended for this PC"
-            name = plan.quant_config.summary()
-        else:
-            best = best_option(options)  # the CLI's best fit
-            title = "Best fit for this PC" if best.runnable else "Too big for this PC"
-        self.recommended = (format_key(best) or AUTO) if quantizable else AUTO
-
+        best = result.best
+        rows = engine.compare_rows(result)
+        model = (best.candidate if best else rows[0].candidate).model
+        self.pick = None
         text = Text()
-        text.append(f"{title}\n", "dim")
-        text.append(f"{name or best.label}\n", "bold")
-        text.append_text(words.fit(best.fit_level))
-        details = [
-            words.gb(best.memory_required_gb),
-            words.place(best),
-            words.layers(best, getattr(snapshot, "num_layers", 0)),
-            words.speed(best),
-        ]
-        text.append("  " + "  |  ".join(d for d in details if d != "-"))
-        if plan:
-            for warning in plan.warnings:
+        if best is None:
+            text.append("Not for this PC\n", "dim")
+            closest = engine.explain_model(result, rows[0].candidate.model_ref)
+            text.append(words.plain(closest[-1].text), "bold")
+            why = Text()
+        else:
+            candidate, option = best.candidate, best.candidate.option
+            text.append(f"Recommended for {result.request.workload.label}\n", "dim")
+            cache = f" · {words.cache(candidate.kv_cache)}" if candidate.kv_cache != "f16" else ""
+            text.append(f"{option.label} · {candidate.runtime}{cache}\n", "bold")
+            text.append_text(words.fit(option.fit_level))
+            details = [
+                words.gb(option.memory_required_gb),
+                words.place(option),
+                words.layers(option, getattr(model, "num_layers", 0)),
+                words.speed(option),
+                words.context(candidate.context),
+            ]
+            text.append("  " + "  |  ".join(d for d in details if d != "-"))
+            text.append("\nConfidence: ")
+            text.append_text(words.confidence(best.confidence.level))
+            for warning in [*best.warnings, *warnings]:
                 text.append(f"\n{words.warning(warning)}", "yellow")
+            why = words.reasons(best.reasons, best.confidence)
+            key = format_key(option) if candidate.quantize else None
+            if key:
+                self.pick = (key, candidate.context, candidate.kv_cache)
         self.query_one("#pick-text", Static).update(text)
-        self.query_one("#quantize-pick").display = quantizable
+        self.query_one("#why-text", Static).update(why)
+        self.query_one("#quantize-pick").display = self.pick is not None
 
         table = self.query_one("#options", DataTable)
         table.clear(columns=True)
-        table.add_columns("Format", "Memory", "Fit", "Runs on", "Speed")
+        table.add_columns("Format", "Runs with", "Memory", "Fit", "Speed", "Why")
         self.format_rows = {}
-        for i, option in enumerate(options):
+        for i, row in enumerate(rows):
+            candidate, option = row.candidate, row.candidate.option
             label = Text(option.label)
-            if option.label == best.label:
-                label.append("  recommended" if quantizable else "  best", "dim")
-            cells = [label, words.gb(option.memory_required_gb), words.fit(option.fit_level),
-                     words.place(option), words.speed(option)]  # fmt: skip
+            if candidate.kv_cache != "f16":
+                label.append(f" + {words.cache(candidate.kv_cache)}", "dim")
+            fit = words.fit(option.fit_level)
+            if row.status == engine.REJECTED and row.limit != engine.MEMORY:
+                fit = Text("Not here", style="red")  # a runtime, context, disk... limit
+            why = Text(words.plain(row.why), "bold" if row.status == engine.PICK else "dim")
+            speed = words.speed(option) if row.status != engine.REJECTED else "-"
+            memory = words.gb(option.memory_required_gb)
+            cells = [label, candidate.runtime, memory, fit, speed, why]
             table.add_row(*cells, key=str(i))
             key = format_key(option)
-            if quantizable and key:
-                self.format_rows[str(i)] = key
-        self.query_one("#facts", Static).update(facts_grid(snapshot))
+            if candidate.quantize and key and row.status != engine.REJECTED:
+                self.format_rows[str(i)] = (key, candidate.context, candidate.kv_cache)
+        self.query_one("#facts", Static).update(facts_grid(model))
+        self.chart = format_chart(result, rows)
+        self.query_one("#chart", Static).update(self.chart)
         self.show_results(True)
+        self.query_one("#why").display = best is not None
 
     @on(Button.Pressed, "#quantize-pick")
     def quantize_pick(self) -> None:
-        self.qp.open_quantize(self.ref, self.recommended)
+        if self.pick:
+            self.qp.open_quantize(self.ref, *self.pick)
 
     @on(DataTable.RowSelected, "#options")
     def row_selected(self, event: DataTable.RowSelected) -> None:
-        key = self.format_rows.get(event.row_key.value or "")
-        if key:
-            self.qp.open_quantize(self.ref, key)
+        chosen = self.format_rows.get(event.row_key.value or "")
+        if chosen:
+            self.qp.open_quantize(self.ref, *chosen)
+
+
+ROLE_WORDS = {"read": "read access", "write": "read and write access",
+              "fineGrained": "fine-grained access"}  # fmt: skip
+CHART_ROWS = 12
+
+
+def short_runtime_reason(why: str) -> str:
+    """'bitsandbytes needs an NVIDIA GPU, and this PC has none.' -> 'needs an NVIDIA GPU'."""
+    for need in ("needs an NVIDIA GPU", "Apple Silicon"):
+        if need in why:
+            return need if need.startswith("needs") else "needs a Mac"
+    if "Windows" in why:
+        return "not on Windows"
+    return why.split(",")[0].rstrip(".")
+
+
+SHORT_LIMITS = {
+    "memory": "too big",
+    "context": "holds too little context",
+    "architecture": "cannot be converted yet",
+    "quantization": "cannot be made here",
+    "disk": "not enough disk",
+}
+
+
+def format_chart(result, rows):
+    """Memory, speed and quality of each format of the model, as bars."""
+    from ocq import recommend as engine
+    from ocq.tui.charts import ChartRow, FormatChart
+
+    chart = []
+    for row in rows[:CHART_ROWS]:
+        candidate, option = row.candidate, row.candidate.option
+        label = option.label
+        if candidate.kv_cache != "f16":
+            label += f" + {words.cache(candidate.kv_cache).removesuffix(' cache')}"
+        runs = row.status != engine.REJECTED
+        note = ""
+        if not runs:
+            note = SHORT_LIMITS.get(row.limit) or short_runtime_reason(row.why)
+        quality = engine.quality_kept(engine.rated_as(candidate))
+        speed = option.estimated_tps if runs else 0.0
+        chart.append(
+            ChartRow(label, option.memory_required_gb, speed, quality, row.status == engine.PICK,
+                     runs, note)
+        )  # fmt: skip
+    best = result.best
+    free = (
+        best.candidate.option.memory_available_gb
+        if best
+        else rows[0].candidate.option.memory_available_gb
+    )
+    return FormatChart(chart, free)
+
+
+FOR_WORKLOAD = "For the workload"
+
+
+def workload_field(value: str) -> Vertical:
+    from ocq.recommend import WORKLOADS
+
+    options = [(profile.label, key) for key, profile in WORKLOADS.items()]
+    return field("Workload", Dropdown(options, value=value, id="workload"))
 
 
 def facts_grid(snapshot) -> Table:
@@ -646,13 +788,18 @@ class QuantizePage(Page):
         super().__init__(**kwargs)
         self.plan_for: tuple | None = None  # the form values the shown plan was made for
         self.tool = QuantAlgorithm.GGUF  # what the Install button on the plan installs
+        # Check's pick: (model, format, context) -> the cache type it was recommended with.
+        self.presets: dict[tuple, str] = {}
+        # Form values with the Recommended format -> the (format, cache type) review chose.
+        self.resolved: dict[tuple, tuple[str, str]] = {}
+        self.made: Path | None = None  # the file the last run made, or the plan finds made
 
     def compose_body(self) -> ComposeResult:
         s = self.qp.settings
         with Grid(classes="form"):
             yield field("Model", ModelField(), "wide")
             yield field("Format", Dropdown(FORMATS, value=AUTO, id="format"))
-            yield field("Aim for", Dropdown(goal_options(), value=s.goal, id="goal"))
+            yield workload_field(s.workload)
             yield self.context_field()
         with Horizontal(classes="actions"):
             yield Action("Review", variant="primary", id="review")
@@ -660,12 +807,23 @@ class QuantizePage(Page):
         with Results(classes="results"):
             with Card(id="plan", classes="card"):
                 yield Static("", id="plan-text")
-                yield Action("Start", variant="primary", id="start")
-                yield Action("Install", variant="primary", id="install")
+                with Horizontal(classes="card-actions"):
+                    yield Action("Check it", variant="primary", id="check-existing")
+                    yield Action("Start", variant="primary", id="start")
+                    yield Action("Install", variant="primary", id="install")
             with Vertical(id="running"):
                 yield Static("", id="stage")
+                yield StepTracker(id="steps")
+                yield ProgressBar(
+                    id="step-bar", show_eta=False, show_percentage=False, gradient=BAR_GRADIENT
+                )
+                yield Static("", id="step-detail")
                 yield ProgressLog(id="progress")
-            yield Card("", id="result", classes="card")
+            with Card(id="result", classes="card"):
+                yield Static("", id="result-text")
+                with Horizontal(classes="card-actions"):
+                    yield Action("Check it", variant="primary", id="check-made")
+                    yield Action("Verify it", id="verify-made")
             yield Static("", classes="problem")
 
     def on_mount(self) -> None:
@@ -675,11 +833,37 @@ class QuantizePage(Page):
     def set_format(self, key: str) -> None:
         self.query_one("#format", Dropdown).value = key if key in FORMAT_KEYS else AUTO
 
+    def show_running(self, what: str) -> None:
+        """The progress area: "quantize" (title, steps, bar, log), "install" (title, bar, log),
+        "steps" (only the finished steps), or "" (hidden)."""
+        shown = {
+            "quantize": ("#stage", "#steps", "#step-bar", "#step-detail", "#progress"),
+            "install": ("#stage", "#step-bar", "#progress"),
+            "steps": ("#steps",),
+        }.get(what, ())
+        for selector in ("#stage", "#steps", "#step-bar", "#step-detail", "#progress"):
+            self.query_one(selector).display = selector in shown
+        self.query_one("#running").display = bool(shown)
+
+    def preset(self, ref: str, key: str, context: int, kv_cache: str) -> None:
+        """What Check recommended: its context goes in the field, and its cache type is used
+        while the form still asks for that model, format and context."""
+        self.presets = {}
+        if context:
+            box = self.query_one("#context", Dropdown)
+            box.set_options(context_options(context))  # every usual size, and this one
+            box.value = context
+        if kv_cache:
+            self.presets[(ref, key, context or self.value("context"))] = kv_cache
+
+    def kv_cache_for(self, ref: str, key: str, context: int) -> str:
+        return self.presets.get((ref, key, context)) or self.qp.settings.kv_cache
+
     def form(self) -> tuple | None:
         ref = self.model()
         if not ref:
             return None
-        return ref, self.value("format"), self.value("goal"), self.value("context")
+        return ref, self.value("format"), self.value("workload"), self.value("context")
 
     @on(Button.Pressed, "#review")
     def run(self) -> None:
@@ -692,23 +876,46 @@ class QuantizePage(Page):
         self.review(*form)
 
     @background("quantize-plan")
-    def review(self, ref: str, key: str, goal: str, context: int) -> None:
+    def review(self, ref: str, key: str, workload: str, context: int) -> None:
         from ocq.cli import default_output
         from ocq.model_analyzer import resolve_model
         from ocq.plan import generate_plan
 
-        kv_cache = self.qp.settings.kv_cache
         hw = self.qp.hardware()
+        form = (ref, key, workload, context)
+        made_key, kv_cache = self.resolve_format(form, hw)
         snapshot = resolve_model(ref, hw, self.qp.llmfit_bin, context, kv_cache)
         plan = generate_plan(
-            snapshot.model_id, hw, snapshot, OptimizationGoal(goal), default_output(ref),
-            format_choices(key, context, kv_cache),
+            snapshot.model_id, hw, snapshot, OptimizationGoal.BALANCED, default_output(ref),
+            format_choices(made_key, context, kv_cache),
         )  # fmt: skip
-        self.app.call_from_thread(
-            self.show_plan, plan, (ref, key, goal, context), snapshot.num_layers
-        )
+        made = made_file(plan)
+        self.app.call_from_thread(self.show_plan, plan, form, snapshot.num_layers, made)
 
-    def show_plan(self, plan, form: tuple, num_layers: int = 0) -> None:
+    def resolve_format(self, form: tuple, hw) -> tuple[str, str]:
+        """(format, cache type) to make. Recommended: the engine's best option for this model
+        and workload that QuantPilot makes, as Check shows it. Called from a worker thread."""
+        ref, key, workload, context = form
+        if key != AUTO:
+            return key, self.kv_cache_for(ref, key, context)
+        from ocq import recommend as engine
+
+        request = engine.RecommendationRequest(engine.WORKLOADS[workload], (ref,), context)
+        result = engine.recommend(request, hw, self.qp.settings.folders())
+        for recommendation in result.ranked:
+            candidate = recommendation.candidate
+            made = format_key(candidate.option) if candidate.quantize else None
+            if made:
+                self.resolved[form] = (made, candidate.kv_cache)
+                return made, candidate.kv_cache
+        if result.best is not None:
+            raise OcqError(
+                f"Nothing to quantize: {result.best.candidate.option.label} runs here as it is."
+            )
+        reasons = engine.explain_model(result, ref)
+        raise OcqError(f"Nothing fits this PC. {reasons[-1].text}")
+
+    def show_plan(self, plan, form: tuple, num_layers: int = 0, made: Path | None = None) -> None:
         from ocq.tui.install import MISSING, READY, tool_state
 
         self.query_one(".busy").display = False
@@ -722,7 +929,11 @@ class QuantizePage(Page):
             details = [words.gb(predicted.memory_required_gb), words.place(predicted),
                        words.layers(predicted, num_layers), words.speed(predicted)]  # fmt: skip
             text.append("  " + "  |  ".join(d for d in details if d != "-"))
-        text.append(f"\nSaves to {plan.output_dir}", "dim")
+        if made:
+            text.append("\nAlready made: ", "bold green")
+            text.append(str(made), "dim")
+        else:
+            text.append(f"\nSaves to {plan.output_dir}", "dim")
         tool = tool_state(plan.quant_config.algorithm, self.qp.hardware())
         for warning in plan.warnings:
             if tool.state == MISSING and words.warning(warning).endswith(
@@ -731,12 +942,27 @@ class QuantizePage(Page):
                 continue  # the Install button says it
             text.append(f"\n{words.warning(warning)}", "yellow")
         self.query_one("#plan-text", Static).update(text)
-        self.query_one("#start").display = tool.state == READY
+        self.made = made
+        start = self.query_one("#start", Button)
+        start.display = tool.state == READY
+        start.label = "Make it again" if made else "Start"
+        start.variant = "default" if made else "primary"
+        self.query_one("#check-existing").display = made is not None
         install = self.query_one("#install", Button)
         install.display = tool.state == MISSING
         install.label = f"Install {tool.name} tools"
         self.tool = tool.algorithm
         self.query_one("#plan").display = True
+
+    @on(Button.Pressed, "#check-made, #check-existing")
+    def check_made(self) -> None:
+        if self.made:
+            self.qp.open_with_model("check", str(self.made))
+
+    @on(Button.Pressed, "#verify-made")
+    def verify_made(self) -> None:
+        if self.made:
+            self.qp.open_with_model("verify", str(self.made))
 
     @on(Button.Pressed, "#install")
     def install(self) -> None:
@@ -746,10 +972,11 @@ class QuantizePage(Page):
             self.query_one("#plan").display = False
             self.query_one("#stage", Static).update(Text("Installing ...", "bold"))
             log.clear()
-            self.query_one("#running").display = True
+            self.query_one("#step-bar", ProgressBar).update(total=None, progress=0)
+            self.show_running("install")
 
         def done(state, problem: str) -> None:
-            self.query_one("#running").display = False
+            self.show_running("")
             if problem:
                 self.failed(problem)
             else:
@@ -777,36 +1004,58 @@ class QuantizePage(Page):
             confirmed,
         )
 
-    def begin(self, ref: str, key: str, goal: str, context: int) -> None:
+    def begin(self, ref: str, key: str, workload: str, context: int) -> None:
         if self.qp.busy:
             self.notify("Another quantization is running.", severity="warning")
             return
         self.query_one("#plan").display = False
         self.query_one("#result").display = False
-        self.query_one("#running").display = True
+        self.show_running("quantize")
+        self.query_one("#review", Button).focus()  # Start is hidden now: keep the keys working
         stage = self.query_one("#stage", Static)
         stage.update(Text(f"Quantizing {ref} ...", "bold"))
         progress = self.query_one(ProgressLog)
         progress.clear()
+        steps = self.query_one(StepTracker)
+        bar = self.query_one("#step-bar", ProgressBar)
+        detail = self.query_one("#step-detail", Static)
+        steps.start()
+        bar.update(total=None, progress=0)  # pulses until a step says how far it is
+        detail.update("")
 
         def step(line: str) -> None:  # the latest progress line, under the title
+            if steps.heard(line):
+                bar.update(total=None, progress=0)
+                detail.update("")
             stage.update(Text.assemble((f"Quantizing {ref}\n", "bold"), (line[:120], "dim")))
 
+        def meter(line: str) -> None:  # a download or conversion meter as it moves
+            percent, done = meter_progress(line)
+            if percent is not None:
+                bar.update(total=100, progress=percent)
+            shown = [f"{percent:.0f}%" if percent is not None else "", done]
+            if any(shown):
+                detail.update("  ·  ".join(part for part in shown if part))
+
         progress.on_line = step
+        progress.on_meter = meter
         self.qp.job_started("Quantizing")
         self.app.begin_capture_print(progress)
-        self.quantize(ref, key, goal, context)
+        self.quantize(ref, key, workload, context)
 
     @background("quantize")
-    def quantize(self, ref: str, key: str, goal: str, context: int) -> None:
+    def quantize(self, ref: str, key: str, workload: str, context: int) -> None:
         from ocq.cli import default_output
         from ocq.pipeline import run_optimize
 
+        made, kv_cache = self.resolved.get((ref, key, workload, context)) or (
+            key,
+            self.kv_cache_for(ref, key, context),
+        )
         try:
             result = run_optimize(
-                ref, OptimizationGoal(goal), default_output(ref), dry_run=False,
-                llmfit_bin=self.qp.llmfit_bin,
-                choices=format_choices(key, context, self.qp.settings.kv_cache),
+                ref, OptimizationGoal.BALANCED, default_output(ref), dry_run=False,
+                llmfit_bin=self.qp.llmfit_bin, choices=format_choices(made, context, kv_cache),
             )  # fmt: skip
         except Exception as exc:  # the app must stay up whatever happens
             self.app.call_from_thread(self.finished, None, f"{type(exc).__name__}: {exc}")
@@ -818,12 +1067,35 @@ class QuantizePage(Page):
         self.app.end_capture_print(progress)
         progress.flush()
         ok = bool(result and result.validation and result.validation.passed)
+        self.query_one(StepTracker).finish(ok)
         self.qp.job_finished("Quantized" if ok else "Quantizing failed", ok)
-        self.query_one("#running").display = False
+        self.show_running("steps")  # the steps and their times stay above the result
         card = self.query_one("#result", Card)
-        card.update(result_text(result, problem))
+        self.query_one("#result-text", Static).update(result_text(result, problem))
         card.set_class(not ok, "bad")
         card.display = True
+        made = result.quantization.artifact_path if result and result.quantization else ""
+        made_ok = bool(made) and result.quantization.success and Path(made).exists()
+        self.made = Path(made) if made_ok else None
+        self.query_one("#check-made").display = made_ok
+        self.query_one("#verify-made").display = made_ok and made.endswith(".gguf")
+        # The keys need a visible place to be: the result's first action, else Review.
+        self.query_one("#check-made" if made_ok else "#review", Button).focus()
+
+
+def made_file(plan) -> Path | None:
+    """The GGUF file this plan makes, when it is there already (ocq optimize names it
+    <model>-<type>.gguf). Other formats share one folder per model, so they are not told apart."""
+    from ocq.quantizers.base import model_slug
+
+    if plan.quant_config.algorithm != QuantAlgorithm.GGUF:
+        return None
+    path = (
+        plan.output_dir
+        / "artifact"
+        / f"{model_slug(plan.model_id)}-{plan.quant_config.gguf_type}.gguf"
+    )
+    return path if path.is_file() else None
 
 
 def result_text(result, problem: str) -> Text:
@@ -973,7 +1245,7 @@ class SettingsPage(Page):
                     Dropdown(context_options(s.context), value=s.context, id="context"),
                 )
                 yield field("Context memory", Dropdown(kv, value=s.kv_cache, id="kv_cache"))
-                yield field("Aim for", Dropdown(goal_options(), value=s.goal, id="goal"))
+                yield workload_field(s.workload)
                 yield field("Big banner", Switch(value=s.show_banner, id="show_banner"))
                 yield field("Simple borders", Switch(value=s.ascii_borders, id="ascii_borders"))
                 yield field(
@@ -981,6 +1253,130 @@ class SettingsPage(Page):
                     TextArea("\n".join(s.model_folders), id="model_folders"),
                     "wide",
                 )
+            yield Static("Hugging Face token", classes="section")
+            yield Static("", id="token-state")
+            with Horizontal(id="token-entry"):
+                yield TextField(placeholder="Paste a read token (hf_...)", password=True,
+                                id="hf-token")  # fmt: skip
+                yield Action("Save", variant="primary", id="token-save")
+                yield Action("Cancel", id="token-cancel")
+            with Horizontal(classes="actions", id="token-actions"):
+                yield Action("Add a token", variant="primary", id="token-add")
+                yield Action("Change", id="token-change")
+                yield Action("Remove", id="token-remove")
+
+    def on_mount(self) -> None:
+        self.account = None  # who the saved token belongs to, once checked
+        self.token_note: Text | None = None  # the outcome of the last save, shown once
+        self.query_one("#token-entry").display = False
+        self.show_token()
+
+    def opened(self) -> None:
+        token, where = env_file.hf_token()
+        if token and self.account is None:
+            self.check_token(token, save=False)  # who it belongs to, once per session
+
+    def show_token(self) -> None:
+        """The token as it is now: masked, where it comes from, and what it may do."""
+        token, where = env_file.hf_token()
+        text = Text()
+        if not token:
+            text.append("None yet. Gated models such as Llama and Gemma need a read token: ", "dim")
+            text.append("huggingface.co/settings/tokens", "underline")
+        else:
+            text.append(env_file.mask(token), "bold")
+            if self.account and self.account.name:
+                access = ROLE_WORDS.get(self.account.role, self.account.role)
+                text.append(f"   Signed in as {self.account.name}", "green")
+                text.append(f", {access}" if access else "", "green")
+            if where == "shell":
+                text.append("\nFrom your shell, which wins over a token saved here.", "dim")
+        if self.token_note is not None:
+            text.append("\n")
+            text.append_text(self.token_note)
+        self.query_one("#token-state", Static).update(text)
+        editing = self.query_one("#token-entry").display
+        self.query_one("#token-actions").display = not editing
+        self.query_one("#token-add").display = not token
+        self.query_one("#token-change").display = where == "file"
+        self.query_one("#token-remove").display = where == "file"
+
+    def edit_token(self, editing: bool) -> None:
+        self.query_one("#token-entry").display = editing
+        self.query_one("#hf-token", Input).value = ""
+        self.token_note = None
+        self.show_token()
+        if editing:
+            self.query_one("#hf-token", Input).focus()
+        else:
+            self.focus_token_actions()
+
+    def focus_token_actions(self) -> None:
+        """The first button shown: a hidden one would leave the keys nowhere to go."""
+        for button in self.query("#token-actions Button"):
+            if button.display:
+                button.focus()
+                return
+
+    @on(Button.Pressed, "#token-add, #token-change")
+    def add_token(self) -> None:
+        self.edit_token(True)
+
+    @on(Button.Pressed, "#token-cancel")
+    def cancel_token(self) -> None:
+        self.edit_token(False)
+
+    @on(Button.Pressed, "#token-save")
+    @on(Input.Submitted, "#hf-token")
+    def save_token(self) -> None:
+        token = self.query_one("#hf-token", Input).value.strip()
+        if not token.startswith("hf_"):
+            self.token_note = Text("Hugging Face tokens start with hf_.", "red")
+            self.show_token()
+            return
+        self.token_note = Text("Checking the token with Hugging Face ...", "dim")
+        self.show_token()
+        self.check_token(token, save=True)
+
+    @background("token")
+    def check_token(self, token: str, save: bool) -> None:
+        try:
+            account, note = env_file.check_hf_token(token), None
+        except OcqError as exc:  # Hugging Face says no: nothing is saved
+            self.app.call_from_thread(self.token_checked, None, Text(str(exc), "red"), False)
+            return
+        except ConnectionError:
+            account = None
+            note = Text("Saved, not checked: Hugging Face could not be reached.", "yellow")
+        if save:
+            env_file.save(env_file.HF_TOKEN, token)
+            if account and account.role == "write":
+                note = Text("Saved. It can write too: a read token is enough.", "yellow")
+            elif account:
+                note = Text("Saved.", "green")
+        self.app.call_from_thread(self.token_checked, account, note, save)
+
+    def token_checked(self, account, note: Text | None, saved: bool) -> None:
+        self.account = account or self.account
+        if saved:
+            self.query_one("#token-entry").display = False
+        self.token_note = note
+        self.show_token()
+        if saved:
+            self.focus_token_actions()
+
+    @on(Button.Pressed, "#token-remove")
+    def remove_token(self) -> None:
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                env_file.remove(env_file.HF_TOKEN)
+                self.account, self.token_note = None, Text("Removed.", "dim")
+                self.show_token()
+
+        self.app.push_screen(
+            Confirm("Remove the token?", "Gated models cannot be read without one.", "Remove"),
+            confirmed,
+        )
 
     @on(Dropdown.Changed)
     def dropdown_changed(self, event: Dropdown.Changed) -> None:

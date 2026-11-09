@@ -249,6 +249,7 @@ def predict(
     unified_memory: bool,
 ) -> list[Check]:
     """QuantPilot's numbers for what this llama.cpp run allocated, next to llama.cpp's."""
+    header = header.loaded()  # llama.cpp skips the multi-token prediction blocks
     value_bytes = kv_value_bytes(kv_cache, LLAMA_CPP)
     with_state = model.kv_cache_bytes(log.context, LLAMA_CPP, log.conversations, value_bytes)
     state = sum(layer.state_bytes for layer in model.kv_layers) * log.conversations

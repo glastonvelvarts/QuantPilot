@@ -15,6 +15,7 @@ from ocq.discovery import LocalModel
 from ocq.tui import pages, words
 from ocq.tui.app import MENU, QuantPilotApp
 from ocq.tui.banner import BANNER, BANNER_WIDTH, COMPACT, banner_text
+from ocq.tui.charts import lines_of
 from ocq.tui.pages import AUTO, CheckPage, QuantizePage, format_choices, format_key
 from ocq.tui.settings import Settings, load_settings, save_settings
 from ocq.tui.widgets import ModelPicker, ProgressLog
@@ -151,6 +152,7 @@ HARDWARE = HardwareProfile(
     backend="CPU",
     unified_memory=False,
     os_name="Linux",
+    ram_bandwidth_gbs=50.0,
 )
 
 
@@ -170,6 +172,24 @@ async def settle(app, pilot) -> None:
     await pilot.pause()
     await app.workers.wait_for_complete()
     await pilot.pause()
+
+
+def offline_engine(monkeypatch, catalog=()):
+    """The recommendation engine without the network: no models on this PC, Hub repos read
+    from the saved headers in data/, the popular list replaced by `catalog`."""
+    from conftest import real_model
+
+    from ocq import discovery, recommend
+
+    monkeypatch.setattr(discovery, "find_models", lambda *a, **k: [])
+    monkeypatch.setattr(recommend, "CATALOG", tuple(recommend.entry(m) for m in catalog))
+    monkeypatch.setattr(model_analyzer, "fetch_hf_model", lambda repo: real_model(repo)[0])
+    monkeypatch.setattr(model_analyzer, "fetch_model_files", lambda r, sha: real_model(r)[1:])
+    monkeypatch.setattr(model_analyzer, "catalog_entry", lambda *a: None)
+    monkeypatch.setattr(recommend, "free_disk_gb", lambda path: 1000.0)
+    monkeypatch.setattr(
+        recommend, "converter_architectures", lambda: frozenset({"Qwen2ForCausalLM"})
+    )
 
 
 def fake_model(monkeypatch, warnings=()):
@@ -199,7 +219,7 @@ def fake_model(monkeypatch, warnings=()):
     monkeypatch.setattr(model_analyzer, "resolve_model", lambda *a, **k: snapshot)
     monkeypatch.setattr(model_analyzer, "quant_options", lambda *a, **k: options)
     monkeypatch.setattr(plan, "generate_plan", lambda *a, **k: made)
-    monkeypatch.setattr(model_analyzer, "recommend_models", lambda *a, **k: [])
+    offline_engine(monkeypatch)
     return made
 
 
@@ -207,7 +227,8 @@ def text_of(app, selector: str) -> str:
     return str(app.query_one(selector).render())
 
 
-def test_menu_arrow_keys_open_the_pages_in_order(tmp_path: Path):
+def test_menu_arrow_keys_open_the_pages_in_order(tmp_path: Path, monkeypatch):
+    offline_engine(monkeypatch)  # Discover opens on the way
     seen = []
 
     async def steps(app, pilot):
@@ -220,59 +241,119 @@ def test_menu_arrow_keys_open_the_pages_in_order(tmp_path: Path):
     assert seen == order[:4]
 
 
-def test_check_recommends_a_format_in_plain_words(tmp_path: Path, monkeypatch):
-    fake_model(monkeypatch, ["GGUF backend not installed. Run: uv sync --extra gguf"])
+def test_check_shows_the_engines_pick_in_plain_words(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
+    from ocq import recommend
+
+    offline_engine(monkeypatch)
+    made = SimpleNamespace(warnings=["GGUF backend not installed. Run: uv sync --extra gguf"])
+    monkeypatch.setattr(plan, "generate_plan", lambda *a, **k: made)
+    request = recommend.RecommendationRequest(recommend.WORKLOADS["coding"], (QWEN,))
+    expected = recommend.recommend(request, HARDWARE)  # what ocq recommend shows
     seen = {}
 
     async def steps(app, pilot):
         app.show_page("check", focus=True)
-        await pilot.press(*"org/model", "enter")
+        app.query_one("#check #workload").value = "coding"
+        await pilot.press(*QWEN, "enter")
         await settle(app, pilot)
         seen["card"] = text_of(app, "#pick-text")
+        seen["why"] = text_of(app, "#why-text")
+        seen["chart"] = "\n".join(lines_of(app.query_one(CheckPage).chart, 130))
         seen["rows"] = app.query_one("#options").row_count
         await pilot.click(app.query_one("#quantize-pick"))
         await settle(app, pilot)
         seen["page"] = app.query_one("ContentSwitcher").current
         seen["format"] = app.query_one("#quantize #format").value
+        seen["context"] = app.query_one("#quantize #context").value
+        seen["saved"] = app.settings.workload
 
     run_app(tmp_path, steps)
-    assert "Recommended for this PC" in seen["card"] and "GGUF Q8_0 (8-bit)" in seen["card"]
-    assert "Fits easily" in seen["card"] and "up to 100 tok/s" in seen["card"]
+    best = expected.best.candidate
+    card = seen["card"].splitlines()
+    assert card[:2] == ["Recommended for Coding", f"{best.option.label} · llama.cpp"]
+    assert words.speed(best.option) in seen["card"] and "32K tokens" in seen["card"]
+    assert f"Confidence: {expected.best.confidence.level}" in seen["card"]
     assert "GGUF tools are not installed on this PC." in seen["card"]
     assert "uv sync" not in seen["card"]
-    assert seen["rows"] == 3
-    assert (seen["page"], seen["format"]) == ("quantize", "gguf:Q8_0")
+    assert expected.best.reasons[0].text in seen["why"] and "✓" in seen["why"]
+    assert seen["rows"] == len(recommend.compare_rows(expected))
+    assert "Memory (GB)" in seen["chart"] and f"★ {best.option.label}" in seen["chart"]
+    assert "free memory" in seen["chart"]
+    assert (seen["page"], seen["format"]) == ("quantize", f"gguf:{best.option.label}")
+    assert seen["context"] == 32768 and seen["saved"] == "coding"
 
 
-def test_a_gguf_repo_gets_the_clis_best_fit_with_its_layer_split(tmp_path: Path, monkeypatch):
-    # A bigger file that is tight loses to a smaller one that fits, as in ocq feasibility.
-    tight = option("Q8_0", fit=FitLevel.MARGINAL, bits=8.5, gb=7.6, tps=30)
-    fits = option("Q4_K_M", fit=FitLevel.GOOD, bits=4.9, gb=6.1, tps=29)
-    fits = replace(fits, run_mode=RunMode.GPU_OFFLOAD, gpu_layers=14)
-    snapshot = SimpleNamespace(
-        model_id="org/model-GGUF",
-        is_quantized=False,
-        gguf_files=(("Q8_0", 8e9), ("Q4_K_M", 4.7e9)),
-        facts=ModelFacts(),
-        original_gb=None,
-        num_layers=28,
-    )
-    monkeypatch.setattr(model_analyzer, "resolve_model", lambda *a, **k: snapshot)
-    monkeypatch.setattr(model_analyzer, "quant_options", lambda *a, **k: [tight, fits])
+def test_a_gguf_file_is_recommended_as_it_is_not_quantized_again(tmp_path: Path, monkeypatch):
+    from test_discovery import smollm2_store
+
+    offline_engine(monkeypatch)
+    smollm2_store(tmp_path / "ollama")
+    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path / "ollama"))
     seen = {}
 
     async def steps(app, pilot):
         app.show_page("check", focus=True)
-        await pilot.press(*"org/model-GGUF", "enter")
+        app.query_one("#check #context").value = 2048  # what the small test file holds
+        await pilot.press(*"ollama:smollm2:135m", "enter")
         await settle(app, pilot)
         seen["card"] = text_of(app, "#pick-text")
         seen["quantize"] = app.query_one("#quantize-pick").display
 
     run_app(tmp_path, steps)
-    assert seen["card"].splitlines()[:2] == ["Best fit for this PC", "Q4_K_M"]
-    details = "Fits  6.1 GB  |  GPU + RAM  |  14 of 29 layers on GPU  |  up to 29 tok/s"
-    assert details in seen["card"]
+    assert seen["card"].splitlines()[1] == "Q8_0 · llama.cpp"
     assert not seen["quantize"]
+
+
+def test_discover_lists_each_models_best_option(tmp_path: Path, monkeypatch):
+    from conftest import QWEN, QWEN_AWQ
+
+    offline_engine(monkeypatch, catalog=(QWEN, QWEN_AWQ))
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("discover", focus=True)
+        await settle(app, pilot)
+        table = app.query_one("#discover DataTable")
+        seen["rows"] = [[str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)]
+
+    run_app(tmp_path, steps)
+    ranked, not_here = seen["rows"]  # every model, also the ones that cannot run here
+    assert ranked[0] == f"{QWEN}  recommended" and ranked[-2:] == ["Download", ""]
+    # The stored AWQ repo needs vLLM, which needs an NVIDIA GPU.
+    assert (not_here[0], not_here[1], not_here[2]) == (QWEN_AWQ, "-", "Not here")
+    assert not_here[-1].startswith("vLLM needs an NVIDIA GPU")  # and why
+
+
+def test_quantize_recommended_makes_the_engines_pick(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
+    from ocq import recommend
+
+    offline_engine(monkeypatch)
+    made = []
+    real_plan = plan.generate_plan
+    monkeypatch.setattr(
+        plan, "generate_plan", lambda *a, **k: made.append(a[5]) or real_plan(*a, **k)
+    )
+    request = recommend.RecommendationRequest(recommend.WORKLOADS["chat"], (QWEN,), 8192)
+    best = recommend.recommend(request, HARDWARE).best.candidate
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        app.query_one("#quantize #context").value = 8192
+        await pilot.press(*QWEN, "enter")  # the format stays on Recommended
+        await settle(app, pilot)
+        seen["plan"] = text_of(app, "#plan-text")
+        seen["problem"] = app.query_one("#quantize .problem").display
+
+    run_app(tmp_path, steps)
+    assert not seen["problem"]
+    (choices,) = made
+    assert (choices.gguf_type, choices.kv_cache) == (best.option.label, best.kv_cache)
+    assert f"GGUF {best.option.label}" in seen["plan"]
 
 
 def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
@@ -295,6 +376,7 @@ def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
 
     async def steps(app, pilot):
         app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
         await pilot.press(*"org/model", "enter")
         await settle(app, pilot)
         seen["plan"] = text_of(app, "#plan-text")
@@ -302,13 +384,18 @@ def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
         page.begin(*page.plan_for)
         await settle(app, pilot)
         seen["progress"] = [line.text for line in app.query_one("#progress", ProgressLog).lines]
-        seen["result"] = text_of(app, "#result")
+        seen["result"] = text_of(app, "#result-text")
+        seen["steps"] = text_of(app, "#steps")
+        seen["bar shown"] = app.query_one("#step-bar").display
         seen["busy"] = app.busy
 
     run_app(tmp_path, steps)
     assert "GGUF Q8_0 (8-bit)" in seen["plan"] and "Saves to" in seen["plan"]
     assert seen["progress"] == ["Converting to GGUF ...", "Quantizing to Q8_0 ..."]
     assert seen["result"].startswith("Done") and "95 tok/s measured" in seen["result"]
+    # The steps stay above the result, all ticked; the bar and the log are put away.
+    assert seen["steps"].count("✓") == 5 and "✓ Quantize" in seen["steps"]
+    assert not seen["bar shown"]
     assert not seen["busy"]
 
 
@@ -402,7 +489,8 @@ def test_a_failing_job_shows_a_message_and_the_app_stays_up(tmp_path: Path, monk
     def offline(*args, **kwargs):
         raise ConnectionError("network is unreachable")
 
-    monkeypatch.setattr(model_analyzer, "resolve_model", offline)
+    offline_engine(monkeypatch)
+    monkeypatch.setattr(model_analyzer, "fetch_hf_model", offline)
     seen = {}
 
     async def steps(app, pilot):
@@ -413,7 +501,7 @@ def test_a_failing_job_shows_a_message_and_the_app_stays_up(tmp_path: Path, monk
         seen["running"] = app.is_running
 
     run_app(tmp_path, steps)
-    assert seen["problem"] == "Something went wrong: network is unreachable"
+    assert seen["problem"] == "Could not read it: network is unreachable"
     assert seen["running"]
 
 
@@ -458,6 +546,8 @@ def test_verify_runs_llama_server_and_shows_layers_as_a_count(tmp_path: Path, mo
 
 
 def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
     fake_model(monkeypatch)
     seen = []
 
@@ -471,18 +561,20 @@ def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, 
         seen.append(where(app))
         await pilot.press("left")  # empty field: back to the menu
         seen.append(where(app))
-        await pilot.press("right", *"org/model")
+        await pilot.press("right", *QWEN)
         await pilot.press("left")  # moves the cursor inside the text, stays
         seen.append(where(app))
         await pilot.press("home", "left")  # at the start: back to the menu
         seen.append(where(app))
-        await pilot.press("right", "down", "down")  # model -> Browse -> Context
+        await pilot.press("right", "down", "down")  # model -> Browse -> Workload
         seen.append(where(app))
-        await pilot.press("down")  # a closed dropdown does not open on Down
+        await pilot.press("down")  # a closed dropdown does not open on Down: -> Context
+        seen.append(where(app))
+        await pilot.press("down")
         seen.append(where(app))
         await pilot.press("enter")  # Check
         await settle(app, pilot)
-        await pilot.press("down", "down")  # -> Quantize to this -> the table
+        await pilot.press("down", "down", "down")  # -> Quantize to this -> Why -> the table
         seen.append(where(app))
         await pilot.press("up")  # first row: leaves the table
         seen.append(where(app))
@@ -495,10 +587,11 @@ def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, 
         "nav",
         "TextField",
         "nav",
+        "workload",
         "context",
         "check",
         "options",
-        "quantize-pick",
+        "CollapsibleTitle",
         "nav",
     ]
 
@@ -583,6 +676,7 @@ def test_quantize_offers_to_install_missing_tools(tmp_path: Path, monkeypatch):
 
     async def steps(app, pilot):
         app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
         await pilot.press(*"org/model", "enter")
         await settle(app, pilot)
         seen["shown"] = app.query_one("#plan").display
@@ -618,3 +712,226 @@ def test_progress_box_keeps_only_the_last_state_of_a_progress_bar():
         log.on_print(events.Print(chunk))
     log.flush()
     assert lines == ["Starting done", "Converting ..."]
+
+
+def test_arrow_keys_move_between_the_buttons_of_a_question(tmp_path: Path):
+    from ocq.tui.widgets import Confirm
+
+    seen, answers = [], []
+
+    async def steps(app, pilot):
+        app.push_screen(Confirm("Install the GPTQ tools?", "A few GB.", "Install"), answers.append)
+        await pilot.pause()
+        seen.append(app.focused.id)  # Cancel first: nothing happens by accident
+        for key in ("left", "right", "up", "down", "left"):
+            await pilot.press(key)
+            seen.append(app.focused.id)
+        await pilot.press("enter")
+        await pilot.pause()
+
+    run_app(tmp_path, steps)
+    assert seen == ["no", "yes", "no", "yes", "no", "yes"]
+    assert answers == [True]
+
+
+def finished_run(monkeypatch, artifact: Path, release):
+    """A quantization that made `artifact` (a real file), without running anything. It ends
+    when `release` (a threading.Event) is set."""
+    made = fake_model(monkeypatch)
+
+    def fake_run(ref, goal, output, **kwargs):
+        release.wait(10)
+        quantization = SimpleNamespace(
+            success=True, message="", artifact_size_gb=0.7, artifact_path=str(artifact)
+        )
+        validation = SimpleNamespace(passed=True, checks=[])
+        bench = SimpleNamespace(tokens_per_second=95.0, sample_output="Hello.")
+        return SimpleNamespace(
+            plan=made, quantization=quantization, validation=validation, benchmark=bench
+        )
+
+    monkeypatch.setattr(pipeline, "run_optimize", fake_run)
+    return made
+
+
+def test_after_quantizing_the_keys_work_and_the_new_file_opens(tmp_path: Path, monkeypatch):
+    import threading
+
+    artifact = tmp_path / "org--model-Q8_0.gguf"
+    artifact.write_bytes(b"GGUF")
+    release = threading.Event()
+    finished_run(monkeypatch, artifact, release)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
+        await pilot.press(*"org/model", "enter")
+        await settle(app, pilot)
+        page = app.query_one(QuantizePage)
+        page.begin(*page.plan_for)
+        await pilot.pause()
+        seen["while running"] = app.focused.id  # Start is hidden: the keys still have a place
+        release.set()
+        await settle(app, pilot)
+        seen["after"] = app.focused.id
+        seen["verify shown"] = app.query_one("#verify-made").display
+        await pilot.press("right")
+        seen["right"] = app.focused.id  # the arrow keys move again
+        await pilot.press("up", "up")
+        seen["up"] = app.focused.id
+        app.query_one("#check-made").focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        seen["page"] = app.query_one("ContentSwitcher").current
+        seen["model"] = app.query_one("#check ModelField").value
+
+    run_app(tmp_path, steps)
+    assert seen["while running"] == "review"
+    assert seen["after"] == "check-made" and seen["verify shown"]
+    assert seen["right"] == "verify-made" and seen["up"] != "verify-made"
+    assert (seen["page"], seen["model"]) == ("check", str(artifact))
+
+
+def test_a_file_already_made_is_offered_before_making_it_again(tmp_path: Path, monkeypatch):
+    made = fake_model(monkeypatch)
+    made.output_dir = tmp_path / "out" / "org--model"
+    artifact = made.output_dir / "artifact" / "org--model-Q8_0.gguf"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"GGUF")
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
+        await pilot.press(*"org/model", "enter")
+        await settle(app, pilot)
+        seen["plan"] = text_of(app, "#plan-text")
+        seen["start"] = str(app.query_one("#start").label)
+        seen["check"] = app.query_one("#check-existing").display
+
+    run_app(tmp_path, steps)
+    assert f"Already made: {artifact}" in seen["plan"]
+    assert seen["start"] == "Make it again" and seen["check"]
+
+
+def test_down_on_the_last_row_of_a_table_moves_on(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
+    offline_engine(monkeypatch)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("check", focus=True)
+        await pilot.press(*QWEN, "enter")
+        await settle(app, pilot)
+        table = app.query_one("#options")
+        table.focus()
+        table.move_cursor(row=table.row_count - 1)
+        await pilot.press("down")
+        seen["after last row"] = [node.id for node in app.focused.ancestors_with_self]
+
+    run_app(tmp_path, steps)
+    assert "about" in seen["after last row"]  # About this model
+
+
+# Settings: the Hugging Face token -------------------------------------------------------------
+
+HF = "hf_abcdefghijklmnopqrstuvwxyz1234"
+
+
+def screen_text(app) -> str:
+    return "\n".join(str(w.render()) for w in app.query("Static, Label, Button, Input"))
+
+
+def test_a_token_pasted_in_settings_is_checked_saved_and_shown_masked(tmp_path, monkeypatch):
+    from ocq import env_file
+
+    checked = []
+
+    def check(token):
+        checked.append(token)
+        return env_file.HfAccount("glaston", "read")
+
+    monkeypatch.setattr(env_file, "check_hf_token", check)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("settings", focus=True)
+        await pilot.pause()
+        seen["before"] = text_of(app, "#token-state")
+        app.query_one("#token-add").press()
+        await pilot.pause()
+        seen["focus"] = app.focused.id
+        await pilot.press(*HF, "enter")
+        await settle(app, pilot)
+        seen["after"] = text_of(app, "#token-state")
+        seen["screen"] = screen_text(app)
+        seen["focus after"] = app.focused.id
+
+    run_app(tmp_path, steps)
+    assert "None yet" in seen["before"] and "huggingface.co/settings/tokens" in seen["before"]
+    assert seen["focus"] == "hf-token" and checked == [HF]
+    assert (
+        "hf_••••••••1234" in seen["after"] and "Signed in as glaston, read access" in seen["after"]
+    )
+    assert HF not in seen["screen"]  # never shown in clear
+    assert env_file.read() == {"HF_TOKEN": HF} and seen["focus after"] == "token-change"
+
+
+def test_a_token_hugging_face_rejects_is_not_saved(tmp_path, monkeypatch):
+    from ocq import env_file
+
+    def rejected(token):
+        from ocq.types import OcqError
+
+        raise OcqError("Hugging Face does not accept this token.")
+
+    monkeypatch.setattr(env_file, "check_hf_token", rejected)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("settings", focus=True)
+        app.query_one("#token-add").press()
+        await pilot.pause()
+        await pilot.press(*"hf_wrong0000000000", "enter")
+        await settle(app, pilot)
+        seen["state"] = text_of(app, "#token-state")
+        seen["still editing"] = app.query_one("#token-entry").display
+
+    run_app(tmp_path, steps)
+    assert "does not accept this token" in seen["state"] and seen["still editing"]
+    assert env_file.read() == {}
+
+
+def test_a_saved_token_can_be_removed_and_a_shell_one_is_left_alone(tmp_path, monkeypatch):
+    from ocq import env_file
+
+    monkeypatch.setattr(env_file, "check_hf_token", lambda t: env_file.HfAccount("glaston", "read"))
+    env_file.save("HF_TOKEN", HF)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("settings", focus=True)
+        await settle(app, pilot)
+        app.query_one("#token-remove").press()
+        await pilot.pause()
+        await pilot.press("left", "enter")  # Remove, in the question
+        await pilot.pause()
+        seen["after remove"] = text_of(app, "#token-state")
+
+    run_app(tmp_path, steps)
+    assert "None yet" in seen["after remove"] and env_file.read() == {}
+
+    monkeypatch.setenv("HF_TOKEN", "hf_fromtheshell000000")
+    shown = {}
+
+    async def shell(app, pilot):
+        app.show_page("settings", focus=True)
+        await settle(app, pilot)
+        shown["state"] = text_of(app, "#token-state")
+        shown["buttons"] = [b.id for b in app.query("#token-actions Button") if b.display]
+
+    run_app(tmp_path, shell)
+    assert "hf_••••••••0000" in shown["state"] and "From your shell" in shown["state"]
+    assert shown["buttons"] == []  # set outside QuantPilot: changed there

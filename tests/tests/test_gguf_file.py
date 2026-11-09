@@ -132,6 +132,7 @@ def real_header(stem: str) -> tuple[GgufHeader, int]:
         "jamba-reasoning-3b-Q4_K_M",
         "Falcon-H1-0.5B-Instruct-IQ1_M",
         "LFM2-350M-Q4_0",
+        "Qwen3.5-0.8B-Q8_0",
     ],
 )
 def test_tensor_table_adds_up_to_the_file_size(stem):
@@ -483,3 +484,16 @@ def test_llama_cpps_fit_works_from_cudas_own_free_figure():
         laptop = nvidia_pc(card, ram_gb=16, cuda_free_mib=7106, windows=True)
         (row,) = quant_options(snap, laptop, 131072)
         assert row.gpu_layers == 14
+
+
+def test_qwen35_layers_follow_its_recurrent_layer_list_without_the_prediction_block():
+    header, _ = real_header("Qwen3.5-0.8B-Q8_0")
+    assert (header.get("block_count"), header.get("nextn_predict_layers")) == (25, 1)
+    config = config_from_gguf(header)
+    assert config["num_hidden_layers"] == header.layers == 24  # llama.cpp's n_layer
+    kinds = config["layer_types"]
+    assert kinds.count("linear_attention") == 18 and kinds[3::4] == ["full_attention"] * 6
+    # llama.cpp does not load block 24: 15 tensors, 20.74 MiB in its log.
+    dropped = [t for t in header.tensors if t not in header.loaded().tensors]
+    assert len(dropped) == 15 and {t.name.split(".")[1] for t in dropped} == {"24"}
+    assert round(sum(t.nbytes for t in dropped) / 2**20, 2) == 20.74

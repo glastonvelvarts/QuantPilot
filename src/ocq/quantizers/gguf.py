@@ -10,6 +10,7 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from ocq.quantizers.base import model_slug, model_weights_dir
@@ -63,7 +64,10 @@ class GGUFQuantizer(Quantizer):
         precision = intermediate_precision(plan.model.stored_precision)
         full_precision = workspace / f"model-{precision}.gguf"
 
-        print(f"Converting to GGUF ({precision}, the precision the model is stored in) ...")
+        print(
+            f"Converting to GGUF ({precision}, the precision the model is stored in) ...",
+            flush=True,
+        )
         run_tool(
             [
                 sys.executable,
@@ -75,6 +79,7 @@ class GGUFQuantizer(Quantizer):
                 precision,
             ],
             log=workspace / "convert.log",
+            progress=True,
         )
 
         artifact_dir = plan.output_dir / "artifact"
@@ -85,6 +90,7 @@ class GGUFQuantizer(Quantizer):
         run_tool(
             [str(self.quantize_tool), str(full_precision), str(self.artifact), gguf_type],
             log=workspace / "quantize.log",
+            progress=True,
         )
         full_precision.unlink()
 
@@ -208,18 +214,29 @@ def has_openmp_runtime() -> bool:
         return False
 
 
-def run_tool(command: list[str], log: Path, env: dict[str, str] | None = None) -> tuple[str, str]:
+# How far a tool is: tqdm's "45%|" (the converter's Writing bar) or llama-quantize's "[ 12/ 335]".
+PROGRESS_LINE = re.compile(r"\d{1,3}%\||^\[\s*\d+/\s*\d+\]")
+
+
+def run_tool(
+    command: list[str], log: Path, env: dict[str, str] | None = None, progress: bool = False
+) -> tuple[str, str]:
     """Run a command quietly, keep its output in a log file, and fail with the last lines of it.
-    env: variables to set on top of this process's environment."""
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdin=subprocess.DEVNULL,
-        env={**os.environ, "PYTHONUTF8": "1", **(env or {})},
-    )
+    env: variables to set on top of this process's environment. progress: show the tool's
+    progress meter as one line that redraws itself (the app turns it into its progress bar)."""
+    environment = {**os.environ, "PYTHONUTF8": "1", **(env or {})}
+    if progress:
+        completed = run_showing_progress(command, environment)
+    else:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            env=environment,
+        )
     log.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
         library = missing_library(completed.stdout + completed.stderr, completed.returncode)
@@ -228,3 +245,45 @@ def run_tool(command: list[str], log: Path, env: dict[str, str] | None = None) -
         last_lines = "\n".join((completed.stderr or completed.stdout).strip().splitlines()[-15:])
         raise OcqError(f"{log.stem} step failed, full log in {log}\n{last_lines}")
     return completed.stdout, completed.stderr
+
+
+def run_showing_progress(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    """subprocess.run with both outputs captured, printing their progress lines as they come."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    kept: dict[str, list[str]] = {"out": [], "err": []}
+    shown = threading.Event()
+
+    def read(stream, into: list[str]) -> None:
+        pending = ""
+        for chunk in iter(lambda: stream.read(512), ""):
+            into.append(chunk)
+            *done, pending = re.split(r"[\r\n]", pending + chunk)
+            show([part for part in done if PROGRESS_LINE.search(part)])
+        show([pending] if PROGRESS_LINE.search(pending) else [])  # the last state, unended
+
+    def show(moving: list[str]) -> None:
+        if moving:  # only the newest state: the older ones in this read are already past
+            print("\r" + moving[-1].strip()[:160], end="", flush=True)
+            shown.set()
+
+    readers = [
+        threading.Thread(target=read, args=(process.stdout, kept["out"]), daemon=True),
+        threading.Thread(target=read, args=(process.stderr, kept["err"]), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    code = process.wait()
+    for reader in readers:
+        reader.join()
+    if shown.is_set():
+        print("\r\x1b[2K", end="", flush=True)  # clear the meter line
+    return subprocess.CompletedProcess(command, code, "".join(kept["out"]), "".join(kept["err"]))
