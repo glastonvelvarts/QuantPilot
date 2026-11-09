@@ -203,7 +203,15 @@ STEPS = (
     ("Measure speed", re.compile(r"^Measuring the speed")),
     ("Check", re.compile(r"^Checking the result")),
 )
-STEP_START = re.compile("|".join(starts.pattern.removeprefix("^") for _, starts in STEPS))
+# Steps of a benchmark (printed by bench.run_benchmark).
+BENCH_STEPS = (
+    ("Measure speed", re.compile(r"^Measuring the speed")),
+    ("Measure quality", re.compile(r"^Measuring the quality")),
+    ("Compare", re.compile(r"^Comparing with the original")),
+)
+STEP_START = re.compile(
+    "|".join(starts.pattern.removeprefix("^") for _, starts in (*STEPS, *BENCH_STEPS))
+)
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 PERCENT = re.compile(r"(\d{1,3})%\|")
 COUNT = re.compile(r"^\[\s*(\d+)/\s*(\d+)\]|\b(\d+)/(\d+) \[")  # llama-quantize, tqdm
@@ -229,11 +237,12 @@ def meter_progress(line: str) -> tuple[float | None, str]:
 
 
 class StepTracker(Static):
-    """The steps of a quantization in a row: done ones with a tick and their time, the
-    current one with a spinner and a running timer, the rest waiting."""
+    """The steps of a job in a row (a quantization's by default): done ones with a tick and
+    their time, the current one with a spinner and a running timer, the rest waiting."""
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, steps: tuple = STEPS, **kwargs: Any) -> None:
         super().__init__("", **kwargs)
+        self.steps = steps
         self.current = -1
         self.times: list[float] = []  # seconds each finished step took
         self.started = 0.0
@@ -249,7 +258,7 @@ class StepTracker(Static):
 
     def heard(self, line: str) -> bool:
         """Moves to the step this line starts, if it starts one. True when it did."""
-        for index, (_, starts) in enumerate(STEPS):
+        for index, (_, starts) in enumerate(self.steps):
             if starts.search(line) and index > self.current:
                 self.advance(index)
                 return True
@@ -266,7 +275,7 @@ class StepTracker(Static):
 
     def finish(self, ok: bool) -> None:
         if self.current >= 0 and ok:
-            self.advance(len(STEPS))
+            self.advance(len(self.steps))
         self.failed = not ok
         if self.timer:
             self.timer.pause()
@@ -282,7 +291,7 @@ class StepTracker(Static):
 
     def render_steps(self) -> Text:
         text = Text()
-        for index, (name, _) in enumerate(STEPS):
+        for index, (name, _) in enumerate(self.steps):
             if index:
                 text.append("  ─  ", "dim")
             if index < len(self.times):
@@ -352,15 +361,14 @@ class ModelActions(ModalScreen[str | None]):
     def __init__(self, title: str, gguf: bool) -> None:
         super().__init__()
         self.title_text = title
-        self.gguf = gguf
+        self.actions = [("Check how it runs", "check"), ("Quantize", "quantize")]
+        if gguf:  # a file llama.cpp runs: its speed can be measured, its memory checked
+            self.actions += [("Benchmark", "bench"), ("Verify", "verify")]
 
     def compose(self) -> ComposeResult:
-        actions = [Option("Check how it runs", id="check"), Option("Quantize", id="quantize")]
-        if self.gguf:
-            actions.append(Option("Verify", id="verify"))
         with Vertical(classes="dialog"):
             yield Label(escape(self.title_text), classes="dialog-title")
-            yield OptionList(*actions)
+            yield OptionList(*(Option(label, id=key) for label, key in self.actions))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option.id)

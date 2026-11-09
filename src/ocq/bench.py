@@ -268,3 +268,183 @@ def fitted(model: Path, hardware: HardwareProfile):
     snapshot = resolve_model(str(model), hardware, None, 2048, "f16", use_llmfit=False)
     (option,) = quant_options(snapshot, hardware, 2048, "f16")
     return option, snapshot
+
+
+# The whole benchmark, for the CLI and the app alike -----------------------------------------
+
+
+class SpeedNotMeasured(OcqError):
+    """The model is one only transformers runs: its quality can be measured, not its speed."""
+
+
+SPEED_STEP = "Measuring the speed"
+QUALITY_STEP = "Measuring the quality"
+COMPARE_STEP = "Comparing with the original"
+
+
+@dataclass
+class BenchOutcome:
+    """What ocq bench (and the app's Benchmark page) measured."""
+
+    model_id: str  # the name it is saved under: the repo a QuantPilot file was made from
+    label: str
+    option: QuantOption
+    device: str = ""
+    speed: BenchReport | None = None  # None for a model only transformers runs
+    runs: int = 0  # runs of this setup on this PC, this one included
+    quality: object | None = None  # quality.Perplexity
+    piece: object | None = None  # quality.Slice
+    kept: object | None = None  # quality.MeasuredKept
+    note: str = ""  # why there is nothing to compare with, or that this is the original
+
+
+def run_benchmark(
+    ref: str,
+    hardware: HardwareProfile,
+    *,
+    piece=None,
+    context: int = 4096,
+    kv_cache: str = "f16",
+    llmfit_bin: str | None = None,
+    on_speed=None,
+) -> BenchOutcome:
+    """Speed (GGUF), then quality when piece (a quality.Slice) is given, then what the format
+    keeps against the original. Prints a line as each step starts. on_speed(outcome): called
+    once the speed is in, so the CLI can show it before the longer quality measurement."""
+    from ocq import quality
+    from ocq.local_model import cached_hf_model, parse_model_ref
+    from ocq.model_analyzer import active_params_b, quant_options, resolve_model
+    from ocq.quantizers.llama_cpp import tool_path
+
+    path = parse_model_ref(ref)[1] or cached_hf_model(ref)
+    if path is None:
+        raise OcqError(
+            f"{ref} is not on this PC. Benchmarks measure a model already here: a .gguf file or "
+            "folder, an Ollama model, or a model folder. To measure a Hugging Face model, "
+            "quantize it first."
+        )
+    snapshot = resolve_model(ref, hardware, llmfit_bin, context, kv_cache)
+    if not snapshot.gguf_files:
+        if piece is None:
+            raise SpeedNotMeasured(
+                "Its speed can be measured for GGUF models (llama.cpp) only. Measure its "
+                "quality instead."
+            )
+        return transformers_quality(snapshot, path, piece, hardware)
+
+    if path.is_dir():
+        path = path / snapshot.gguf_files[0][0]
+    model_id = made_from(path) or snapshot.model_id
+    suite = STANDARD
+    prompts = prompts_for(suite, snapshot.context_length)
+    planned = max(context, max(prompts) + suite.tokens)  # llama-bench sizes the context so
+    (option,) = quant_options(snapshot, hardware, planned, kv_cache)
+    place, device = placement(option)
+    print(f"{SPEED_STEP} ({suite.repeats} runs of each test) ...", flush=True)
+    report = llama_bench(
+        tool_path("llama-bench", hardware),
+        path,
+        suite,
+        architecture=snapshot.architecture,
+        kv_cache=kv_cache,
+        place=place,
+        log=measurements.STORE.parent / "bench.log",
+        model_context=snapshot.context_length,
+    )
+    save(
+        report, suite, device=device, read_gb=file_gb(snapshot) * snapshot.read_fraction,
+        model=model_id, label=option.label, context=planned, kv_cache=kv_cache,
+        hardware=hardware, file=path.name, active_params_b=active_params_b(snapshot),
+    )  # fmt: skip
+    runs = len(
+        measurements.runs_of(
+            model_id, option.label, LLAMA_CPP, hardware, measurements.placed(device)
+        )
+    )
+    outcome = BenchOutcome(model_id, option.label, option, device, report, runs, piece=piece)
+    if on_speed:
+        on_speed(outcome)
+    if piece is None:
+        return outcome
+
+    text = quality.wikitext()
+    reading = report.prompt_speeds.get(min(report.prompt_speeds, default=0))
+    chunks = piece.chunks or 600
+    minutes = chunks * quality.CHUNK / reading / 60 if reading else None
+    about = "a few minutes" if minutes is None else (
+        f"about {minutes:.0f} min" if minutes >= 1 else "under a minute"
+    )  # fmt: skip
+    print(f"{QUALITY_STEP} on {quality.DATASET} ({about}) ...", flush=True)
+    outcome.quality = quality.llama_perplexity(
+        tool_path("llama-perplexity", hardware),
+        path,
+        text,
+        piece,
+        place=place,
+        kv_cache=kv_cache,
+        env=llama_cache_env(snapshot.architecture, kv_cache),
+        log=quality.STORE.parent / "perplexity.log",
+        build=report.build,
+    )
+    quality.record(
+        outcome.quality, piece, model=model_id, label=option.label, kv_cache=kv_cache,
+        file=path.name, hardware=hardware, device=device,
+    )  # fmt: skip
+    compare(outcome, hardware)
+    return outcome
+
+
+def transformers_quality(snapshot, path: Path, piece, hardware: HardwareProfile) -> BenchOutcome:
+    """Perplexity of a model transformers runs: the original, or AWQ, GPTQ, bitsandbytes."""
+    import importlib.util
+
+    from ocq import quality
+    from ocq.model_analyzer import quant_options
+
+    if not (importlib.util.find_spec("torch") and importlib.util.find_spec("transformers")):
+        raise OcqError("Measuring this model's quality needs torch and transformers installed.")
+    stored = next(
+        o for o in quant_options(snapshot, hardware, 4096, "f16") if o.row_kind == "stored"
+    )
+    label = stored.label.removesuffix(" (as stored)").strip()
+    model_id = made_from(path) or snapshot.model_id
+    device = "gpu" if hardware.has_cuda else "cpu"
+    where = "the NVIDIA GPU" if hardware.has_cuda else "the CPU"
+    print(f"{QUALITY_STEP} on {quality.DATASET}, in transformers on {where} ...", flush=True)
+    try:
+        result = quality.transformers_perplexity(path, quality.wikitext(), piece)
+    except OcqError:
+        raise
+    except Exception as exc:  # the model's own code, CUDA kernels, out of memory
+        raise OcqError(f"transformers could not measure it: {type(exc).__name__}: {exc}") from exc
+    quality.record(result, piece, model=model_id, label=label, hardware=hardware, device=device)
+    outcome = BenchOutcome(model_id, label, stored, device, quality=result, piece=piece)
+    compare(outcome, hardware)
+    return outcome
+
+
+def compare(outcome: BenchOutcome, hardware: HardwareProfile) -> None:
+    """What the format keeps against the original, measuring the original first (once, from
+    the Hugging Face cache) when it has not been."""
+    from ocq import quality
+    from ocq.local_model import cached_hf_model
+
+    if outcome.label.upper() in quality.FULL_PRECISION:
+        outcome.note = "original"
+        return
+    print(f"{COMPARE_STEP} ...", flush=True)
+    model_id = outcome.model_id
+    repo = model_id if not model_id.startswith(("local/", "ollama/")) else None
+    if (
+        repo
+        and quality.reference_for(repo, outcome.piece.name) is None
+        and cached_hf_model(repo) is not None
+    ):
+        print(f"Measuring the original of {repo} once, from the Hugging Face cache ...", flush=True)
+        try:
+            make_reference(repo, hardware, outcome.piece, quality.STORE.parent)
+        except OcqError as exc:
+            outcome.note = f"Could not measure the original: {exc}"
+    outcome.kept = quality.measured_kept(model_id, outcome.label)
+    if outcome.kept is None and not outcome.note:
+        outcome.note = "The original weights of this model are not on this PC to compare with."

@@ -157,7 +157,7 @@ def test_a_model_transformers_runs_needs_quality_asked_for(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "detect_hardware", lambda _bin: nvidia_pc(RTX_3090))
     result = CliRunner().invoke(cli.app, ["bench", str(folder)], env={"COLUMNS": "200"})
     assert result.exit_code == 1
-    assert "add --quality to measure its quality" in result.output
+    assert "Measure its quality instead. Add --quality." in " ".join(result.output.split())
 
     measured = []
 
@@ -319,13 +319,12 @@ def test_ocq_bench_quality_says_how_much_the_format_keeps(tmp_path, monkeypatch)
 
     # The original is not on this PC (not in the Hugging Face cache): nothing to compare with.
     result = CliRunner().invoke(cli.app, args, env={"COLUMNS": "200"})
-    assert "the original weights of this model are not on this PC" in result.output
+    assert "The original weights of this model are not on this PC" in result.output
 
     save("BF16", 16.6079, model="org/tiny")
     result = CliRunner().invoke(cli.app, args, env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
     assert (
         "Q8_0 keeps about 80% of the model's quality (perplexity 17.2720 vs 16.6079 for the "
-        "original, BF16)"
-        in " ".join(result.output.split())
+        "original, BF16)" in " ".join(result.output.split())
     )

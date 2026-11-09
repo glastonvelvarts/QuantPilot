@@ -36,6 +36,7 @@ from ocq.model_analyzer import QUANTIZED_LEVELS
 from ocq.tui import words
 from ocq.tui.banner import TAGLINE
 from ocq.tui.widgets import (
+    BENCH_STEPS,
     Action,
     Card,
     Confirm,
@@ -823,6 +824,7 @@ class QuantizePage(Page):
                 yield Static("", id="result-text")
                 with Horizontal(classes="card-actions"):
                     yield Action("Check it", variant="primary", id="check-made")
+                    yield Action("Benchmark it", id="bench-made")
                     yield Action("Verify it", id="verify-made")
             yield Static("", classes="problem")
 
@@ -959,6 +961,11 @@ class QuantizePage(Page):
         if self.made:
             self.qp.open_with_model("check", str(self.made))
 
+    @on(Button.Pressed, "#bench-made")
+    def bench_made(self) -> None:
+        if self.made:  # speed and quality: what the new file keeps of the original
+            self.qp.open_bench(str(self.made), "fixed")
+
     @on(Button.Pressed, "#verify-made")
     def verify_made(self) -> None:
         if self.made:
@@ -1079,6 +1086,7 @@ class QuantizePage(Page):
         self.made = Path(made) if made_ok else None
         self.query_one("#check-made").display = made_ok
         self.query_one("#verify-made").display = made_ok and made.endswith(".gguf")
+        self.query_one("#bench-made").display = made_ok and made.endswith(".gguf")
         # The keys need a visible place to be: the result's first action, else Review.
         self.query_one("#check-made" if made_ok else "#review", Button).focus()
 
@@ -1225,6 +1233,256 @@ def check_value(value: float, unit: str) -> str:
     if unit == "layers":
         return f"{value:,.0f}"
     return f"{value:,.1f} MB" if value < 10 else f"{value:,.0f} MB"
+
+
+# Benchmark --------------------------------------------------------------------------------
+
+# What to measure: speed only, or speed and quality (on the fixed slice, or the whole text).
+MEASURES = (
+    ("Speed", ""),
+    ("Speed and quality", "fixed"),  # the first 40 chunks: a few minutes
+    ("Quality, whole text", "full"),  # every chunk: long
+)
+PLACED = {
+    "gpu": "GPU",
+    "cpu": "CPU",
+    "gpu+cpu": "GPU and CPU",
+    "gpu+experts": "GPU, experts in RAM",
+}
+HISTORY_ROWS = 12
+
+
+class BenchPage(Page):
+    TITLE = "Benchmark"
+
+    def compose_body(self) -> ComposeResult:
+        with Grid(classes="form"):
+            yield field("Model", ModelField(gguf_only=True), "wide")
+            yield field("Measure", Dropdown(MEASURES, value="", id="measure"))
+        with Horizontal(classes="actions"):
+            yield Action("Benchmark", variant="primary", id="bench")
+        with Results(classes="results"):
+            with Vertical(id="running"):
+                yield Static("", id="stage")
+                yield StepTracker(BENCH_STEPS, id="steps")
+                yield ProgressBar(
+                    id="step-bar", show_eta=False, show_percentage=False, gradient=BAR_GRADIENT
+                )
+                yield Static("", id="step-detail")
+                yield ProgressLog(id="progress")
+            yield Static("", id="verdict")
+            yield RowTable(cursor_type="row", id="measured")
+            yield Static("", classes="problem")
+            yield Static("", id="history-title", classes="section-title")
+            yield RowTable(cursor_type="row", id="speed-history")
+            yield RowTable(cursor_type="row", id="quality-history")
+
+    def on_mount(self) -> None:
+        for selector in ("#running", "#verdict", "#measured", ".problem"):
+            self.query_one(selector).display = False
+
+    def opened(self) -> None:
+        self.show_history("")
+
+    def set_measure(self, value: str) -> None:
+        self.query_one("#measure", Dropdown).value = value
+
+    @on(Button.Pressed, "#bench")
+    def run(self) -> None:
+        ref = self.model()
+        if not ref:
+            return
+        if self.qp.busy:
+            self.notify("Another job is running.", severity="warning")
+            return
+        self.on_mount()
+        measure = self.value("measure") or ""
+        steps = self.query_one(StepTracker)
+        # Only the steps this benchmark goes through.
+        steps.steps = BENCH_STEPS if measure else BENCH_STEPS[:1]
+        self.query_one("#running").display = True
+        for selector in ("#stage", "#steps", "#step-bar", "#step-detail", "#progress"):
+            self.query_one(selector).display = True
+        stage = self.query_one("#stage", Static)
+        stage.update(Text(f"Benchmarking {ref} ...", "bold"))
+        progress = self.query_one(ProgressLog)
+        progress.clear()
+        bar = self.query_one("#step-bar", ProgressBar)
+        detail = self.query_one("#step-detail", Static)
+        bar.update(total=None, progress=0)
+        detail.update("")
+        steps.start()
+
+        def step(line: str) -> None:
+            if steps.heard(line):
+                bar.update(total=None, progress=0)
+                detail.update("")
+            stage.update(Text.assemble((f"Benchmarking {ref}\n", "bold"), (line[:120], "dim")))
+
+        def meter(line: str) -> None:
+            percent, done = meter_progress(line)
+            if percent is not None:
+                bar.update(total=100, progress=percent)
+            shown = [f"{percent:.0f}%" if percent is not None else "", done]
+            if any(shown):
+                detail.update("  ·  ".join(part for part in shown if part))
+
+        progress.on_line = step
+        progress.on_meter = meter
+        self.qp.job_started("Benchmarking")
+        self.app.begin_capture_print(progress)
+        self.measure(ref, measure)
+
+    @background("bench")
+    def measure(self, ref: str, measure: str) -> None:
+        from ocq import bench, quality
+
+        piece = {"fixed": quality.FIXED, "full": quality.FULL}.get(measure)
+        settings = self.qp.settings
+        try:
+            outcome = bench.run_benchmark(
+                ref, self.qp.hardware(), piece=piece, context=settings.context,
+                kv_cache=settings.kv_cache, llmfit_bin=self.qp.llmfit_bin,
+            )  # fmt: skip
+        except Exception as exc:  # the app must stay up whatever happens
+            message = str(exc) if isinstance(exc, OcqError) else f"{type(exc).__name__}: {exc}"
+            self.app.call_from_thread(self.finished, None, message)
+            return
+        self.app.call_from_thread(self.finished, outcome, "")
+
+    def finished(self, outcome, problem: str) -> None:
+        progress = self.query_one(ProgressLog)
+        self.app.end_capture_print(progress)
+        progress.flush()
+        ok = outcome is not None
+        self.query_one(StepTracker).finish(ok)
+        self.qp.job_finished("Benchmarked" if ok else "Benchmark failed", ok)
+        for selector in ("#stage", "#step-bar", "#step-detail", "#progress"):
+            self.query_one(selector).display = False  # the steps and their times stay
+        if not ok:
+            self.failed(problem)
+            return
+        self.query_one("#verdict", Static).update(bench_verdict(outcome))
+        table = self.query_one("#measured", DataTable)
+        table.clear(columns=True)
+        table.add_columns("", "Measured", "Expected")
+        for row in bench_rows(outcome):
+            table.add_row(*row)
+        for selector in ("#verdict", "#measured"):
+            self.query_one(selector).display = True
+        self.show_history(outcome.model_id)
+        table.focus()
+
+    def show_history(self, model_id: str) -> None:
+        """This PC's runs, newest first: of one model after a benchmark, else of all."""
+        speed = self.query_one("#speed-history", DataTable)
+        kept = self.query_one("#quality-history", DataTable)
+        speeds, qualities = history_rows(model_id)
+        title = self.query_one("#history-title", Static)
+        if not speeds and not qualities:
+            title.update(Text("Nothing benchmarked on this PC yet.", "dim"))
+        else:
+            title.update(Text("History on this PC" + (", this model" if model_id else ""), "bold"))
+        speed.clear(columns=True)
+        speed.add_columns("When", "Model", "Format", "Where", "Writing", "First token")
+        for row in speeds:
+            speed.add_row(*row)
+        speed.display = bool(speeds)
+        kept.clear(columns=True)
+        kept.add_columns("When", "Model", "Format", "Perplexity", "Quality kept")
+        for row in qualities:
+            kept.add_row(*row)
+        kept.display = bool(qualities)
+
+
+def bench_verdict(outcome) -> Text:
+    from ocq import measurements
+
+    text = Text()
+    text.append(f"{outcome.label}", "bold")
+    if outcome.speed is not None:
+        where = PLACED.get(measurements.placed(outcome.device), outcome.device)
+        build = f" {outcome.speed.build}" if outcome.speed.build else ""
+        text.append(f"  ·  {where}  ·  llama.cpp{build}", "dim")
+        runs = outcome.runs
+        text.append(f"\nSaved: {runs} run{'s' * (runs != 1)} of this setup on this PC", "dim")
+    else:
+        text.append("  ·  transformers", "dim")
+    if outcome.note and outcome.note != "original":
+        text.append(f"\n{words.plain(outcome.note)}", "yellow")
+    return text
+
+
+def bench_rows(outcome) -> list[tuple]:
+    """Measured against what QuantPilot expected, in the app's words."""
+    from ocq import measurements
+    from ocq.recommend import GGUF_PPL_INCREASE, quality_kept
+
+    option, rows = outcome.option, []
+    speed = outcome.speed
+    if speed is not None:
+        expected = (
+            f"about {option.estimated_tps:.0f}"
+            if option.speed_basis == measurements.MEASURED
+            else f"up to {option.estimated_tps:.0f}"
+        )
+        rows.append(("Writing", f"{speed.tokens_per_second:,.1f} tok/s", expected))
+        for length in sorted(speed.prompt_speeds):
+            rows.append(
+                (f"Reading {length:,} tokens", f"{speed.prompt_speeds[length]:,.0f} tok/s", "")
+            )
+        for length in sorted(speed.prompt_speeds):
+            guess = ""
+            if length == min(speed.prompt_speeds) and option.prompt_tps and option.estimated_tps:
+                guess = f"about {length / option.prompt_tps + 1 / option.estimated_tps:.2f} s"
+            seconds = speed.first_token_seconds(length)
+            rows.append((f"First token after {length:,}", f"{seconds:.2f} s", guess))
+    if outcome.quality is not None:
+        rows.append(("Perplexity", f"{outcome.quality.value:.2f}", "lower is better"))
+        label = outcome.label.upper()
+        estimate = f"about {quality_kept(label):.0%}" if label in GGUF_PPL_INCREASE else ""
+        if outcome.note == "original":
+            rows.append(("Quality kept", "the original", ""))
+        elif outcome.kept is not None:
+            rows.append(("Quality kept", f"{outcome.kept.kept:.0%}", estimate))
+    return rows
+
+
+def history_rows(model_id: str) -> tuple[list[tuple], list[tuple]]:
+    from ocq import measurements, quality
+
+    def matches(entry: dict) -> bool:
+        if not model_id:
+            return True
+        names = (str(entry.get("model", "")), f"local/{entry.get('file', '')}")
+        return model_id.lower() in (name.lower() for name in names)
+
+    def when(entry: dict) -> str:  # 11-09 18:28: the month and day are enough here
+        return str(entry.get("date", ""))[5:16].replace("T", " ") or "earlier"
+
+    def name(entry: dict) -> str:  # SmolLM2-135M-Instruct, without who published it
+        return str(entry.get("model", "")).split("/")[-1] or "?"
+
+    speeds = []
+    for run in reversed(measurements.load()):
+        if not matches(run) or not run.get("label"):
+            continue
+        reading, writing = run.get("prompt_tps") or 0, run.get("tps") or 0
+        first = f"{512 / reading + 1 / writing:.2f} s" if reading and writing else ""
+        where = PLACED.get(measurements.placed(str(run.get("device", ""))), "")
+        speeds.append((when(run), name(run), run["label"], where, f"{writing:,.1f} tok/s", first))
+    qualities = []
+    for result in reversed(quality.load()):
+        if not matches(result):
+            continue
+        label = str(result.get("label", ""))
+        if label.upper() in quality.FULL_PRECISION:
+            kept = "the original"
+        else:
+            measured = quality.measured_kept(str(result.get("model", "")), label)
+            kept = f"{measured.kept:.0%}" if measured else ""
+        qualities.append((when(result), name(result), label, f"{result['ppl']:.2f}", kept))
+    return speeds[:HISTORY_ROWS], qualities[:HISTORY_ROWS]
 
 
 # Settings ---------------------------------------------------------------------------------

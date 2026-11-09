@@ -16,14 +16,12 @@ from ocq import measurements
 from ocq.engine import GGUF_TYPES
 from ocq.goals import goal_label
 from ocq.hardware import detect_hardware
-from ocq.model_analyzer import DEFAULT_CONTEXT, active_params_b, quant_options, resolve_model
+from ocq.model_analyzer import DEFAULT_CONTEXT, quant_options, resolve_model
 from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
-from ocq.runtimes import llama_cache_env
 from ocq.types import (
     KV_CACHE_TYPES,
-    LLAMA_CPP,
     Fact,
     FactKind,
     FitLevel,
@@ -433,203 +431,29 @@ def cmd_bench(
     """Run the standard benchmark on a model of this PC and save it to its benchmark history."""
     from ocq import bench
     from ocq import quality as measured_quality
-    from ocq.quantizers.llama_cpp import tool_path
 
     kv_cache = read_kv_cache(kv_cache)
-    piece = measured_quality.FULL if full else measured_quality.FIXED
-    quality = quality or full
+    piece = None
+    if quality or full:
+        piece = measured_quality.FULL if full else measured_quality.FIXED
+
+    def speed_in(outcome) -> None:
+        print_bench(outcome.speed, outcome.option, outcome.device, kv_cache, outcome.runs)
+
     try:
         hw = detect_hardware(llmfit_bin)
-        path = model_on_this_pc(model)
-        snapshot = resolve_model(model, hw, llmfit_bin, context, kv_cache)
-        if not snapshot.gguf_files:
-            if not quality:
-                raise OcqError(
-                    "ocq bench measures the speed of GGUF models (llama.cpp). For this one, "
-                    "add --quality to measure its quality."
-                )
-            bench_transformers_quality(snapshot, path, piece, hw)
-            return
-        if path.is_dir():
-            path = path / snapshot.gguf_files[0][0]
-        model_id = bench.made_from(path) or snapshot.model_id
-        option, device, place, report = bench_gguf_speed(snapshot, path, model_id, context,
-                                                          kv_cache, hw)  # fmt: skip
-        if quality:
-            text = measured_quality.wikitext()
-            reading = report.prompt_speeds.get(min(report.prompt_speeds, default=0))
-            chunks = piece.chunks or 600
-            if reading:
-                minutes = chunks * measured_quality.CHUNK / reading / 60
-                about = f"about {minutes:.0f} min" if minutes >= 1 else "under a minute"
-            else:
-                about = "a few minutes"
-            console.print(f"Measuring its quality on {measured_quality.DATASET} ({about}) ...")
-            result = measured_quality.llama_perplexity(
-                tool_path("llama-perplexity", hw),
-                path,
-                text,
-                piece,
-                place=place,
-                kv_cache=kv_cache,
-                env=llama_cache_env(snapshot.architecture, kv_cache),
-                log=Path(measured_quality.STORE).parent / "perplexity.log",
-                build=report.build,
-            )
-            measured_quality.record(
-                result, piece, model=model_id, label=option.label, kv_cache=kv_cache,
-                file=path.name, hardware=hw, device=device,
-            )  # fmt: skip
-            print_quality(result, piece)
-            compare_with_reference(model_id, option.label, piece, hw)
+        console.print(f"[bold]{escape(model)}[/bold]", highlight=False)
+        outcome = bench.run_benchmark(
+            model, hw, piece=piece, context=context, kv_cache=kv_cache,
+            llmfit_bin=llmfit_bin, on_speed=speed_in,
+        )  # fmt: skip
+    except bench.SpeedNotMeasured as exc:
+        raise fail(OcqError(f"{exc} Add --quality.")) from exc
     except OcqError as exc:
         raise fail(exc) from exc
-
-
-def model_on_this_pc(model: str) -> Path:
-    """The file or folder of a model on this PC: a path, ollama:name:tag, or a Hugging Face id
-    whose files are all in the Hugging Face cache already."""
-    from ocq.local_model import cached_hf_model, parse_model_ref
-
-    path = parse_model_ref(model)[1] or cached_hf_model(model)
-    if path is None:
-        raise OcqError(
-            f"{model} is not on this PC. ocq bench measures a model already here: a .gguf file "
-            "or folder, ollama:name:tag, or a model folder (ocq models lists them). To measure "
-            "a Hugging Face model, quantize it first with ocq optimize."
-        )
-    return path
-
-
-def bench_gguf_speed(snapshot, path: Path, model_id: str, context: int, kv_cache: str, hw):
-    """The standard suite, saved and printed. Returns the row it ran as, its placement and
-    the report."""
-    from ocq import bench
-    from ocq.quantizers.llama_cpp import tool_path
-
-    suite = bench.STANDARD
-    prompts = bench.prompts_for(suite, snapshot.context_length)
-    # The fit at the longest test, as llama-bench sizes the context to it.
-    planned = max(context, max(prompts) + suite.tokens)
-    (option,) = quant_options(snapshot, hw, planned, kv_cache)
-    place, device = bench.placement(option)
-    console.print(
-        f"[bold]{escape(snapshot.model_id)}[/bold] {option.label}: running the standard "
-        f"benchmark ({suite.repeats} runs of each test) ...",
-        highlight=False,
-    )
-    report = bench.llama_bench(
-        tool_path("llama-bench", hw),
-        path,
-        suite,
-        architecture=snapshot.architecture,
-        kv_cache=kv_cache,
-        place=place,
-        log=Path(measurements.STORE).parent / "bench.log",
-        model_context=snapshot.context_length,
-    )
-    placed = measurements.placed(device)
-    earlier = len(measurements.runs_of(model_id, option.label, LLAMA_CPP, hw, placed))
-    bench.save(
-        report,
-        suite,
-        device=device,
-        read_gb=bench.file_gb(snapshot) * snapshot.read_fraction,
-        model=model_id,
-        label=option.label,
-        context=planned,
-        kv_cache=kv_cache,
-        hardware=hw,
-        file=path.name,
-        active_params_b=active_params_b(snapshot),
-    )
-    print_bench(report, option, device, kv_cache, earlier + 1)
-    return option, device, place, report
-
-
-def bench_transformers_quality(snapshot, path: Path, piece, hw) -> None:
-    """Perplexity of a model transformers runs: the original, or AWQ, GPTQ, bitsandbytes."""
-    import importlib.util
-
-    from ocq import bench
-    from ocq import quality as measured_quality
-
-    if not (importlib.util.find_spec("torch") and importlib.util.find_spec("transformers")):
-        raise OcqError(
-            "Measuring this model's quality needs torch and transformers: uv sync --extra gguf"
-        )
-    stored = next(o for o in quant_options(snapshot, hw, 4096, "f16") if o.row_kind == "stored")
-    label = stored.label.removesuffix(" (as stored)").strip()
-    model_id = bench.made_from(path) or snapshot.model_id
-    where = "the NVIDIA GPU" if hw.has_cuda else "the CPU"
-    console.print(
-        f"[bold]{escape(snapshot.model_id)}[/bold] {label}: measuring its quality on "
-        f"{measured_quality.DATASET} in transformers, on {where} ...",
-        highlight=False,
-    )
-    try:
-        result = measured_quality.transformers_perplexity(path, measured_quality.wikitext(), piece)
-    except OcqError:
-        raise
-    except Exception as exc:  # the model's own code, CUDA kernels, out of memory
-        raise OcqError(f"transformers could not measure it: {type(exc).__name__}: {exc}") from exc
-    device = "gpu" if hw.has_cuda else "cpu"
-    measured_quality.record(result, piece, model=model_id, label=label, hardware=hw, device=device)
-    print_quality(result, piece)
-    compare_with_reference(model_id, label, piece, hw)
-
-
-def compare_with_reference(model_id: str, label: str, piece, hw) -> None:
-    """How much of the original's quality the format keeps, measuring the original first when
-    it has not been (from the Hugging Face cache, once)."""
-    from ocq import bench
-    from ocq import quality as measured_quality
-    from ocq.local_model import cached_hf_model
-
-    if label.upper() in measured_quality.FULL_PRECISION:
-        console.print(
-            "[dim]These are the original weights: the reference this model's formats are "
-            "compared with.[/dim]"
-        )
-        return
-    repo = model_id if not model_id.startswith(("local/", "ollama/")) else None
-    if (
-        repo
-        and measured_quality.reference_for(repo, piece.name) is None
-        and cached_hf_model(repo) is not None
-    ):
-        console.print(
-            f"Nothing to compare it with yet: measuring the original of {escape(repo)} once, "
-            "from the Hugging Face cache ...",
-            highlight=False,
-        )
-        try:
-            bench.make_reference(repo, hw, piece, Path(measured_quality.STORE).parent)
-        except OcqError as exc:
-            console.print(f"[yellow]Could not measure the original: {escape(str(exc))}[/yellow]")
-    kept = measured_quality.measured_kept(model_id, label)
-    if kept is None:
-        console.print(
-            "[dim]Nothing to compare it with: the original weights of this model are not on "
-            "this PC.[/dim]"
-        )
-        return
-    against = (
-        "the original"
-        if kept.reference_label.upper() != measured_quality.REFERENCE_FALLBACK
-        else "Q8_0, as the original does not fit in this PC's memory"
-    )
-    console.print(
-        f"[bold]Kept[/bold]         {label} keeps about {kept.kept:.0%} of the model's quality "
-        f"(perplexity {kept.perplexity:.4f} vs {kept.reference:.4f} for {against}, "
-        f"{kept.reference_label})",
-        highlight=False,
-    )
-    if not kept.same_device:
-        console.print(
-            "[dim]The two were measured on different devices (GPU and CPU), which round a "
-            "little differently.[/dim]"
-        )
+    if outcome.quality is not None:
+        print_quality(outcome.quality, outcome.piece)
+        print_kept(outcome)
 
 
 def print_quality(result, piece) -> None:
@@ -646,6 +470,37 @@ def print_quality(result, piece) -> None:
         "[dim]Formats of one model read exactly the same tokens, so their perplexities compare "
         "much more closely than the ± says. Saved to this PC's quality history.[/dim]"
     )
+
+
+def print_kept(outcome) -> None:
+    from ocq import quality as measured_quality
+
+    if outcome.note == "original":
+        console.print(
+            "[dim]These are the original weights: the reference this model's formats are "
+            "compared with.[/dim]"
+        )
+        return
+    kept = outcome.kept
+    if kept is None:
+        console.print(f"[dim]{escape(outcome.note)}[/dim]")
+        return
+    against = (
+        "the original"
+        if kept.reference_label.upper() != measured_quality.REFERENCE_FALLBACK
+        else "Q8_0, as the original does not fit in this PC's memory"
+    )
+    console.print(
+        f"[bold]Kept[/bold]         {outcome.label} keeps about {kept.kept:.0%} of the model's "
+        f"quality (perplexity {kept.perplexity:.4f} vs {kept.reference:.4f} for {against}, "
+        f"{kept.reference_label})",
+        highlight=False,
+    )
+    if not kept.same_device:
+        console.print(
+            "[dim]The two were measured on different devices (GPU and CPU), which round a "
+            "little differently.[/dim]"
+        )
 
 
 def print_bench(report, option, device: str, kv_cache: str, runs: int) -> None:
