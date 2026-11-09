@@ -328,3 +328,16 @@ def test_ocq_bench_quality_says_how_much_the_format_keeps(tmp_path, monkeypatch)
         "Q8_0 keeps about 80% of the model's quality (perplexity 17.2720 vs 16.6079 for the "
         "original, BF16)" in " ".join(result.output.split())
     )
+
+
+def test_without_torch_the_quality_of_a_transformers_model_says_what_it_needs(monkeypatch):
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a: None if name == "torch" else real_find_spec(name, *a),
+    )
+    with pytest.raises(OcqError, match="needs torch and transformers installed"):
+        quality.transformers_perplexity(Path("my-model"), Path("wiki.test.raw"), quality.FIXED)

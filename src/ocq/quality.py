@@ -162,6 +162,10 @@ def transformers_perplexity(model_dir: Path, text: Path, piece: Slice) -> Perple
     """The same measurement in transformers: the original model in 16 bits, and the formats
     vLLM and transformers run (AWQ, GPTQ, NVFP4, bitsandbytes), on an NVIDIA GPU when there
     is one."""
+    import importlib.util
+
+    if not (importlib.util.find_spec("torch") and importlib.util.find_spec("transformers")):
+        raise OcqError("Measuring this model's quality needs torch and transformers installed.")
     import torch
     import transformers
     from transformers import AutoModelForCausalLM, AutoTokenizer

@@ -396,13 +396,9 @@ def run_benchmark(
 
 def transformers_quality(snapshot, path: Path, piece, hardware: HardwareProfile) -> BenchOutcome:
     """Perplexity of a model transformers runs: the original, or AWQ, GPTQ, bitsandbytes."""
-    import importlib.util
-
     from ocq import quality
     from ocq.model_analyzer import quant_options
 
-    if not (importlib.util.find_spec("torch") and importlib.util.find_spec("transformers")):
-        raise OcqError("Measuring this model's quality needs torch and transformers installed.")
     stored = next(
         o for o in quant_options(snapshot, hardware, 4096, "f16") if o.row_kind == "stored"
     )
