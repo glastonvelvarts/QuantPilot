@@ -4,6 +4,10 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Changed
+
+- README: how to open the app, for each way of installing QuantPilot (`ocq`, `uvx quantpilot`, `uv run ocq`).
+
 ## [1.5.0] - 2026-11-09
 
 The first release on PyPI: `uv tool install quantpilot`.
