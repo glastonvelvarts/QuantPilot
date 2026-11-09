@@ -17,9 +17,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from ocq.engine import calibration_fits_in_ram
 from ocq.model_analyzer import quant_options, resolve_model
 from ocq.model_size import kv_value_bytes
-from ocq.types import HardwareProfile, ModelSnapshot, OcqError, QuantOption
+from ocq.plan import free_disk_gb
+from ocq.quantizers.llama_cpp import TAG as LLAMA_CPP_TAG
+from ocq.quantizers.llama_cpp import converter_architectures
+from ocq.types import (
+    VLLM,
+    HardwareProfile,
+    ModelSnapshot,
+    OcqError,
+    QuantAlgorithm,
+    QuantOption,
+)
 
 
 class Objective(str, Enum):
@@ -129,6 +140,7 @@ class Candidate:
     context: int
     kv_cache: str
     local: bool  # already on this PC; False means it has to be downloaded first
+    model: ModelSnapshot = field(compare=False, repr=False)  # the facts the row was sized from
     # QuantPilot has to make this file first. False for files as published or as on disk.
     quantize: bool = False
     tags: frozenset[str] = frozenset()  # what the model is made for (CODER, REASONING)
@@ -348,6 +360,7 @@ def expand(
                     context=context,
                     kv_cache=kv_cache,
                     local=source.local,
+                    model=snapshot,
                     quantize=not published and option.row_kind != "stored",
                     tags=source.tags,
                 )
@@ -393,3 +406,172 @@ def generate_candidates(
         except OcqError as exc:
             unread.append((source.label, str(exc)))
     return candidates, unread
+
+
+# Hard limits (6C) ---------------------------------------------------------------------------
+# A candidate that breaks one cannot run on this PC, whatever it scores, so it is rejected
+# before ranking, with every reason in plain words. Each rule is one QuantPilot already
+# applies elsewhere (fit_at, the quantizers' checks, the plan's warnings); none is new.
+
+MEMORY = "memory"
+RUNTIME = "runtime"
+CONTEXT = "context"
+ARCHITECTURE = "architecture"
+QUANTIZATION = "quantization"
+DISK = "disk"
+
+CALIBRATED = (QuantAlgorithm.AWQ.value, QuantAlgorithm.GPTQ.value, QuantAlgorithm.NVFP4.value)
+NEEDS_NVIDIA = (QuantAlgorithm.BNB.value, QuantAlgorithm.NVFP4.value)  # to run, not to make
+
+
+def is_bnb(candidate: Candidate) -> bool:
+    stored = str(candidate.model.facts.quantization.value or "")
+    return candidate.option.row_kind == QuantAlgorithm.BNB.value or (
+        candidate.option.row_kind == "stored" and stored.startswith("BNB")
+    )
+
+
+def supports_runtime(candidate: Candidate, hardware: HardwareProfile) -> Check:
+    """The runtime runs on this PC at all."""
+    runtime, row_kind = candidate.runtime, candidate.option.row_kind
+    problem = ""
+    if runtime == VLLM and not hardware.has_cuda:
+        where = "a Mac" if hardware.apple_silicon else "this PC"
+        problem = f"vLLM needs an NVIDIA GPU, and {where} has none."
+    elif runtime == VLLM and hardware.os_name == "Windows":
+        problem = "vLLM does not run on Windows itself, only in WSL2 or on Linux."
+    elif (is_bnb(candidate) or row_kind in NEEDS_NVIDIA) and not hardware.has_cuda:
+        name = "bitsandbytes" if is_bnb(candidate) else "NVFP4"
+        problem = f"{name} needs an NVIDIA GPU, and this PC has none."
+    elif candidate.model.is_mlx and not hardware.apple_silicon:
+        problem = "MLX models run only on Apple Silicon Macs."
+    return Check(RUNTIME, not problem, problem or f"{runtime} runs on this PC")
+
+
+def fits_memory(candidate: Candidate) -> Check:
+    option = candidate.option
+    used = f"{option.memory_required_gb:.1f} GB"
+    if option.runnable:
+        return Check(MEMORY, True, f"needs {used} of {option.memory_available_gb:.1f} GB free")
+    if option.note:  # vLLM's own reason, such as its share of the GPU not being free
+        return Check(MEMORY, False, option.note)
+    return Check(
+        MEMORY, False, f"Needs {used}; only {option.memory_available_gb:.1f} GB is free for it."
+    )
+
+
+def supports_context(candidate: Candidate) -> Check:
+    longest = candidate.model.context_length
+    if longest and candidate.context > longest:
+        return Check(
+            CONTEXT,
+            False,
+            f"Holds up to {longest:,} tokens of context; {candidate.context:,} were asked for.",
+        )
+    return Check(CONTEXT, True, f"holds {candidate.context:,} tokens of context")
+
+
+def supports_architecture(candidate: Candidate, gguf_architectures: frozenset[str] | None) -> Check:
+    """Making a GGUF needs llama.cpp's converter to know the model's architecture. Files
+    that already exist were made by a llama.cpp that knew it."""
+    architecture = candidate.model.architecture
+    if not (candidate.quantize and candidate.option.row_kind == "gguf"):
+        return Check(ARCHITECTURE, True, "")
+    if gguf_architectures is None:
+        return Check(ARCHITECTURE, True, "not checked: llama.cpp's converter is not on this PC")
+    if architecture not in gguf_architectures:
+        return Check(
+            ARCHITECTURE,
+            False,
+            f"llama.cpp ({LLAMA_CPP_TAG}) cannot convert {architecture} models to GGUF yet.",
+        )
+    return Check(ARCHITECTURE, True, f"llama.cpp converts {architecture}")
+
+
+def supports_quantization(candidate: Candidate, hardware: HardwareProfile) -> Check:
+    """QuantPilot can make the file on this PC."""
+    row_kind = candidate.option.row_kind
+    if not candidate.quantize:
+        return Check(QUANTIZATION, True, "")
+    if row_kind == QuantAlgorithm.AWQ.value and not hardware.has_cuda:
+        return Check(QUANTIZATION, False, "Making an AWQ file needs an NVIDIA GPU.")
+    if row_kind in CALIBRATED and not calibration_fits_in_ram(hardware, candidate.model):
+        return Check(
+            QUANTIZATION,
+            False,
+            f"Making it loads the whole original model ({candidate.model.original_gb:.1f} GB) "
+            f"into RAM; {hardware.available_ram_gb:.1f} GB is free.",
+        )
+    return Check(QUANTIZATION, True, "")
+
+
+def disk_needed_gb(candidate: Candidate) -> float | None:
+    """Disk for the download and for making the file. None when the original size is unknown."""
+    original = candidate.model.original_gb
+    made = candidate.option.weights_gb if candidate.quantize else 0.0
+    if candidate.quantize and candidate.option.row_kind == "gguf":
+        made += original or 0.0  # the full-precision GGUF made first (as the plan counts it)
+    if candidate.local:
+        return made
+    if candidate.quantize or candidate.option.row_kind == "stored":
+        return None if original is None else original + made
+    return candidate.option.weights_gb  # a published GGUF file
+
+
+def fits_disk(candidate: Candidate, free_gb: float) -> Check:
+    needed = disk_needed_gb(candidate)
+    if needed is None:
+        return Check(DISK, True, "not checked: the size of the original files is unknown")
+    if needed > free_gb:
+        what = "download it" if not candidate.quantize else "download and quantize it"
+        if candidate.local:
+            what = "quantize it"
+        return Check(
+            DISK, False, f"Needs {needed:.1f} GB of disk to {what}; {free_gb:.1f} GB is free."
+        )
+    return Check(DISK, True, f"needs {needed:.1f} GB of disk" if needed else "")
+
+
+def check_candidate(
+    candidate: Candidate,
+    hardware: HardwareProfile,
+    disk_free_gb: float,
+    gguf_architectures: frozenset[str] | None,
+) -> list[Check]:
+    """Every hard limit for one candidate. When the runtime cannot run here, that is the only
+    answer: the memory figures assume a runtime that runs."""
+    runtime = supports_runtime(candidate, hardware)
+    if not runtime.passed:
+        return [runtime]
+    return [
+        runtime,
+        fits_memory(candidate),
+        supports_context(candidate),
+        supports_architecture(candidate, gguf_architectures),
+        supports_quantization(candidate, hardware),
+        fits_disk(candidate, disk_free_gb),
+    ]
+
+
+def apply_limits(
+    candidates: list[Candidate],
+    hardware: HardwareProfile,
+    disk_free_gb: float | None = None,
+    gguf_architectures: frozenset[str] | None | bool = True,
+) -> tuple[list[tuple[Candidate, list[Check]]], list[Rejection]]:
+    """(allowed with the checks they passed, rejected). disk_free_gb defaults to the disk
+    models are saved on, gguf_architectures (True) to what the installed converter knows."""
+    if disk_free_gb is None:
+        disk_free_gb = free_disk_gb(Path.home())
+    if gguf_architectures is True:
+        gguf_architectures = converter_architectures()
+    allowed: list[tuple[Candidate, list[Check]]] = []
+    rejected: list[Rejection] = []
+    for candidate in candidates:
+        checks = check_candidate(candidate, hardware, disk_free_gb, gguf_architectures)
+        failed = tuple(check for check in checks if not check.passed)
+        if failed:
+            rejected.append(Rejection(candidate, failed))
+        else:
+            allowed.append((candidate, checks))
+    return allowed, rejected
