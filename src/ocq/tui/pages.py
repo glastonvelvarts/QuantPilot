@@ -31,6 +31,7 @@ from textual.widgets import (
     TextArea,
 )
 
+from ocq import env_file
 from ocq.model_analyzer import QUANTIZED_LEVELS
 from ocq.tui import words
 from ocq.tui.banner import TAGLINE
@@ -45,6 +46,7 @@ from ocq.tui.widgets import (
     Results,
     RowTable,
     StepTracker,
+    TextField,
     field,
     meter_progress,
 )
@@ -688,6 +690,8 @@ class CheckPage(Page):
             self.qp.open_quantize(self.ref, *chosen)
 
 
+ROLE_WORDS = {"read": "read access", "write": "read and write access",
+              "fineGrained": "fine-grained access"}  # fmt: skip
 CHART_ROWS = 12
 
 
@@ -1249,6 +1253,130 @@ class SettingsPage(Page):
                     TextArea("\n".join(s.model_folders), id="model_folders"),
                     "wide",
                 )
+            yield Static("Hugging Face token", classes="section")
+            yield Static("", id="token-state")
+            with Horizontal(id="token-entry"):
+                yield TextField(placeholder="Paste a read token (hf_...)", password=True,
+                                id="hf-token")  # fmt: skip
+                yield Action("Save", variant="primary", id="token-save")
+                yield Action("Cancel", id="token-cancel")
+            with Horizontal(classes="actions", id="token-actions"):
+                yield Action("Add a token", variant="primary", id="token-add")
+                yield Action("Change", id="token-change")
+                yield Action("Remove", id="token-remove")
+
+    def on_mount(self) -> None:
+        self.account = None  # who the saved token belongs to, once checked
+        self.token_note: Text | None = None  # the outcome of the last save, shown once
+        self.query_one("#token-entry").display = False
+        self.show_token()
+
+    def opened(self) -> None:
+        token, where = env_file.hf_token()
+        if token and self.account is None:
+            self.check_token(token, save=False)  # who it belongs to, once per session
+
+    def show_token(self) -> None:
+        """The token as it is now: masked, where it comes from, and what it may do."""
+        token, where = env_file.hf_token()
+        text = Text()
+        if not token:
+            text.append("None yet. Gated models such as Llama and Gemma need a read token: ", "dim")
+            text.append("huggingface.co/settings/tokens", "underline")
+        else:
+            text.append(env_file.mask(token), "bold")
+            if self.account and self.account.name:
+                access = ROLE_WORDS.get(self.account.role, self.account.role)
+                text.append(f"   Signed in as {self.account.name}", "green")
+                text.append(f", {access}" if access else "", "green")
+            if where == "shell":
+                text.append("\nFrom your shell, which wins over a token saved here.", "dim")
+        if self.token_note is not None:
+            text.append("\n")
+            text.append_text(self.token_note)
+        self.query_one("#token-state", Static).update(text)
+        editing = self.query_one("#token-entry").display
+        self.query_one("#token-actions").display = not editing
+        self.query_one("#token-add").display = not token
+        self.query_one("#token-change").display = where == "file"
+        self.query_one("#token-remove").display = where == "file"
+
+    def edit_token(self, editing: bool) -> None:
+        self.query_one("#token-entry").display = editing
+        self.query_one("#hf-token", Input).value = ""
+        self.token_note = None
+        self.show_token()
+        if editing:
+            self.query_one("#hf-token", Input).focus()
+        else:
+            self.focus_token_actions()
+
+    def focus_token_actions(self) -> None:
+        """The first button shown: a hidden one would leave the keys nowhere to go."""
+        for button in self.query("#token-actions Button"):
+            if button.display:
+                button.focus()
+                return
+
+    @on(Button.Pressed, "#token-add, #token-change")
+    def add_token(self) -> None:
+        self.edit_token(True)
+
+    @on(Button.Pressed, "#token-cancel")
+    def cancel_token(self) -> None:
+        self.edit_token(False)
+
+    @on(Button.Pressed, "#token-save")
+    @on(Input.Submitted, "#hf-token")
+    def save_token(self) -> None:
+        token = self.query_one("#hf-token", Input).value.strip()
+        if not token.startswith("hf_"):
+            self.token_note = Text("Hugging Face tokens start with hf_.", "red")
+            self.show_token()
+            return
+        self.token_note = Text("Checking the token with Hugging Face ...", "dim")
+        self.show_token()
+        self.check_token(token, save=True)
+
+    @background("token")
+    def check_token(self, token: str, save: bool) -> None:
+        try:
+            account, note = env_file.check_hf_token(token), None
+        except OcqError as exc:  # Hugging Face says no: nothing is saved
+            self.app.call_from_thread(self.token_checked, None, Text(str(exc), "red"), False)
+            return
+        except ConnectionError:
+            account = None
+            note = Text("Saved, not checked: Hugging Face could not be reached.", "yellow")
+        if save:
+            env_file.save(env_file.HF_TOKEN, token)
+            if account and account.role == "write":
+                note = Text("Saved. It can write too: a read token is enough.", "yellow")
+            elif account:
+                note = Text("Saved.", "green")
+        self.app.call_from_thread(self.token_checked, account, note, save)
+
+    def token_checked(self, account, note: Text | None, saved: bool) -> None:
+        self.account = account or self.account
+        if saved:
+            self.query_one("#token-entry").display = False
+        self.token_note = note
+        self.show_token()
+        if saved:
+            self.focus_token_actions()
+
+    @on(Button.Pressed, "#token-remove")
+    def remove_token(self) -> None:
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                env_file.remove(env_file.HF_TOKEN)
+                self.account, self.token_note = None, Text("Removed.", "dim")
+                self.show_token()
+
+        self.app.push_screen(
+            Confirm("Remove the token?", "Gated models cannot be read without one.", "Remove"),
+            confirmed,
+        )
 
     @on(Dropdown.Changed)
     def dropdown_changed(self, event: Dropdown.Changed) -> None:

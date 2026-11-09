@@ -271,7 +271,8 @@ def fetch_hf_model(model_id: str) -> dict:
         if exc.code in (401, 403, 404):
             raise OcqError(
                 f"Model {model_id!r} was not found on HuggingFace. Check the repo id (org/name). "
-                "If it is gated or private, accept its license and set HF_TOKEN."
+                "If it is gated or private, accept its license on its page, then add a token of "
+                "that account in Settings (or set HF_TOKEN)."
             ) from exc
         raise OcqError(f"HuggingFace API error {exc.code} for {model_id}") from exc
     except urllib.error.URLError as exc:
@@ -282,9 +283,9 @@ def gated_message(model_id: str) -> str:
     """Hugging Face shows a gated repo's files only to accounts that accepted its license."""
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     who = (
-        "The account of HF_TOKEN has not accepted it yet"
+        "The account of your Hugging Face token has not accepted it yet"
         if token
-        else "Accept it, then set HF_TOKEN to a token of that account"
+        else "Accept it, then add a read token of that account in Settings (or set HF_TOKEN)"
     )
     return (
         f"{model_id} is gated: its files can be read only after accepting its license at "

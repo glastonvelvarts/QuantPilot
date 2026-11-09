@@ -44,6 +44,9 @@ console = Console()
 @app.callback(invoke_without_command=True)
 def start(ctx: typer.Context) -> None:
     """ocq with no command: the full-screen app in a terminal, the help text anywhere else."""
+    from ocq import env_file
+
+    env_file.load()  # the keys saved in Settings (a Hugging Face token), unless the shell has them
     if ctx.invoked_subcommand is not None:
         return
     if sys.stdin.isatty() and sys.stdout.isatty():

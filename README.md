@@ -44,7 +44,7 @@ Run **`ocq`** with no command (or **`ocq tui`**) for the app: arrow keys and Ent
 - **Check a model**: type or browse to a model, pick the kind of work, and QuantPilot recommends the format, runtime and cache type for this PC, says why and how sure it is, and compares every other format with the reason it lost.
 - **Quantize**: review what will be made, then start it, with progress and the result in one place.
 - **Discover** ranks the best option of each model for the kind of work: the ones on this PC and popular ones to download; **My models** lists the ones already downloaded (Ollama, LM Studio, Hugging Face).
-- **Settings**: theme (including your terminal's own colors), default context, extra model folders, simple borders for old consoles. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
+- **Settings**: theme (including your terminal's own colors), default context and workload, extra model folders, simple borders for old consoles, and your **Hugging Face token** for gated models such as Llama and Gemma: paste a read token, QuantPilot checks it with Hugging Face, shows it masked, and keeps it in `.env` in its settings folder (readable by you only, never in the folder you run from). A token set in your shell (`HF_TOKEN`) wins over it, and the `ocq` commands use it too. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
 - **?** shows the keys, **Ctrl+P** jumps anywhere, **q** quits.
 
 The banner uses plain ASCII only, so it looks the same on Windows, macOS and Linux. Piped or in scripts, `ocq` prints the help and every command works as before.

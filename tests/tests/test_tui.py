@@ -833,3 +833,105 @@ def test_down_on_the_last_row_of_a_table_moves_on(tmp_path: Path, monkeypatch):
 
     run_app(tmp_path, steps)
     assert "about" in seen["after last row"]  # About this model
+
+
+# Settings: the Hugging Face token -------------------------------------------------------------
+
+HF = "hf_abcdefghijklmnopqrstuvwxyz1234"
+
+
+def screen_text(app) -> str:
+    return "\n".join(str(w.render()) for w in app.query("Static, Label, Button, Input"))
+
+
+def test_a_token_pasted_in_settings_is_checked_saved_and_shown_masked(tmp_path, monkeypatch):
+    from ocq import env_file
+
+    checked = []
+
+    def check(token):
+        checked.append(token)
+        return env_file.HfAccount("glaston", "read")
+
+    monkeypatch.setattr(env_file, "check_hf_token", check)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("settings", focus=True)
+        await pilot.pause()
+        seen["before"] = text_of(app, "#token-state")
+        app.query_one("#token-add").press()
+        await pilot.pause()
+        seen["focus"] = app.focused.id
+        await pilot.press(*HF, "enter")
+        await settle(app, pilot)
+        seen["after"] = text_of(app, "#token-state")
+        seen["screen"] = screen_text(app)
+        seen["focus after"] = app.focused.id
+
+    run_app(tmp_path, steps)
+    assert "None yet" in seen["before"] and "huggingface.co/settings/tokens" in seen["before"]
+    assert seen["focus"] == "hf-token" and checked == [HF]
+    assert (
+        "hf_••••••••1234" in seen["after"] and "Signed in as glaston, read access" in seen["after"]
+    )
+    assert HF not in seen["screen"]  # never shown in clear
+    assert env_file.read() == {"HF_TOKEN": HF} and seen["focus after"] == "token-change"
+
+
+def test_a_token_hugging_face_rejects_is_not_saved(tmp_path, monkeypatch):
+    from ocq import env_file
+
+    def rejected(token):
+        from ocq.types import OcqError
+
+        raise OcqError("Hugging Face does not accept this token.")
+
+    monkeypatch.setattr(env_file, "check_hf_token", rejected)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("settings", focus=True)
+        app.query_one("#token-add").press()
+        await pilot.pause()
+        await pilot.press(*"hf_wrong0000000000", "enter")
+        await settle(app, pilot)
+        seen["state"] = text_of(app, "#token-state")
+        seen["still editing"] = app.query_one("#token-entry").display
+
+    run_app(tmp_path, steps)
+    assert "does not accept this token" in seen["state"] and seen["still editing"]
+    assert env_file.read() == {}
+
+
+def test_a_saved_token_can_be_removed_and_a_shell_one_is_left_alone(tmp_path, monkeypatch):
+    from ocq import env_file
+
+    monkeypatch.setattr(env_file, "check_hf_token", lambda t: env_file.HfAccount("glaston", "read"))
+    env_file.save("HF_TOKEN", HF)
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("settings", focus=True)
+        await settle(app, pilot)
+        app.query_one("#token-remove").press()
+        await pilot.pause()
+        await pilot.press("left", "enter")  # Remove, in the question
+        await pilot.pause()
+        seen["after remove"] = text_of(app, "#token-state")
+
+    run_app(tmp_path, steps)
+    assert "None yet" in seen["after remove"] and env_file.read() == {}
+
+    monkeypatch.setenv("HF_TOKEN", "hf_fromtheshell000000")
+    shown = {}
+
+    async def shell(app, pilot):
+        app.show_page("settings", focus=True)
+        await settle(app, pilot)
+        shown["state"] = text_of(app, "#token-state")
+        shown["buttons"] = [b.id for b in app.query("#token-actions Button") if b.display]
+
+    run_app(tmp_path, shell)
+    assert "hf_••••••••0000" in shown["state"] and "From your shell" in shown["state"]
+    assert shown["buttons"] == []  # set outside QuantPilot: changed there

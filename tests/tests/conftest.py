@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ocq import discovery, hardware, measurements, model_analyzer, recommend
+from ocq import discovery, env_file, hardware, measurements, model_analyzer, recommend
 from ocq.quantizers import llama_cpp
 from ocq.types import DTYPE_BITS
 
@@ -34,6 +34,11 @@ def private_caches(tmp_path, monkeypatch):
     # says which architectures it knows.
     monkeypatch.delenv("OCQ_LLAMA_CPP", raising=False)
     monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "llama.cpp")
+    # Nor the user's Hugging Face token, from the shell or from QuantPilot's .env file.
+    for name in env_file.HF_TOKEN_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(env_file, "ENV_FILE", tmp_path / "settings" / ".env")
+    monkeypatch.setattr(env_file, "from_file", set())
     # Nor the GPU driver of the PC they run on.
     monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 

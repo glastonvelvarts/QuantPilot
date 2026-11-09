@@ -269,6 +269,23 @@ Collapsible {
     margin: 1 0 1 0;
 }
 
+#token-state {
+    margin-bottom: 1;
+}
+
+#token-entry {
+    height: auto;
+}
+
+#token-entry Input {
+    width: 1fr;
+    margin-right: 2;
+}
+
+#token-entry Button {
+    margin-right: 2;
+}
+
 #tools {
     height: auto;
 }

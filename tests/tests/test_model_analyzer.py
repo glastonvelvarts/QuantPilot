@@ -1118,6 +1118,7 @@ def test_a_gated_repo_says_so_and_links_the_license(monkeypatch, tmp_path):
     assert "meta-llama/Llama-3.2-1B is gated" in str(error.value)
     assert "https://huggingface.co/meta-llama/Llama-3.2-1B" in str(error.value)
     assert "set HF_TOKEN" in str(error.value)
+    assert "add a read token of that account in Settings" in str(error.value)
 
 
 def test_a_model_too_big_for_the_gpu_is_as_fast_as_its_layers_in_ram_allow(qwen_tensors):
