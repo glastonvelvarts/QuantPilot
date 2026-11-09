@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ocq.quantizers.base import model_slug, model_weights_dir
 from ocq.quantizers.llama_cpp import converter_script, missing_library, tool_path
-from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, Quantizer
+from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, PROMPT_TOKENS, Quantizer
 from ocq.runtimes import llama_cache_env, llama_device_env
 from ocq.types import (
     BenchmarkResult,
@@ -155,14 +155,15 @@ class GGUFQuantizer(Quantizer):
                 # Not a plain GPU run, so it does not go into this PC's GPU speed history.
                 device = f"gpu (experts of {experts} layers in ram)"
 
-        # Speed comes from llama-bench: a fixed number of tokens, repeated, then averaged.
+        # Speed comes from llama-bench: a fixed number of tokens, repeated, then averaged. Two
+        # tests: reading a PROMPT_TOKENS prompt, and writing BENCHMARK_TOKENS.
         report, _ = run_tool(
             [
                 str(tool_path("llama-bench", plan.hardware)),
                 "-m",
                 artifact_path,
                 "-p",
-                "0",
+                str(PROMPT_TOKENS),
                 "-n",
                 str(BENCHMARK_TOKENS),
                 "-r",
@@ -178,12 +179,21 @@ class GGUFQuantizer(Quantizer):
             log=workspace / "speed.log",
             env=env,
         )
-        speed = json.loads(report)[0]
+        tests = json.loads(report)
+        speed = next((test for test in tests if test.get("n_gen")), tests[-1])
+        reading = next(
+            (test for test in tests if test.get("n_prompt") and not test.get("n_gen")), None
+        )
+        build = speed.get("build_number")
 
         notes = [
             f"Speed is the average of {BENCHMARK_REPEATS} runs of {BENCHMARK_TOKENS} tokens "
             f"(+/- {speed['stddev_ts']:.1f} tok/s)."
         ]
+        if reading:
+            notes.append(
+                f"A {reading['n_prompt']} token prompt is read at {reading['avg_ts']:.0f} tok/s."
+            )
         if prompt:
             notes.append(f"Time to first token is for a {prompt.group(2)} token prompt.")
 
@@ -194,6 +204,8 @@ class GGUFQuantizer(Quantizer):
             device=device,
             sample_output=text.strip(),
             notes=notes,
+            prompt_tokens_per_second=reading["avg_ts"] if reading else None,
+            runtime_version=f"b{build}" if build else "",
         )
 
 

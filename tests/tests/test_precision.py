@@ -193,3 +193,40 @@ def test_a_benchmark_without_a_gpu_runs_on_the_cpu_and_is_recorded_so(tmp_path, 
     assert result.device == "cpu"
     assert bench[bench.index("-ngl") + 1] == "0" and bench[-2:] == ["-dev", "none"]
     assert envs == [{"LLAMA_ARG_DEVICE": "none"}] * 2
+
+
+def test_the_benchmark_reads_prompt_speed_and_build_from_llama_bench(tmp_path, monkeypatch):
+    # The real report of llama-bench b11429 -p 512 -n 128 -r 3 for Qwen3.5-0.8B Q4_K_M on an
+    # M1: one entry for reading the prompt, one for writing tokens.
+    from types import SimpleNamespace
+
+    from ocq.quantizers import gguf
+
+    report = (Path(__file__).parent / "data/gguf/llama-bench-qwen3.5-0.8b-q4_k_m-metal.json")
+    commands = []
+
+    def fake_run_tool(command, log, env=None):
+        commands.append(command)
+        if "llama-bench" in command[0]:
+            return report.read_text(), ""
+        return "The sky is blue.", (
+            "load_tensors: offloaded 25/25 layers to GPU\n"
+            "load_tensors: MTL0_Mapped model buffer size =   500.00 MiB\n"
+        )
+
+    monkeypatch.setattr(gguf, "run_tool", fake_run_tool)
+    monkeypatch.setattr(gguf, "tool_path", lambda name, hardware: Path(name))
+    plan = SimpleNamespace(
+        output_dir=tmp_path,
+        hardware=SimpleNamespace(has_gpu=True),
+        quant_config=SimpleNamespace(context=4096, kv_cache="f16"),
+        predicted=None,
+        model=SimpleNamespace(architecture="qwen35"),
+    )
+    result = gguf.GGUFQuantizer().benchmark(plan, "model.gguf")
+    bench = commands[1]
+    assert bench[bench.index("-p") + 1] == "512" and bench[bench.index("-n") + 1] == "128"
+    assert result.tokens_per_second == pytest.approx(78.282661)
+    assert result.prompt_tokens_per_second == pytest.approx(1226.169272)
+    assert result.runtime_version == "b11429"
+    assert "A 512 token prompt is read at 1226 tok/s." in result.notes

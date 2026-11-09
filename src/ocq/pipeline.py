@@ -41,6 +41,9 @@ def remember_speed(
         runtime=LLAMA_CPP,
         context=config.context,
         kv_cache=config.kv_cache,
+        hardware=plan.hardware,
+        runtime_version=benchmark.runtime_version,
+        prompt_tps=benchmark.prompt_tokens_per_second or 0.0,
     )
 
 

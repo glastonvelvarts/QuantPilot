@@ -1144,9 +1144,9 @@ def fit_reason(candidate: Candidate, hardware: HardwareProfile) -> Reason:
     return Reason(kind, text)
 
 
-def speed_reason(candidate: Candidate) -> Reason:
+def speed_reason(candidate: Candidate, hardware: HardwareProfile | None = None) -> Reason:
     option = candidate.option
-    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime)
+    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime, hardware)
     if runs:
         low, high = min(r["tps"] for r in runs), max(r["tps"] for r in runs)
         span = f"{low:.0f}" if round(low) == round(high) else f"{low:.0f}–{high:.0f}"
@@ -1237,7 +1237,7 @@ def winner_reasons(
     hardware: HardwareProfile,
 ) -> tuple[Reason, ...]:
     candidate = best.candidate
-    reasons = [fit_reason(candidate, hardware), speed_reason(candidate)]
+    reasons = [fit_reason(candidate, hardware), speed_reason(candidate, hardware)]
     room = best.values.get(Objective.CONTEXT, candidate.context)
     text = f"Holds the {tokens(candidate.context)} tokens of context asked for"
     if room > candidate.context:
@@ -1350,7 +1350,7 @@ def confidence(recommendation: Recommendation, hardware: HardwareProfile) -> Con
             bool(bandwidth),
         )
     )
-    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime)
+    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime, hardware)
     measured = option.speed_basis == MEASURED
     if runs:
         evidence.append(

@@ -721,6 +721,9 @@ class BenchmarkResult:
     time_to_first_token_s: float | None = None
     device: str = ""
     sample_output: str = ""
+    # How fast a prompt is read (PROMPT_TOKENS of it): what the time to the first token rests on.
+    prompt_tokens_per_second: float | None = None
+    runtime_version: str = ""  # llama.cpp's build, b11429
 
 
 @dataclass
