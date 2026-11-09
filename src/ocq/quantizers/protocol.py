@@ -17,6 +17,8 @@ from ocq.types import (
 
 BENCHMARK_PROMPT = "Explain in a few sentences why the sky is blue."
 BENCHMARK_TOKENS = 128
+# The prompt length prompt reading is timed at: llama-bench's standard pp512.
+PROMPT_TOKENS = 512
 
 
 class Quantizer(ABC):

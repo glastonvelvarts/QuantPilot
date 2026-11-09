@@ -202,6 +202,45 @@ def test_speed_comes_from_real_runs_once_recorded(qwen_tensors):
     assert 30.0 < option.estimated_tps < 150.0
 
 
+def test_only_this_pcs_llama_cpp_runs_predict_its_speed(qwen_tensors):
+    hardware = make_hardware(vram_gb=8)
+    elsewhere = make_hardware(ram_gb=64, vram_gb=8)  # another PC
+    other_gpu = make_hardware(vram_gb=16)  # this PC, another card
+    for pc in (elsewhere, other_gpu):
+        measurements.record("gpu", 0.5, 400.0, hardware=pc)
+        measurements.record("gpu", 4.0, 90.0, hardware=pc)
+    measurements.record("gpu", 0.5, 400.0, runtime="transformers", hardware=hardware)
+    measurements.record("gpu", 4.0, 90.0, runtime="transformers", hardware=hardware)
+    option = options_by_label(qwen_snapshot(qwen_tensors, hardware), hardware)["Q4_K_M"]
+    assert option.speed_basis == measurements.UPPER_BOUND
+
+    # Runs saved before they were tagged, and llama.cpp runs of this PC, count.
+    measurements.record("gpu", 0.5, 150.0)
+    measurements.record("gpu", 4.0, 30.0, runtime="llama.cpp", hardware=hardware)
+    option = options_by_label(qwen_snapshot(qwen_tensors, hardware), hardware)["Q4_K_M"]
+    assert option.speed_basis == measurements.MEASURED
+    assert 30.0 < option.estimated_tps < 150.0
+
+
+def test_a_cpu_only_run_is_still_this_pcs():
+    # OCQ_CPU_ONLY hides the GPU: the PC is the same, and its CPU runs are used with the GPU on.
+    hardware = make_hardware(vram_gb=8)
+    measurements.record("cpu", 1.0, 20.0, model="m", label="Q4_K_M", runtime="llama.cpp",
+                        hardware=make_hardware())  # fmt: skip
+    assert measurements.load()[-1]["gpu"] == ""
+    assert len(measurements.runs_of("m", "Q4_K_M", "llama.cpp", hardware)) == 1
+
+
+def test_a_damaged_benchmark_file_is_read_as_far_as_it_goes():
+    measurements.STORE.write_text(
+        '[{"device": "gpu", "weights_gb": 1.0, "tps": 50}, "junk", {"device": "gpu"},'
+        ' {"device": "gpu", "weights_gb": 2.0, "tps": "fast"}]'
+    )
+    assert measurements.load() == [{"device": "gpu", "weights_gb": 1.0, "tps": 50}]
+    measurements.STORE.write_text('{"not": "a list"}')
+    assert measurements.load() == []
+
+
 def test_recommend_works_without_llmfit():
     models = recommend_models(make_hardware(ram_gb=8), limit=20, llmfit_bin="/no/such/llmfit")
     fits = {model.model_id: model.feasibility.runnable for model in models}
@@ -710,17 +749,31 @@ def test_benchmark_runs_are_stored_as_what_one_token_reads():
     config = SimpleNamespace(
         algorithm=QuantAlgorithm.GGUF, gguf_type="Q4_K_M", context=8192, kv_cache="q8_0"
     )
-    plan = SimpleNamespace(model=snap, quant_config=config)
-    run = SimpleNamespace(artifact_size_gb=17.0)
-    remember_speed(plan, run, SimpleNamespace(device="gpu", tokens_per_second=120.0))
+    hardware = make_hardware(ram_gb=32, vram_gb=8)
+    plan = SimpleNamespace(model=snap, quant_config=config, hardware=hardware)
+    run = SimpleNamespace(artifact_size_gb=17.0, artifact_path=Path("Qwen3-30B-A3B-Q4_K_M.gguf"))
+    bench = SimpleNamespace(
+        device="gpu", tokens_per_second=120.0, prompt_tokens_per_second=900.0,
+        runtime_version="b11429",
+    )  # fmt: skip
+    remember_speed(plan, run, bench)
     # A 17 GB MoE file that reads 1.7 GB per token must not look like a fast 17 GB dense model.
     saved = measurements.load()[-1]
     assert saved["weights_gb"] == pytest.approx(17.0 * snap.read_fraction)
     # What ran is saved too, so a recommendation can count earlier runs of the same setup.
     assert (saved["model"], saved["label"], saved["runtime"]) == (QWEN3_MOE, "Q4_K_M", "llama.cpp")
     assert (saved["context"], saved["kv_cache"]) == (8192, "q8_0")
+    # And where, with what: the prompt speed, llama.cpp's build, the PC and its GPU.
+    assert (saved["prompt_tps"], saved["runtime_version"]) == (900.0, "b11429")
+    assert (saved["machine"], saved["gpu"]) == ("CPU, 32 GB RAM", "RTX 4060, 8 GB")
+    assert saved["date"][:4].isdigit()
+    assert (saved["suite"], saved["file"]) == ("quick", "Qwen3-30B-A3B-Q4_K_M.gguf")
+    assert saved["prompt_speeds"] == {"512": 900.0}
     assert measurements.runs_of(QWEN3_MOE.lower(), "q4_k_m", "llama.cpp") == [saved]
     assert measurements.runs_of(QWEN3_MOE, "Q5_K_M", "llama.cpp") == []
+    assert measurements.runs_of(QWEN3_MOE, "Q4_K_M", "llama.cpp", hardware) == [saved]
+    other_gpu = make_hardware(ram_gb=32, vram_gb=16)
+    assert measurements.runs_of(QWEN3_MOE, "Q4_K_M", "llama.cpp", other_gpu) == []
 
 
 # Context memory for sliding-window attention and MLA. Expected sizes are from llama.cpp's own
@@ -1166,8 +1219,11 @@ def test_a_model_lookup_cut_short_says_so_not_a_traceback(monkeypatch):
             raise http.client.IncompleteRead(b'{"id": "org/mo', 2000)
 
     monkeypatch.setattr(model_analyzer.urllib.request, "urlopen", lambda *a, **k: CutShort())
-    with pytest.raises(OcqError, match=r"^Could not reach HuggingFace while looking up org/model: "
-                       r"IncompleteRead\(14 bytes read, 2000 more expected\)\. Check the conn"):
+    with pytest.raises(
+        OcqError,
+        match=r"^Could not reach HuggingFace while looking up org/model: "
+        r"IncompleteRead\(14 bytes read, 2000 more expected\)\. Check the conn",
+    ):
         model_analyzer.fetch_hf_model("org/model")
 
 

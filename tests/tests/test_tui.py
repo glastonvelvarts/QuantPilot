@@ -776,6 +776,7 @@ def test_after_quantizing_the_keys_work_and_the_new_file_opens(tmp_path: Path, m
         await settle(app, pilot)
         seen["after"] = app.focused.id
         seen["verify shown"] = app.query_one("#verify-made").display
+        seen["bench shown"] = app.query_one("#bench-made").display
         await pilot.press("right")
         seen["right"] = app.focused.id  # the arrow keys move again
         await pilot.press("up", "up")
@@ -788,8 +789,8 @@ def test_after_quantizing_the_keys_work_and_the_new_file_opens(tmp_path: Path, m
 
     run_app(tmp_path, steps)
     assert seen["while running"] == "review"
-    assert seen["after"] == "check-made" and seen["verify shown"]
-    assert seen["right"] == "verify-made" and seen["up"] != "verify-made"
+    assert seen["after"] == "check-made" and seen["verify shown"] and seen["bench shown"]
+    assert seen["right"] == "bench-made" and seen["up"] not in ("bench-made", "verify-made")
     assert (seen["page"], seen["model"]) == ("check", str(artifact))
 
 
@@ -935,3 +936,112 @@ def test_a_saved_token_can_be_removed_and_a_shell_one_is_left_alone(tmp_path, mo
     run_app(tmp_path, shell)
     assert "hf_••••••••0000" in shown["state"] and "From your shell" in shown["state"]
     assert shown["buttons"] == []  # set outside QuantPilot: changed there
+
+
+# Benchmark (7F) ----------------------------------------------------------------------------
+
+
+def fake_benchmark(monkeypatch, calls, fail: str = ""):
+    """bench.run_benchmark as it ran on the M1 for Qwen3.5-0.8B Q4_K_M: it prints its steps."""
+    from ocq import bench, measurements, quality
+    from ocq.types import OcqError
+
+    def run_benchmark(ref, hardware, *, piece=None, **kwargs):
+        calls.append((ref, piece.name if piece else ""))
+        print("Measuring the speed (3 runs of each test) ...", flush=True)
+        if fail:
+            raise OcqError(fail)
+        report = bench.BenchReport(78.2, 0.5, {512: 1228.0, 4096: 1140.0}, "b11429")
+        measurements.record("gpu", 0.48, 78.2, model="Qwen/Qwen3.5-0.8B", label="Q4_K_M",
+                            runtime="llama.cpp", prompt_tps=1228.0)  # fmt: skip
+        outcome = bench.BenchOutcome("Qwen/Qwen3.5-0.8B", "Q4_K_M", option(tps=80.0), "gpu",
+                                     report, 1, piece=piece)  # fmt: skip
+        if piece:
+            print("Measuring the quality on WikiText-2 test (under a minute) ...", flush=True)
+            print("Comparing with the original ...", flush=True)
+            outcome.quality = quality.Perplexity(17.272, 0.51, 40, "llama.cpp", "b11429")
+            for label, ppl in (("BF16", 16.6079), ("Q4_K_M", 17.272)):
+                quality.record(quality.Perplexity(ppl, 0.5, 40, "llama.cpp"), piece,
+                               model="Qwen/Qwen3.5-0.8B", label=label, device="gpu")  # fmt: skip
+            outcome.kept = quality.measured_kept("Qwen/Qwen3.5-0.8B", "Q4_K_M")
+        return outcome
+
+    monkeypatch.setattr(bench, "run_benchmark", run_benchmark)
+
+
+def table_cells(app, selector: str) -> list[list[str]]:
+    table = app.query_one(selector)
+    return [[str(cell) for cell in table.get_row(key)] for key in table.rows]
+
+
+def test_benchmark_measures_speed_and_quality_and_keeps_the_history(tmp_path, monkeypatch):
+    calls, seen = [], {}
+    fake_benchmark(monkeypatch, calls)
+
+    async def steps(app, pilot):
+        app.show_page("bench", focus=True)
+        seen["empty"] = text_of(app, "#bench #history-title")
+        app.open_bench("./Qwen--Qwen3.5-0.8B-Q4_K_M.gguf", "fixed")
+        await settle(app, pilot)
+        seen["steps"] = text_of(app, "#bench #steps")
+        seen["verdict"] = text_of(app, "#bench #verdict")
+        seen["rows"] = table_cells(app, "#bench #measured")
+        seen["speed"] = table_cells(app, "#bench #speed-history")
+        seen["quality"] = table_cells(app, "#bench #quality-history")
+        seen["title"] = text_of(app, "#bench #history-title")
+        seen["focus"] = app.focused.id
+        seen["busy"] = app.busy
+
+    run_app(tmp_path, steps)
+    assert calls == [("./Qwen--Qwen3.5-0.8B-Q4_K_M.gguf", "fixed")]
+    assert seen["empty"] == "Nothing benchmarked on this PC yet."
+    assert "✓ Measure speed" in seen["steps"] and "✓ Compare" in seen["steps"]
+    assert seen["verdict"] == (
+        "Q4_K_M  ·  GPU  ·  llama.cpp b11429\nSaved: 1 run of this setup on this PC"
+    )
+    assert seen["rows"][:3] == [
+        ["Writing", "78.2 tok/s", "up to 80"],
+        ["Reading 512 tokens", "1,228 tok/s", ""],
+        ["Reading 4,096 tokens", "1,140 tok/s", ""],
+    ]
+    assert seen["rows"][3][:2] == ["First token after 512", f"{512 / 1228 + 1 / 78.2:.2f} s"]
+    assert seen["rows"][-2:] == [
+        ["Perplexity", "17.27", "lower is better"],
+        ["Quality kept", "80%", "about 85%"],  # measured, and llama.cpp's 8B estimate
+    ]
+    assert seen["title"] == "History on this PC, this model"
+    assert [row[1:5] for row in seen["speed"]] == [["Qwen3.5-0.8B", "Q4_K_M", "GPU", "78.2 tok/s"]]
+    assert seen["speed"][0][0][2] == "-" and len(seen["speed"][0][0]) == 11  # 11-09 18:28
+    assert [row[2:] for row in seen["quality"]] == [
+        ["Q4_K_M", "17.27", "80%"],
+        ["BF16", "16.61", "the original"],
+    ]
+    assert seen["focus"] == "measured" and seen["busy"] is False
+
+
+def test_speed_only_shows_one_step_and_a_failure_says_why(tmp_path, monkeypatch):
+    calls, seen = [], {}
+    fake_benchmark(monkeypatch, calls, fail="It does not fit in this PC's memory.")
+
+    async def steps(app, pilot):
+        app.open_bench("./big.gguf")
+        await settle(app, pilot)
+        seen["steps"] = text_of(app, "#bench #steps")
+        seen["problem"] = text_of(app, "#bench .problem")
+        seen["shown"] = app.query_one("#bench #measured").display
+        seen["busy"] = app.busy
+
+    run_app(tmp_path, steps)
+    assert calls == [("./big.gguf", "")]
+    assert "Measure quality" not in seen["steps"] and "✗ Measure speed" in seen["steps"]
+    assert seen["problem"] == "It does not fit in this PC's memory."
+    assert seen["shown"] is False and seen["busy"] is False
+
+
+def test_a_gguf_picked_from_a_list_can_be_benchmarked():
+    from ocq.tui.widgets import ModelActions
+
+    assert [key for _, key in ModelActions("m.gguf", True).actions] == [
+        "check", "quantize", "bench", "verify",
+    ]  # fmt: skip
+    assert [key for _, key in ModelActions("org/model", False).actions] == ["check", "quantize"]

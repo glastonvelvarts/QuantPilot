@@ -26,6 +26,7 @@ from textual.widgets.option_list import Option
 from ocq.tui import words
 from ocq.tui.banner import COMPACT, banner_text
 from ocq.tui.pages import (
+    BenchPage,
     CheckPage,
     DiscoverPage,
     HomePage,
@@ -51,6 +52,7 @@ MENU = (
     ("models", "My models"),
     ("pc", "This PC"),
     None,
+    ("bench", "Benchmark"),
     ("verify", "Verify"),
     ("settings", "Settings"),
 )
@@ -61,6 +63,7 @@ PAGES = {
     "discover": DiscoverPage,
     "models": ModelsPage,
     "pc": PcPage,
+    "bench": BenchPage,
     "verify": VerifyPage,
     "settings": SettingsPage,
 }
@@ -249,6 +252,14 @@ class QuantPilotApp(App):
         self.show_page(page_id, focus=True)
         self.page.set_model(ref)
         self.page.run()
+
+    def open_bench(self, ref: str, measure: str = "") -> None:
+        """Benchmark this model: its speed, and its quality when measure is fixed or full."""
+        self.show_page("bench", focus=True)
+        page = self.query_one(BenchPage)
+        page.set_model(ref)
+        page.set_measure(measure)
+        page.run()
 
     def open_quantize(
         self, ref: str, format_key: str, context: int = 0, kv_cache: str = ""

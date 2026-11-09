@@ -44,6 +44,7 @@ Run **`ocq`** with no command (or **`ocq tui`**) for the app: arrow keys and Ent
 - **Check a model**: type or browse to a model, pick the kind of work, and QuantPilot recommends the format, runtime and cache type for this PC, says why and how sure it is, and compares every other format with the reason it lost.
 - **Quantize**: review what will be made, then start it, with progress and the result in one place.
 - **Discover** ranks the best option of each model for the kind of work: the ones on this PC and popular ones to download; **My models** lists the ones already downloaded (Ollama, LM Studio, Hugging Face).
+- **Benchmark**: measure a model on this PC (a GGUF file, an Ollama model): its writing and reading speed and time to the first token, against what QuantPilot expected, and with **Speed and quality** its perplexity and how much of the original's quality it keeps. Below, this PC's history of both. After a quantize, **Benchmark it** on the result does the same for the new file.
 - **Settings**: theme (including your terminal's own colors), default context and workload, extra model folders, simple borders for old consoles, and your **Hugging Face token** for gated models such as Llama and Gemma: paste a read token, QuantPilot checks it with Hugging Face, shows it masked, and keeps it in `.env` in its settings folder (readable by you only, never in the folder you run from). A token set in your shell (`HF_TOKEN`) wins over it, and the `ocq` commands use it too. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
 - **?** shows the keys, **Ctrl+P** jumps anywhere, **q** quits.
 
@@ -126,7 +127,7 @@ Qwen/Qwen2.5-1.5B-Instruct
 
 ### Recommendations
 
-`ocq recommend` chooses the model, format, runtime and cache type for a kind of work (`--workload chat`, `coding`, `rag`, `agentic`, `reasoning`, `long-context` or `throughput`), from the models on this PC and a list of popular ones (or only the ones you name):
+`ocq recommend` chooses the model, format, runtime and cache type for a kind of work (`--workload chat`, `coding`, `rag`, `agentic`, `reasoning`, `long-context`, `low-latency` or `throughput`), from the models on this PC and a list of popular ones (or only the ones you name):
 
 ```
 ocq recommend --workload coding
@@ -139,6 +140,8 @@ ocq recommend Qwen/Qwen3.5-9B Qwen/Qwen3.5-4B -w rag --context 65536 --why opena
 4. The pick says why it won, what the next options would give and cost, and how sure it is (Low to Very High) with the evidence: what was read from the files, what was measured on this PC, what is estimated.
 
 Quality is an estimate until it is measured: each GGUF type's loss is llama.cpp's own measurement on Llama-3-8B, valued in parameters with llama.cpp's LLaMA 7B and 13B perplexities; AWQ, GPTQ and NVFP4 count as Q4_K_S, bitsandbytes and MLX 4-bit as Q4_0. Speed is the memory-bandwidth limit until runs on this PC teach the real figure; runs of the same setup raise the confidence.
+
+**Low Latency** ranks by the time to the first token after a 512 token prompt: reading the prompt, then writing one token. Reading a prompt is limited by computing, not memory speed, so its time grows with the parameters each token uses (a mixture of experts counts only its active ones). QuantPilot learns it from this PC's runs placed the same way (all on the GPU, on the CPU, ...): a line through two model sizes or more, else in proportion to the one measured. Every quantize and `ocq bench` adds a run. Until one exists, the pick says the time is not known and its confidence is Low.
 
 ---
 
@@ -392,7 +395,7 @@ ocq-output/<model>/
 
 Validation checks: file exists, smaller than original, loads, generates readable text. Exit code **non-zero** if validation fails.
 
-- **GGUF** speed: **llama-bench** (3 × 128 tokens), with the `--kv-cache` you chose.  
+- **GGUF** speed: **llama-bench**, the quick suite of the standard benchmark (a 512-token prompt read, 128 tokens written, 3 times each), with the `--kv-cache` you chose. Every run is saved to this PC's benchmark history.  
 - **AWQ/GPTQ/BNB/NVFP4** speed: **transformers** generate (sanity check, not vLLM deployment speed).
 
 ---
@@ -428,6 +431,39 @@ The last column is what to pass to `inspect`, `feasibility` or `verify`, for exa
 The quantization of a GGUF comes from its own header, not its file name. The Hugging Face cache often holds only `config.json` (QuantPilot and other tools fetch it to size a model without downloading it); those are hidden unless you pass `--all`. Newer Ollama versions can store a model for Apple's MLX instead of GGUF (one small safetensors file per tensor, the quantization in each file's metadata): `inspect` and `feasibility` read that too; `verify` and `optimize` need a GGUF.
 
 ---
+
+## Benchmark a model on your PC: `ocq bench`
+
+```
+ocq bench ./Qwen3-30B-A3B-Q4_K_M.gguf
+ocq bench ollama:qwen3:8b --kv-cache q8_0
+```
+
+Runs the standard benchmark on a GGUF model already on this PC (any name `ocq models` shows): llama-bench reads a 512 and a 4,096 token prompt and writes 128 tokens, 3 times each, with the model placed as QuantPilot plans it (all on the GPU, some layers on it, or the experts of some layers in RAM). It prints the writing speed next to what QuantPilot expected, the reading speed, and the time to the first token after a short and a long prompt:
+
+```
+llama.cpp b11429, all on the GPU, f16 cache
+  Writing        79.4 tok/s (± 1.0)  QuantPilot expected about 80
+  Reading        1,187 tok/s for 512 tokens, 1,138 tok/s for 4,096 tokens
+  First token    0.44 s after 512 tokens, 3.61 s after 4,096 tokens
+Saved to this PC's benchmark history (2 runs of this setup).
+```
+
+`--quality` also measures how good the model is: its perplexity on WikiText-2 (lower is better), the text llama.cpp's own quality numbers are measured on, the way llama-perplexity measures it (chunks of 512 tokens, each scored on its second half). By default the first 40 chunks (20,480 tokens: under a minute for a 1B model, a few minutes for a 7B one); `--full` takes the whole test text, comparable to published numbers but much longer. Every format of one model reads exactly the same tokens, so their perplexities compare much more closely than the ± suggests.
+
+```
+ocq bench ./Qwen3.5-0.8B-Q4_K_M.gguf --quality          # llama.cpp
+ocq bench Qwen/Qwen3.5-0.8B --quality                   # the original, in transformers
+ocq bench ./ocq-output/<model>/artifact/<awq folder> --quality   # AWQ, GPTQ, bitsandbytes (NVIDIA)
+```
+
+Models llama.cpp does not run (the original weights, AWQ, GPTQ, bitsandbytes, NVFP4) are measured in transformers with the same method: SmolLM2-135M scores 18.7853 there in BF16 and 18.7856 in llama.cpp as an f16 GGUF. The text (4.7 MB) is downloaded once and checked against llama.cpp's copy. Results are saved in `~/.cache/ocq/quality.json`, with where they ran: one file scores a little differently on a GPU and on a CPU (17.27 and 17.24).
+
+With `--quality`, a format is also compared with its reference, the model's original weights: `Q4_K_M keeps about 80% of the model's quality (perplexity 17.2720 vs 16.6079 for the original, BF16)`, in the same units as the estimate (perplexity valued in parameters with llama.cpp's LLaMA 7B and 13B numbers). When the original has not been measured yet and its weights are in the Hugging Face cache, QuantPilot measures it first, once: it converts it to a 16-bit GGUF (llama.cpp's perplexity matches transformers'), or to Q8_0 when 16 bits do not fit in memory, and deletes the files afterwards.
+
+`ocq recommend` and the app then use what was measured: a measured format's quality replaces the estimate (in the ranking, the reasons and the confidence), and the other formats of that model have their estimated losses scaled by how much more (or less) than Llama-3-8B the measured ones lost. Small models lose more: Qwen3.5-0.8B's Q4_K_M lost 1.4 times and its Q6_K 3.4 times what llama.cpp's table gives the 8B. A setup that ran on this PC is ranked by the speed it measured.
+
+Every run (here and after `optimize`) is saved in `~/.cache/ocq/measurements.json` with what ran (model, format, llama.cpp build, context, cache, placement) and where (this PC's CPU and RAM, and its GPU). Speed predictions and recommendations use only this PC's runs, and count a run for "this setup" only when it was placed the same way.
 
 ## Check QuantPilot on your PC: `ocq verify`
 
@@ -508,6 +544,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 | `backends` | Installed quant backends and what’s missing |
 | `models` | The models already on this PC, how each fits, and the name to use for it |
 | `inspect` | Every fact about a model, its source and how sure it is |
+| `bench` | Run the standard benchmark on a model of this PC (speed; `--quality`: perplexity) and save it to its history |
 | `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
 | `recommend` | Model, format, runtime and cache type for a kind of work, with reasons and confidence |
 | `feasibility` | Full format table for one model |

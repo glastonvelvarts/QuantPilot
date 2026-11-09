@@ -135,3 +135,30 @@ def slug_local(model_id: str) -> str:
     """Filesystem-safe slug for artifact names."""
     cleaned = model_id.replace("\\", "/").strip("/")
     return re.sub(r"[^\w.\-]+", "--", cleaned)
+
+
+def cached_hf_model(repo: str) -> Path | None:
+    """The folder of a Hugging Face repo in the Hugging Face cache, when its weights and
+    tokenizer are all there (often only config.json is: QuantPilot reads it to size a model)."""
+    from huggingface_hub import try_to_load_from_cache
+
+    from ocq.discovery import hf_cache_dirs  # discovery imports this module
+
+    config = None
+    for cache in hf_cache_dirs():  # read now: the library reads its setting once, on import
+        try:
+            config = try_to_load_from_cache(repo, "config.json", cache_dir=cache)
+        except Exception:  # not a repo id
+            return None
+        if isinstance(config, str):
+            break
+    if not isinstance(config, str):
+        return None
+    folder = Path(config).parent
+    try:
+        files = weight_files(folder)
+    except OcqError:
+        return None
+    if not files or not all(file.is_file() for file in files) or not has_tokenizer(folder):
+        return None
+    return folder

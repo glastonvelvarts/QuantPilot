@@ -1,15 +1,18 @@
-"""Speed prediction without invented constants.
+"""The benchmark database, and speed prediction without invented constants.
 
-Two sources only: the physical limit (measured memory bandwidth / bytes read per token) and what
-earlier benchmark runs on this same PC actually measured.
+Every benchmark run is saved with what ran (model, format, runtime and its version, context,
+cache) and where (this machine, and the GPU when one took part). Speed predictions have two
+sources only: the physical limit (measured memory bandwidth / bytes read per token) and what
+earlier runs on this same PC measured.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
-from ocq.types import HardwareProfile, RunMode
+from ocq.types import LLAMA_CPP, HardwareProfile, RunMode
 
 STORE = Path.home() / ".cache" / "ocq" / "measurements.json"
 GB = 1024**3
@@ -28,36 +31,123 @@ def record(
     runtime: str = "",
     context: int = 0,
     kv_cache: str = "",
+    hardware: HardwareProfile | None = None,
+    runtime_version: str = "",
+    prompt_tps: float = 0.0,
+    prompt_speeds: dict[int, float] | None = None,
+    suite: str = "",
+    file: str = "",
+    active_params_b: float = 0.0,
 ) -> None:
     """weights_gb is what one token reads: the whole file for a dense model, less for a
     mixture of experts (see ModelSnapshot.read_fraction). The other fields say what ran, so
-    a recommendation can say it rests on earlier runs of the same setup."""
+    a recommendation can say it rests on earlier runs of the same setup. prompt_tps: how fast
+    the prompt was read (PROMPT_TOKENS of it), which sets the time to the first token;
+    prompt_speeds: the same at every prompt length the suite (bench.Suite) timed. file: the
+    model file's name, so a run also counts for that file found on disk (local/<file>).
+    active_params_b: the parameters each token uses (billions), which prompt reading's time
+    grows with (see predict_prompt_speed)."""
     runs = load()
     run = {"device": device, "weights_gb": weights_gb, "tps": tokens_per_second}
     run |= {"model": model, "label": label, "runtime": runtime}
     run |= {"context": context, "kv_cache": kv_cache}
+    if file:
+        run |= {"file": file}
+    if active_params_b > 0:
+        run |= {"active_params_b": active_params_b}
+    run |= {"prompt_tps": prompt_tps, "runtime_version": runtime_version}
+    if prompt_speeds:
+        run |= {"prompt_speeds": {str(length): tps for length, tps in prompt_speeds.items()}}
+    if suite:
+        run |= {"suite": suite}
+    if hardware is not None:
+        run |= {"machine": machine(hardware)}
+        run |= {"gpu": gpu_of(hardware) if device.startswith("gpu") else ""}
+    run |= {"date": datetime.now().isoformat(timespec="seconds")}
     runs.append(run)
     STORE.parent.mkdir(parents=True, exist_ok=True)
     STORE.write_text(json.dumps(runs, indent=2))
 
 
 def load() -> list[dict]:
+    """Every saved run. Entries that are not runs (a hand-edited or damaged file) are left out."""
     try:
-        return json.loads(STORE.read_text())
+        runs = json.loads(STORE.read_text())
     except (OSError, ValueError):
         return []
+    if not isinstance(runs, list):
+        return []
+    return [run for run in runs if isinstance(run, dict) and speed_of(run) > 0]
 
 
-def runs_of(model: str, label: str, runtime: str) -> list[dict]:
-    """Earlier runs on this PC of this model in this format and runtime (runs saved before
-    these fields were recorded have none, and never match)."""
+def speed_of(run: dict) -> float:
+    try:
+        return float(run.get("tps") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def machine(hardware: HardwareProfile) -> str:
+    """Which PC a run was on: its CPU and RAM. Not its GPU, so that a CPU-only run
+    (OCQ_CPU_ONLY) on a PC with a GPU still counts as this PC's."""
+    return f"{' '.join(hardware.cpu_name.split())}, {round(hardware.total_ram_gb)} GB RAM"
+
+
+def gpu_of(hardware: HardwareProfile) -> str:
+    gpu = hardware.primary_gpu if hardware.has_gpu else None
+    return f"{gpu.name}, {round(gpu.vram_gb or 0)} GB" if gpu else ""
+
+
+def on_this_pc(run: dict, hardware: HardwareProfile | None) -> bool:
+    """Runs saved before they were tagged (no machine) were all made on this PC."""
+    if hardware is None:
+        return True
+    if run.get("machine") and run["machine"] != machine(hardware):
+        return False
+    return not run.get("gpu") or run["gpu"] == gpu_of(hardware)
+
+
+def placed(device: str) -> str:
+    """How a run was placed, whatever the details: gpu, cpu, gpu+cpu (some layers on the GPU)
+    or gpu+experts (the experts of some layers in RAM)."""
+    if device.startswith("gpu+cpu"):
+        return "gpu+cpu"
+    if "experts" in device:
+        return "gpu+experts"
+    return device
+
+
+def placed_as(run_mode: RunMode) -> str:
+    """The same for a row QuantPilot plans (QuantOption.run_mode)."""
+    return {
+        RunMode.GPU: "gpu",
+        RunMode.GPU_FULL: "gpu",
+        RunMode.CPU: "cpu",
+        RunMode.CPU_ONLY: "cpu",
+        RunMode.GPU_OFFLOAD: "gpu+cpu",
+        RunMode.GPU_EXPERTS_RAM: "gpu+experts",
+    }.get(run_mode, "")
+
+
+def runs_of(
+    model: str,
+    label: str,
+    runtime: str,
+    hardware: HardwareProfile | None = None,
+    placement: str = "",
+) -> list[dict]:
+    """Earlier runs on this PC of this model in this format and runtime, placed this way when
+    placement is given (see placed). Runs saved before these fields were recorded have none,
+    and never match. model is a repo id, or local/<file> for a file found on disk."""
     return [
         run
         for run in load()
-        if run.get("model", "").lower() == model.lower()
-        and run.get("label", "").upper() == label.upper()
+        if model.lower()
+        in (str(run.get("model", "")).lower(), f"local/{run.get('file', '')}".lower())
+        and str(run.get("label", "")).upper() == label.upper()
         and run.get("runtime") == runtime
-        and run.get("tps", 0) > 0
+        and on_this_pc(run, hardware)
+        and (not placement or placed(str(run.get("device", ""))) == placement)
     ]
 
 
@@ -91,7 +181,17 @@ def predict_speed(
         gpu_share,
     )
     device = {RunMode.GPU: "gpu", RunMode.CPU: "cpu"}.get(run_mode)
-    runs = [run for run in load() if run["device"] == device] if use_measurements else []
+    runs = (
+        [
+            run
+            for run in load()
+            if run.get("device") == device
+            and run.get("runtime", "") in ("", LLAMA_CPP)  # the runs before it was saved: llama.cpp
+            and on_this_pc(run, hardware)
+        ]
+        if use_measurements
+        else []
+    )
     fitted = fit_runs(runs)
     if fitted is None:
         return round(limit, 1), UPPER_BOUND
@@ -140,9 +240,14 @@ def bandwidth_limit(
 
 def fit_runs(runs: list[dict]) -> tuple[float, float] | None:
     """Least squares line through (model size, seconds per token). Needs two different sizes."""
-    sizes = [run["weights_gb"] for run in runs]
-    seconds = [1 / run["tps"] for run in runs if run["tps"] > 0]
-    if len(seconds) != len(sizes) or len(sizes) < 2 or max(sizes) - min(sizes) < 0.05:
+    runs = [r for r in runs if isinstance(r.get("weights_gb"), (int, float)) and speed_of(r) > 0]
+    return fit_line([run["weights_gb"] for run in runs], [1 / speed_of(run) for run in runs])
+
+
+def fit_line(sizes: list[float], seconds: list[float]) -> tuple[float, float] | None:
+    """(fixed seconds, seconds per unit of size). None without two sizes far enough apart, or
+    when the larger size is not the slower one."""
+    if len(sizes) < 2 or max(sizes) - min(sizes) < 0.05:
         return None
 
     mean_size = sum(sizes) / len(sizes)
@@ -156,3 +261,42 @@ def fit_runs(runs: list[dict]) -> tuple[float, float] | None:
     if slope <= 0:
         return None
     return max(fixed, 0.0), slope
+
+
+def predict_prompt_speed(
+    active_params_b: float, run_mode: RunMode, hardware: HardwareProfile
+) -> tuple[float, str]:
+    """Tokens of a PROMPT_TOKENS prompt read per second, and where that comes from (MEASURED),
+    or (0, "") when this PC has no run placed this way to learn from.
+
+    Reading a prompt is limited by computing, not by memory speed: every token of it goes
+    through every weight the token uses, so the seconds per prompt token grow with the active
+    parameters. Learnt from this PC's llama.cpp runs placed the same way: a line through them
+    when they have two sizes, else in proportion to the one size measured. No other source:
+    how fast a GPU computes in llama.cpp is not something its specifications tell."""
+    placement = placed_as(run_mode)
+    if active_params_b <= 0 or not placement:
+        return 0.0, ""
+    runs = [
+        run
+        for run in load()
+        if placed(str(run.get("device", ""))) == placement
+        and run.get("runtime", "") in ("", LLAMA_CPP)
+        and on_this_pc(run, hardware)
+        and isinstance(run.get("active_params_b"), (int, float))
+        and run["active_params_b"] > 0
+        and isinstance(run.get("prompt_tps"), (int, float))
+        and run["prompt_tps"] > 0
+    ]
+    if not runs:
+        return 0.0, ""
+    sizes = [run["active_params_b"] for run in runs]
+    seconds = [1 / run["prompt_tps"] for run in runs]
+    fitted = fit_line(sizes, seconds)
+    if fitted:
+        fixed, per_billion = fitted
+        per_token = fixed + per_billion * active_params_b
+    else:
+        per_billion = sum(t / size for t, size in zip(seconds, sizes, strict=True)) / len(runs)
+        per_token = active_params_b * per_billion
+    return round(1 / per_token, 1), MEASURED

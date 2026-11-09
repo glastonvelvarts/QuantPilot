@@ -400,6 +400,144 @@ def cmd_verify(
         raise typer.Exit(1)
 
 
+@app.command("bench")
+def cmd_bench(
+    model: Annotated[
+        str,
+        typer.Argument(
+            help="A local .gguf file or folder, ollama:name:tag, or a model folder or "
+            "Hugging Face id already on this PC (ocq models)"
+        ),
+    ],
+    quality: Annotated[
+        bool,
+        typer.Option(
+            "--quality",
+            help="Also measure its quality: perplexity on WikiText-2 (a few minutes)",
+        ),
+    ] = False,
+    full: Annotated[
+        bool,
+        typer.Option(
+            "--full",
+            help="Quality on the whole WikiText-2 test text, not its first 40 chunks (much "
+            "longer; comparable to published numbers)",
+        ),
+    ] = False,
+    context: Context = DEFAULT_CONTEXT,
+    kv_cache: KvCache = "f16",
+    llmfit_bin: LlmfitBin = None,
+) -> None:
+    """Run the standard benchmark on a model of this PC and save it to its benchmark history."""
+    from ocq import bench
+    from ocq import quality as measured_quality
+
+    kv_cache = read_kv_cache(kv_cache)
+    piece = None
+    if quality or full:
+        piece = measured_quality.FULL if full else measured_quality.FIXED
+
+    def speed_in(outcome) -> None:
+        print_bench(outcome.speed, outcome.option, outcome.device, kv_cache, outcome.runs)
+
+    try:
+        hw = detect_hardware(llmfit_bin)
+        console.print(f"[bold]{escape(model)}[/bold]", highlight=False)
+        outcome = bench.run_benchmark(
+            model, hw, piece=piece, context=context, kv_cache=kv_cache,
+            llmfit_bin=llmfit_bin, on_speed=speed_in,
+        )  # fmt: skip
+    except bench.SpeedNotMeasured as exc:
+        raise fail(OcqError(f"{exc} Add --quality.")) from exc
+    except OcqError as exc:
+        raise fail(exc) from exc
+    if outcome.quality is not None:
+        print_quality(outcome.quality, outcome.piece)
+        print_kept(outcome)
+
+
+def print_quality(result, piece) -> None:
+    from ocq import quality as measured_quality
+
+    of = f"its first {result.chunks}" if piece.chunks else f"all {result.chunks}"
+    console.print(
+        f"[bold]Quality[/bold]      perplexity {result.value:.4f} ± {result.error:.4f} "
+        f"(lower is better) on {measured_quality.DATASET}, {of} chunks of "
+        f"{measured_quality.CHUNK} tokens",
+        highlight=False,
+    )
+    console.print(
+        "[dim]Formats of one model read exactly the same tokens, so their perplexities compare "
+        "much more closely than the ± says. Saved to this PC's quality history.[/dim]"
+    )
+
+
+def print_kept(outcome) -> None:
+    from ocq import quality as measured_quality
+
+    if outcome.note == "original":
+        console.print(
+            "[dim]These are the original weights: the reference this model's formats are "
+            "compared with.[/dim]"
+        )
+        return
+    kept = outcome.kept
+    if kept is None:
+        console.print(f"[dim]{escape(outcome.note)}[/dim]")
+        return
+    against = (
+        "the original"
+        if kept.reference_label.upper() != measured_quality.REFERENCE_FALLBACK
+        else "Q8_0, as the original does not fit in this PC's memory"
+    )
+    console.print(
+        f"[bold]Kept[/bold]         {outcome.label} keeps about {kept.kept:.0%} of the model's "
+        f"quality (perplexity {kept.perplexity:.4f} vs {kept.reference:.4f} for {against}, "
+        f"{kept.reference_label})",
+        highlight=False,
+    )
+    if not kept.same_device:
+        console.print(
+            "[dim]The two were measured on different devices (GPU and CPU), which round a "
+            "little differently.[/dim]"
+        )
+
+
+def print_bench(report, option, device: str, kv_cache: str, runs: int) -> None:
+    where = {"gpu": "all on the GPU", "cpu": "on the CPU"}.get(device, device.replace("gpu", "GPU"))
+    console.print(
+        f"llama.cpp {report.build or ''}, {where}, {kv_cache} cache".replace("  ", " "),
+        style="dim",
+        highlight=False,
+    )
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column()
+    expected = (
+        f"QuantPilot expected about {option.estimated_tps:.0f}"
+        if option.speed_basis == measurements.MEASURED
+        else f"QuantPilot expected up to {option.estimated_tps:.0f} (this PC's memory speed)"
+    )
+    table.add_row(
+        "Writing",
+        f"{report.tokens_per_second:,.1f} tok/s (± {report.stddev:.1f})  [dim]{expected}[/dim]",
+    )
+    lengths = sorted(report.prompt_speeds)
+    table.add_row(
+        "Reading",
+        ", ".join(f"{report.prompt_speeds[n]:,.0f} tok/s for {n:,} tokens" for n in lengths),
+    )
+    table.add_row(
+        "First token",
+        ", ".join(f"{report.first_token_seconds(n):.2f} s after {n:,} tokens" for n in lengths),
+    )
+    console.print(table)
+    console.print(
+        f"[dim]Saved to this PC's benchmark history ({runs} run{'s' * (runs > 1)} of this "
+        "setup).[/dim]"
+    )
+
+
 @app.command("models")
 def cmd_models(
     show_all: Annotated[
@@ -515,7 +653,7 @@ def cmd_recommend(
         typer.Option(
             "--workload",
             "-w",
-            help="chat, coding, rag, agentic, reasoning, long-context, throughput",
+            help="chat, coding, rag, agentic, reasoning, long-context, low-latency, throughput",
         ),
     ] = "chat",
     context: Annotated[
