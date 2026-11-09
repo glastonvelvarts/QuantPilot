@@ -232,3 +232,35 @@ def test_the_benchmark_reads_prompt_speed_and_build_from_llama_bench(tmp_path, m
     assert result.prompt_tokens_per_second == pytest.approx(1226.169272)
     assert result.runtime_version == "b11429"
     assert "A 512 token prompt is read at 1226 tok/s." in result.notes
+
+
+def test_the_gguf_says_quantpilot_made_it_and_from_which_repo(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from ocq.quantizers import gguf
+
+    commands = []
+
+    def fake_run_tool(command, log, env=None, progress=False):
+        commands.append(command)
+        if "--outfile" in command:
+            Path(command[command.index("--outfile") + 1]).write_bytes(b"GGUF")
+        return "", ""
+
+    monkeypatch.setattr(gguf, "run_tool", fake_run_tool)
+    quantizer = gguf.GGUFQuantizer()
+    quantizer.converter, quantizer.quantize_tool = Path("convert.py"), Path("llama-quantize")
+    quantizer.model_dir = tmp_path / "weights"
+    plan = SimpleNamespace(
+        output_dir=tmp_path / "out",
+        model_id="Qwen/Qwen3.5-0.8B",
+        model=SimpleNamespace(stored_precision="BF16"),
+        quant_config=SimpleNamespace(gguf_type="Q4_K_M"),
+    )
+    quantizer.quantize(plan)
+    convert = commands[0]
+    metadata = json.loads(Path(convert[convert.index("--metadata") + 1]).read_text())
+    assert metadata["general.quantized_by"] == "QuantPilot"
+    assert metadata["general.source.repo_url"] == "https://huggingface.co/Qwen/Qwen3.5-0.8B"
+    assert metadata["general.name"] == "Qwen3.5-0.8B"  # not the cache folder's commit hash

@@ -779,6 +779,10 @@ METHOD_NAMES = {
 }
 
 
+# Which method made a compressed-tensors folder (local_model.compressed_method), when known.
+MADE_WITH = "made_with"
+
+
 def quantization_label(settings: dict, bits: int) -> str:
     method = str(settings.get("quant_method") or "")
     name = METHOD_NAMES.get(method.lower(), method or "unknown method")
@@ -788,8 +792,15 @@ def quantization_label(settings: dict, bits: int) -> str:
         return f"MLX {str(settings['mode']).upper()}"
     if settings.get("quant_algo"):
         return f"{name} {settings['quant_algo']}"
-    if name == "compressed-tensors" and settings.get("format"):
+    if name == "compressed-tensors" and settings.get(MADE_WITH):
+        # llm-compressor saves AWQ, GPTQ and NVFP4 alike: the method, as QuantPilot names
+        # the formats it makes (AWQ 4-bit, ...).
+        name = str(settings[MADE_WITH]).upper()
+    elif name == "compressed-tensors" and settings.get("format"):
         name += f" {settings['format']}"
+    if name == "BNB" and bits == 4:  # as the BNB rows are named: also quantized scales or not
+        double = settings.get("bnb_4bit_use_double_quant")
+        return f"BNB 4-bit {'double' if double else 'single'}"
     return f"{name} {bits}-bit" if bits else name
 
 
@@ -1570,7 +1581,7 @@ def best_option(options: list[QuantOption]) -> QuantOption:
 
 # Already quantized checkpoints vLLM serves as they are (quantization labels of
 # quantization_label). bitsandbytes, MLX and unnamed methods stay with transformers.
-VLLM_STORED = ("AWQ", "GPTQ", "ModelOpt", "FP8", "MXFP4", "compressed-tensors")
+VLLM_STORED = ("AWQ", "GPTQ", "NVFP4", "ModelOpt", "FP8", "MXFP4", "compressed-tensors")
 
 
 def stored_runtime(model: ModelSnapshot) -> str:

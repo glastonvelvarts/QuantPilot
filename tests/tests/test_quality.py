@@ -341,3 +341,92 @@ def test_without_torch_the_quality_of_a_transformers_model_says_what_it_needs(mo
     )
     with pytest.raises(OcqError, match="needs torch and transformers installed"):
         quality.transformers_perplexity(Path("my-model"), Path("wiki.test.raw"), quality.FIXED)
+
+
+# Which original a model QuantPilot made is compared with, and its name (after the laptop run)
+
+
+def test_a_compressed_tensors_folder_is_named_by_the_method_that_made_it(tmp_path):
+    from ocq.local_model import PROVENANCE, compressed_method
+
+    folder = tmp_path / "model"
+    folder.mkdir()
+    assert compressed_method(folder) == ""
+    (folder / "recipe.yaml").write_text(
+        "default_stage:\n  default_modifiers:\n    GPTQModifier: {}\n"
+    )
+    assert compressed_method(folder) == "gptq"  # llm-compressor's recipe
+    (folder / PROVENANCE).write_text('{"source": "org/model", "method": "awq"}')
+    assert compressed_method(folder) == "awq"  # QuantPilot's own record first
+    for name, method in [
+        ("Qwen--Qwen2.5-0.5B-Instruct-awq-4bit", "awq"),
+        ("org--m-gptq-8bit", "gptq"),
+        ("org--m-nvfp4a16", "nvfp4"),
+        ("org--m-nvfp4", "nvfp4"),
+        ("my-awq-notes", ""),
+    ]:
+        named = tmp_path / name
+        named.mkdir()
+        assert compressed_method(named) == method, name  # the folder names QuantPilot gives
+
+
+def test_quantpilots_nvfp4_folder_is_nvfp4_for_vllm_not_compressed_tensors(tmp_path):
+    # The laptop's AWQ showed as "compressed-tensors pack-quantized 4-bit", which never
+    # matched the engine's "AWQ 4-bit" rows: its measured quality was not used.
+    from conftest import OCQ_NVFP4, real_model, write_safetensors
+
+    from ocq.model_analyzer import resolve_model, stored_runtime
+
+    _, config, tensors, dtypes = real_model(OCQ_NVFP4)
+    folder = tmp_path / "HuggingFaceTB--SmolLM2-135M-Instruct-nvfp4a16"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps(config))
+    write_safetensors(folder / "model.safetensors", tensors, dtypes)
+    snapshot = resolve_model(str(folder), None, use_llmfit=False)
+    assert snapshot.facts.quantization.value == "NVFP4 4-bit"
+    assert stored_runtime(snapshot) == "vLLM"
+
+
+def test_what_quantpilot_made_says_where_it_came_from_wherever_it_is(tmp_path):
+    from types import SimpleNamespace
+
+    from test_gguf_file import gguf_bytes
+
+    from ocq import bench
+    from ocq.quantizers.base import write_provenance
+    from ocq.quantizers.gguf import gguf_metadata
+    from ocq.types import QuantAlgorithm
+
+    # A folder (AWQ, GPTQ, NVFP4, bitsandbytes) saved with -o somewhere else.
+    folder = tmp_path / "somewhere" / "my-awq"
+    folder.mkdir(parents=True)
+    plan = SimpleNamespace(
+        model_id="Qwen/Qwen2.5-0.5B-Instruct",
+        quant_config=SimpleNamespace(algorithm=QuantAlgorithm.AWQ, bits=4),
+    )
+    write_provenance(folder, plan)
+    assert bench.made_from(folder) == "Qwen/Qwen2.5-0.5B-Instruct"
+
+    # A GGUF: the converter writes it into the file.
+    metadata = gguf_metadata("HuggingFaceTB/SmolLM2-135M-Instruct")
+    assert metadata == {
+        "general.quantized_by": "QuantPilot",
+        "general.name": "SmolLM2-135M-Instruct",
+        "general.source.repo_url": "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct",
+    }
+    assert "general.source.repo_url" not in gguf_metadata("local/my-finetune")
+    settings = {"general.architecture": "llama", **metadata}
+    gguf = tmp_path / "anywhere" / "smol-Q8_0.gguf"
+    gguf.parent.mkdir()
+    gguf.write_bytes(gguf_bytes(settings, []))
+    assert bench.made_from(gguf) == "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+    # Someone else's GGUF with a source: not trusted (it may be a fine-tune's base).
+    settings["general.quantized_by"] = "someone"
+    gguf.write_bytes(gguf_bytes(settings, []))
+    assert bench.made_from(gguf) is None
+    # Made before QuantPilot wrote this down: the folder it was made in.
+    old = tmp_path / "ocq-output" / "org--model" / "artifact" / "org--model-Q4_K_M.gguf"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(gguf_bytes({"general.architecture": "llama"}, []))
+    assert bench.made_from(old) == "org/model"

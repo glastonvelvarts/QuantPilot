@@ -178,8 +178,28 @@ def save(
 
 
 def made_from(path: Path) -> str | None:
-    """The repo a file QuantPilot made was quantized from (ocq-output/<org>--<name>/artifact/),
-    so its runs count for that repo's recommendations too. None for any other file."""
+    """The repo a model QuantPilot made was quantized from, so its runs and quality count for
+    that repo's recommendations and it is compared with its original: from what QuantPilot
+    wrote in it (the GGUF's metadata, a folder's quantpilot.json), else from the folder it was
+    made in (ocq-output/<org>--<name>/artifact/, before QuantPilot wrote that down). None for
+    any other model."""
+    from ocq.local_model import provenance
+    from ocq.quantizers.gguf import HF, QUANTIZED_BY
+
+    source = ""
+    if path.is_file() and path.suffix.lower() == ".gguf":
+        try:
+            from ocq.gguf_file import read_local
+
+            settings = read_local(path).settings
+        except Exception:  # a damaged or cut-off file
+            settings = {}
+        if settings.get("general.quantized_by") == QUANTIZED_BY:
+            source = str(settings.get("general.source.repo_url", "")).removeprefix(HF)
+    elif path.is_dir():
+        source = str(provenance(path).get("source", ""))
+    if source and "/" in source and not source.startswith(("local/", "ollama/", "http")):
+        return source.strip("/")
     if path.parent.name != "artifact" or "--" not in path.parent.parent.name:
         return None
     return path.parent.parent.name.replace("--", "/", 1)

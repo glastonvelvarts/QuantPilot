@@ -69,6 +69,18 @@ def download_model(model_id: str) -> Path:
         ) from exc
 
 
+def write_provenance(folder: Path, plan: OptimizationPlan) -> None:
+    """quantpilot.json in the folder it made: the repo it came from and the method, so the
+    folder is compared with its original and named by its method wherever it is moved."""
+    import json
+
+    from ocq.local_model import PROVENANCE
+
+    config = plan.quant_config
+    made = {"source": plan.model_id, "method": config.algorithm.value, "bits": config.bits}
+    (folder / PROVENANCE).write_text(json.dumps(made | {"quantized_by": "QuantPilot"}, indent=2))
+
+
 def free_memory() -> None:
     import torch
 
@@ -101,6 +113,7 @@ class TransformersQuantizer(Quantizer):
         return
 
     def save(self, plan: OptimizationPlan) -> str:
+        write_provenance(self.artifact_dir, plan)
         return str(self.artifact_dir)
 
     def benchmark(self, plan: OptimizationPlan, artifact_path: str) -> BenchmarkResult:

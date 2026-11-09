@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
+import json
 import os
 import platform
 import re
@@ -65,6 +66,8 @@ class GGUFQuantizer(Quantizer):
             f"Converting to GGUF ({precision}, the precision the model is stored in) ...",
             flush=True,
         )
+        metadata = workspace / "metadata.json"
+        metadata.write_text(json.dumps(gguf_metadata(plan.model_id)))
         run_tool(
             [
                 sys.executable,
@@ -74,6 +77,8 @@ class GGUFQuantizer(Quantizer):
                 str(full_precision),
                 "--outtype",
                 precision,
+                "--metadata",
+                str(metadata),
             ],
             log=workspace / "convert.log",
             progress=True,
@@ -191,6 +196,20 @@ class GGUFQuantizer(Quantizer):
             prompt_tokens_per_second=reading,
             runtime_version=report.build,
         )
+
+
+QUANTIZED_BY = "QuantPilot"
+HF = "https://huggingface.co/"
+
+
+def gguf_metadata(model_id: str) -> dict:
+    """What the GGUF says about itself (the converter's --metadata): QuantPilot made it, from
+    this repo, so it is compared with its original wherever the file is moved. Its name is the
+    model's, not the cache folder's (a commit hash when it came from the Hugging Face cache)."""
+    metadata = {"general.quantized_by": QUANTIZED_BY, "general.name": model_id.split("/")[-1]}
+    if not model_id.startswith(("local/", "ollama/")) and "/" in model_id:
+        metadata["general.source.repo_url"] = HF + model_id
+    return metadata
 
 
 def intermediate_precision(stored_precision: str) -> str:
