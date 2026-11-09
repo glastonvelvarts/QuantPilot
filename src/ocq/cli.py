@@ -20,6 +20,7 @@ from ocq.model_analyzer import DEFAULT_CONTEXT, quant_options, resolve_model
 from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
+from ocq.terminal import prepare_terminal, rich_status
 from ocq.types import (
     KV_CACHE_TYPES,
     Fact,
@@ -32,6 +33,8 @@ from ocq.types import (
     QuantAlgorithm,
     QuantChoices,
 )
+
+prepare_terminal()
 
 app = typer.Typer(
     name="ocq",
@@ -714,10 +717,10 @@ def cmd_doctor(
 
     findings = doctor.run_checks(detect_hardware(llmfit_bin), online=not offline)
     marks = {
-        doctor.OK: "[green]✓[/green]",
-        doctor.INFO: "[dim]·[/dim]",
-        doctor.WARN: "[yellow]![/yellow]",
-        doctor.FAIL: "[red]✗[/red]",
+        doctor.OK: rich_status("\u2713", "+", "green"),
+        doctor.INFO: rich_status("\u00b7", ".", "dim"),
+        doctor.WARN: rich_status("!", "!", "yellow"),
+        doctor.FAIL: rich_status("\u2717", "x", "red"),
     }
     table = Table(show_header=False, box=None, padding=(0, 1))
     table.add_column(width=1)
@@ -797,7 +800,11 @@ def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     console.print(table)
 
 
-MARKS = {"good": "[green]✓[/green]", "tradeoff": "[yellow]△[/yellow]", "bad": "[red]✗[/red]"}
+MARKS = {
+    "good": rich_status("\u2713", "+", "green"),
+    "tradeoff": rich_status("\u25b3", "~", "yellow"),
+    "bad": rich_status("\u2717", "x", "red"),
+}
 CONFIDENCE_COLORS = {"Low": "red", "Medium": "yellow", "High": "green", "Very High": "green"}
 
 
@@ -911,7 +918,11 @@ def print_pick(best) -> None:
     lines += [f"[yellow]! {escape(warning)}[/yellow]" for warning in best.warnings]
     lines.append(f"\nConfidence: [{CONFIDENCE_COLORS[level]}]{level}[/]")
     for evidence in best.confidence.evidence:
-        mark = "[green]✓[/green]" if evidence.known else "[dim]✗[/dim]"
+        mark = (
+            rich_status("\u2713", "+", "green")
+            if evidence.known
+            else rich_status("\u2717", "x", "dim")
+        )
         lines.append(f"  {mark} [dim]{escape(evidence.text)}[/dim]")
     console.print(Panel("\n".join(lines), title="★ Recommended", title_align="left"))
 
