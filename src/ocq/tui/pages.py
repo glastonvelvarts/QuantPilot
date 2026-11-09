@@ -997,17 +997,17 @@ class QuantizePage(Page):
     @on(Button.Pressed, "#check-made, #check-existing")
     def check_made(self) -> None:
         if self.made:
-            self.qp.open_with_model("check", str(self.made))
+            self.qp.open_with_model("check", shown_path(self.made))
 
     @on(Button.Pressed, "#bench-made")
     def bench_made(self) -> None:
         if self.made:  # speed and quality: what the new file keeps of the original
-            self.qp.open_bench(str(self.made), "fixed")
+            self.qp.open_bench(shown_path(self.made), "fixed")
 
     @on(Button.Pressed, "#verify-made")
     def verify_made(self) -> None:
         if self.made:
-            self.qp.open_with_model("verify", str(self.made))
+            self.qp.open_with_model("verify", shown_path(self.made))
 
     @on(Button.Pressed, "#install")
     def install(self) -> None:
@@ -1127,6 +1127,15 @@ class QuantizePage(Page):
         self.query_one("#bench-made").display = made_ok and made.endswith(".gguf")
         # The keys need a visible place to be: the result's first action, else Review.
         self.query_one("#check-made" if made_ok else "#review", Button).focus()
+
+
+def shown_path(path: Path) -> str:
+    """A file the app made, as short as it can be said: from the folder ocq runs in
+    (ocq-output/...), else the whole path."""
+    try:
+        return str(Path(path).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
 
 
 def made_file(plan) -> Path | None:

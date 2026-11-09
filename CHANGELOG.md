@@ -16,6 +16,9 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 ### Fixed
 
 - A model folder that was moved or deleted no longer empties My models and the recommendations: it is left out.
+- A model folder whose weight files were not copied with it says which are missing and how big they are, instead of "Could not read safetensors file".
+- A quantized model folder of your own, refused as any quantized model is, names the folder it was made from (its config.json's `_name_or_path`) to quantize instead.
+- After a quantize, Check it, Benchmark it and Verify it show the new file by its short path (`ocq-output/...`).
 - A model of your own (a folder saved with `save_pretrained`) is now compared with its original: what QuantPilot makes from it records the folder (in the GGUF, `general.source.url`; in `quantpilot.json`, `source_path`), and `ocq bench --quality` measures the original once from there. It said the original was not on the PC.
 
 ## [1.5.0] - 2026-11-09

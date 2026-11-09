@@ -84,7 +84,15 @@ ocq bench ocq-output/local--my-model/artifact/local--my-model-Q4_K_M.gguf --qual
 
 The file remembers the folder it was made from, so `--quality` compares it with your original (measured once): `Q4_K_M keeps about 77% of the model's quality`. Every format works the same way: GGUF, AWQ, GPTQ, bitsandbytes and NVFP4.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/glastonvelvarts/QuantPilot/main/assets/own-model.gif" alt="Adding a model of your own, quantizing it to Q4_K_M and measuring what it keeps of the original" width="100%">
+</p>
+
 In the app, **My models → + Add your model** opens a folder browser that checks what you pick (✓ config.json, weights, tokenizer, or what is missing: a LoRA adapter to merge first, `.bin` weights to save again). Once added, the model is listed with the others and its menu offers Check, Quantize and Measure its quality.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/glastonvelvarts/QuantPilot/main/assets/add-model.png" alt="Add your model: the folder is checked before it is added" width="70%">
+</p>
 
 ## The app
 

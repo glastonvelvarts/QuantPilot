@@ -90,6 +90,85 @@ CHROME = next(
 )
 
 
+OWN_MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"  # stands in for a fine-tune of your own
+KEY_NAMES = {"~": "tilde", "/": "slash", "-": "minus", ".": "full_stop", "_": "underscore"}
+
+
+def demo_home() -> Path:
+    """A home folder holding only a model of your own (the folder browser shows it, not the
+    real home's folders), with the downloads the app needs linked from the real one: llama.cpp,
+    the WikiText text, the Hugging Face cache. Its benchmark history starts empty."""
+    from huggingface_hub import snapshot_download
+
+    real = Path.home()
+    home = Path(tempfile.mkdtemp()) / "home"
+    for part in (".cache/ocq/llama.cpp", ".cache/ocq/datasets", ".cache/huggingface"):
+        if (real / part).exists():
+            (home / part).parent.mkdir(parents=True, exist_ok=True)
+            (home / part).symlink_to(real / part)
+    snapshot = snapshot_download(OWN_MODEL, allow_patterns=["*.json", "*.safetensors", "*.txt"])
+    shutil.copytree(snapshot, home / "my-finetune")  # plain files, as save_pretrained leaves
+    return home
+
+
+async def drive_own(frames: Path, shots: Path) -> None:
+    """+ Add your model, then Quantize to Q4_K_M, then Benchmark it with quality: its
+    original measured from the folder. Run with HOME (and the folder) at demo_home()."""
+    from ocq.tui.app import QuantPilotApp
+    from ocq.tui.pages import QuantizePage
+
+    app = QuantPilotApp(settings_path=Path(tempfile.mkdtemp()) / "tui.json", look_on_start=False)
+    filming = True
+    count = 0
+
+    async def film() -> None:
+        nonlocal count
+        while filming:
+            app.save_screenshot(filename=f"{count:04d}.svg", path=str(frames))
+            count += 1
+            await asyncio.sleep(FRAME_SECONDS)
+
+    async def settle(seconds: float = 900) -> None:
+        for _ in range(int(seconds / 0.5)):
+            await asyncio.sleep(0.5)
+            if not app.workers or all(w.is_finished for w in app.workers):
+                break
+        await asyncio.sleep(1.5)
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        camera = asyncio.create_task(film())
+        app.show_page("models", focus=True)
+        await settle()
+        app.query_one("#add-model").press()
+        await asyncio.sleep(1.2)
+        app.screen.query_one("#add-path").focus()
+        for key in "~/my-finetune":
+            await pilot.press(KEY_NAMES.get(key, key))
+            await asyncio.sleep(0.07)
+        await asyncio.sleep(1.5)
+        app.save_screenshot(filename="add-model.svg", path=str(shots))
+        app.screen.query_one("#add-ok").press()
+        await asyncio.sleep(2)  # what to do with it
+        app.screen.dismiss("quantize")
+        await settle()
+        app.query_one(QuantizePage).set_format("gguf:Q4_K_M")
+        await asyncio.sleep(0.8)
+        app.query_one("#quantize #review").press()
+        await settle()
+        app.query_one("#quantize #start").press()
+        await asyncio.sleep(1.2)
+        app.screen.query_one("#yes").press()  # "Start quantizing?": yes
+        await settle()
+        await asyncio.sleep(1.5)
+        app.query_one("#quantize #bench-made").press()
+        await settle()
+        app.save_screenshot(filename="own-benchmark.svg", path=str(shots))
+        await asyncio.sleep(2.5)
+        filming = False
+        await camera
+
+
 def to_png(svg: Path, png: Path) -> None:
     """A browser draws the app's SVG as it is meant to look (rsvg-convert drops the spaces at
     the start of a piece of text: "Fits easily1.1 GB"); rsvg-convert when there is none."""
@@ -207,13 +286,44 @@ def make_banner(shot: Path, banner: Path) -> None:
     Image.open(banner).convert("RGB").save(banner, optimize=True)
 
 
+def own_model_pictures() -> None:
+    """assets/add-model.png and assets/own-model.gif, made in a demo home of their own."""
+    import os
+
+    home = demo_home()
+    work = Path(tempfile.mkdtemp())
+    frames, shots = work / "frames", work / "shots"
+    frames.mkdir()
+    shots.mkdir()
+    subprocess.run(
+        [sys.executable, __file__, "--own-segment", str(frames), str(shots)],
+        cwd=home, env={**os.environ, "HOME": str(home)}, check=True,
+    )  # fmt: skip
+    to_png(shots / "add-model.svg", ASSETS / "add-model.png")
+    count = make_gif(frames, ASSETS / "own-model.gif")
+    size = (ASSETS / "own-model.gif").stat().st_size / 1e6
+    print(f"assets/add-model.png, assets/own-model.gif: {size:.1f} MB ({count} frames)")
+    shutil.rmtree(work)
+    shutil.rmtree(home.parent, ignore_errors=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--gguf", default=DEFAULT_GGUF, help="the GGUF the benchmark measures")
     parser.add_argument(
         "--banner-only", action="store_true", help="only the banner, from assets/check.png"
     )
+    parser.add_argument("--own-model", action="store_true", help="only the own-model pictures")
+    parser.add_argument(
+        "--own-segment", nargs=2, metavar=("FRAMES", "SHOTS"), help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
+    if args.own_segment:  # in the demo home (see own_model_pictures)
+        asyncio.run(drive_own(Path(args.own_segment[0]), Path(args.own_segment[1])))
+        return 0
+    if args.own_model:
+        own_model_pictures()
+        return 0
     if args.banner_only:
         make_banner(ASSETS / "check.png", ASSETS / "banner.png")
         return 0
@@ -231,6 +341,7 @@ def main() -> int:
     count = make_gif(frames, ASSETS / "demo.gif")
     if CHROME:
         make_banner(ASSETS / "check.png", ASSETS / "banner.png")
+    own_model_pictures()
     for name in ("check.png", "benchmark.png", "demo.gif"):
         size = (ASSETS / name).stat().st_size / 1e6
         print(
