@@ -412,7 +412,7 @@ def generate_candidates(
         except OcqError as exc:
             return str(exc)
         except (OSError, ValueError, KeyError) as exc:  # a broken file must not hide the others
-            return f"could not read it ({type(exc).__name__})"
+            return f"could not read it: {exc or type(exc).__name__}"
 
     with ThreadPoolExecutor(RESOLVE_WORKERS) as pool:
         snapshots = list(pool.map(read, sources))
@@ -1229,3 +1229,88 @@ def explain_model(result: RecommendationResult, model: str) -> tuple[Reason, ...
         if label.lower() == name:
             return (Reason(BAD, f"Could not be read: {why}"),)
     return (Reason(BAD, "Not among the models considered"),)
+
+
+# What the CLI and the TUI show (6F) ---------------------------------------------------------
+# Both draw from these, so they always list the same rows with the same words.
+
+
+@dataclass(frozen=True)
+class CompareRow:
+    """One format of one model: the pick, a ranked alternative, or a rejected one."""
+
+    candidate: Candidate
+    status: str  # PICK, RANKED or REJECTED
+    why: str  # one line: why it is the pick, why not, or the limit it broke
+    limit: str = ""  # REJECTED: the name of the first limit it broke (MEMORY, RUNTIME...)
+
+
+PICK, RANKED, REJECTED = "pick", "ranked", "rejected"
+
+
+def first_reason(reasons: tuple[Reason, ...]) -> str:
+    for kind in (BAD, TRADEOFF):
+        for reason in reasons:
+            if reason.kind == kind:
+                return reason.text
+    return ""
+
+
+def compare_rows(result: RecommendationResult, model_ref: str = "") -> list[CompareRow]:
+    """Every format of one model (all models when empty), best first: each format's best
+    ranked version, then the formats that cannot run here with the limit they broke."""
+
+    def wanted(candidate: Candidate) -> bool:
+        return not model_ref or candidate.model_ref == model_ref
+
+    rows: list[CompareRow] = []
+    seen: set[tuple[str, str]] = set()
+    for recommendation in result.ranked:
+        candidate = recommendation.candidate
+        key = (candidate.model_ref, candidate.option.label)
+        if not wanted(candidate) or key in seen:
+            continue
+        seen.add(key)
+        if recommendation is result.best:
+            rows.append(CompareRow(candidate, PICK, "Recommended"))
+        else:
+            rows.append(CompareRow(candidate, RANKED, first_reason(recommendation.reasons)))
+    for rejection in result.rejected:
+        candidate = rejection.candidate
+        key = (candidate.model_ref, candidate.option.label)
+        if not wanted(candidate) or key in seen or candidate.kv_cache != "f16":
+            continue
+        seen.add(key)
+        first = rejection.failed[0]
+        rows.append(CompareRow(candidate, REJECTED, first.text, first.name))
+    return rows
+
+
+def best_per_model(result: RecommendationResult) -> list[Recommendation]:
+    """Each model's best ranked option, best model first (for a list of models to try)."""
+    seen: set[str] = set()
+    best = []
+    for recommendation in result.ranked:
+        if recommendation.candidate.model_ref not in seen:
+            seen.add(recommendation.candidate.model_ref)
+            best.append(recommendation)
+    return best
+
+
+LIMIT_WORDS = {
+    MEMORY: "too big for the free memory",
+    RUNTIME: "need a runtime this PC cannot run",
+    CONTEXT: "hold less context than asked",
+    ARCHITECTURE: "cannot be converted to GGUF yet",
+    QUANTIZATION: "cannot be quantized on this PC",
+    DISK: "need more disk than is free",
+}
+
+
+def rejected_summary(result: RecommendationResult) -> list[tuple[int, str]]:
+    """(how many, why) for the options ruled out, by the first limit each broke."""
+    counts: dict[str, int] = {}
+    for rejection in result.rejected:
+        name = rejection.failed[0].name
+        counts[name] = counts.get(name, 0) + 1
+    return sorted(((n, LIMIT_WORDS[name]) for name, n in counts.items()), reverse=True)

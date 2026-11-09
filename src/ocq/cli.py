@@ -16,7 +16,7 @@ from ocq import measurements
 from ocq.engine import GGUF_TYPES
 from ocq.goals import goal_label
 from ocq.hardware import detect_hardware
-from ocq.model_analyzer import DEFAULT_CONTEXT, quant_options, recommend_models, resolve_model
+from ocq.model_analyzer import DEFAULT_CONTEXT, quant_options, resolve_model
 from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
@@ -497,36 +497,145 @@ def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     console.print(table)
 
 
+MARKS = {"good": "[green]✓[/green]", "tradeoff": "[yellow]△[/yellow]", "bad": "[red]✗[/red]"}
+CONFIDENCE_COLORS = {"Low": "red", "Medium": "yellow", "High": "green", "Very High": "green"}
+
+
 @app.command("recommend")
 def cmd_recommend(
-    limit: Annotated[int, typer.Option("--limit", "-n", help="How many models to list")] = 10,
-    use_case: Annotated[
-        str | None,
-        typer.Option("--use-case", help="general, coding, reasoning, chat, multimodal, embedding"),
+    models: Annotated[
+        list[str] | None,
+        typer.Argument(help="Models to choose between (default: this PC's, plus popular ones)"),
     ] = None,
+    workload: Annotated[
+        str,
+        typer.Option(
+            "--workload",
+            "-w",
+            help="chat, coding, rag, agentic, reasoning, long-context, throughput",
+        ),
+    ] = "chat",
+    context: Annotated[
+        int, typer.Option("--context", "-c", help="Tokens of context (default: the workload's)")
+    ] = 0,
+    kv_cache: Annotated[
+        list[str] | None,
+        typer.Option("--kv-cache", help="Cache types to try (default: f16 and q8_0)"),
+    ] = None,
+    folders: Annotated[
+        list[Path] | None,
+        typer.Option("--dir", "-d", help="Also look for models in this folder"),
+    ] = None,
+    why: Annotated[
+        list[str] | None, typer.Option("--why", help="Also explain why not this model")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Alternatives to list")] = 8,
     llmfit_bin: LlmfitBin = None,
 ) -> None:
-    """Suggest models that suit this PC."""
-    hw = detect_hardware(llmfit_bin)
-    models = recommend_models(hw, limit, use_case, llmfit_bin)
+    """Which model, format and runtime to use on this PC for a kind of work, and why."""
+    from ocq.recommend import (
+        WORKLOADS,
+        RecommendationRequest,
+        explain_model,
+        recommend,
+        rejected_summary,
+    )
 
-    table = Table(title="Models for this PC")
+    if workload not in WORKLOADS:
+        console.print(f"[red]Unknown workload {workload!r}. Use one of: {', '.join(WORKLOADS)}")
+        raise typer.Exit(1)
+    caches = tuple(read_kv_cache(value) for value in kv_cache or ())
+    request = RecommendationRequest(WORKLOADS[workload], tuple(models or ()), context, caches)
+    try:
+        hw = detect_hardware(llmfit_bin)
+        with console.status("Reading the models and sizing every option ..."):
+            result = recommend(request, hw, folders)
+    except OcqError as exc:
+        raise fail(exc) from exc
+
+    profile = request.workload
+    console.print(
+        f"[bold]{profile.label}[/bold] on this PC, {request.context_tokens:,} tokens of context"
+        f" [dim]({hw.available_ram_gb:.1f} GB RAM free{gpu_note(hw)})[/dim]"
+    )
+    best = result.best
+    if best is None:
+        console.print("[red]Nothing considered runs on this PC.[/red]")
+    else:
+        print_pick(best)
+        print_alternatives(result, limit)
+    for name in why or ():
+        console.print(f"\n[bold]Why not {escape(name)}?[/bold]")
+        for reason in explain_model(result, name):
+            console.print(f"  {MARKS[reason.kind.value]} {escape(reason.text)}")
+    ruled_out = ", ".join(f"{n} {words}" for n, words in rejected_summary(result))
+    if ruled_out:
+        console.print(f"\n[dim]Ruled out: {ruled_out}. --why <model> explains one.[/dim]")
+    for label, reason in result.unread:
+        console.print(f"[yellow]Could not read {escape(label)}: {escape(reason)}[/yellow]")
+    if best is not None and best.candidate.quantize:
+        console.print(f"[dim]Make it: {escape(make_command(best.candidate))}[/dim]")
+
+
+def print_pick(best) -> None:
+    candidate = best.candidate
+    level = str(best.confidence.level)
+    cache = f" · {candidate.kv_cache} cache" if candidate.kv_cache != "f16" else ""
+    lines = [
+        f"[bold]{escape(candidate.model_id)}[/bold]",
+        f"{escape(candidate.option.label)} · {candidate.runtime}{cache}",
+        "",
+    ]
+    lines += [f"{MARKS[r.kind.value]} {escape(r.text)}" for r in best.reasons]
+    lines += [f"[yellow]! {escape(warning)}[/yellow]" for warning in best.warnings]
+    lines.append(f"\nConfidence: [{CONFIDENCE_COLORS[level]}]{level}[/]")
+    for evidence in best.confidence.evidence:
+        mark = "[green]✓[/green]" if evidence.known else "[dim]✗[/dim]"
+        lines.append(f"  {mark} [dim]{escape(evidence.text)}[/dim]")
+    console.print(Panel("\n".join(lines), title="★ Recommended", title_align="left"))
+
+
+def print_alternatives(result, limit: int) -> None:
+    alternatives = result.alternatives[:limit]
+    if not alternatives:
+        return
+    table = Table(title="Alternatives", title_justify="left")
     table.add_column("Model", overflow="fold")
-    for column in ("Params", "Fit", "Runs on", "Quant", "Memory GB", "tok/s"):
+    for column in ("Format", "Runs on", "Memory", "Speed"):
         table.add_column(column, no_wrap=True)
-    for model in models:
-        fit = model.feasibility
+    table.add_column("Why not", overflow="fold")
+    for alternative in alternatives:
+        candidate, option = alternative.candidate, alternative.candidate.option
+        cache = f" + {candidate.kv_cache}" if candidate.kv_cache != "f16" else ""
+        why = next((r.text for r in alternative.reasons if r.kind.value == "bad"), None)
+        why = why or next((r.text for r in alternative.reasons), "")
         table.add_row(
-            model.model_id,
-            str(model.parameter_count),
-            colored_fit(fit.fit_level),
-            str(fit.run_mode),
-            fit.quant_label,
-            f"{fit.memory_required_gb:.1f} / {fit.memory_available_gb:.1f}",
-            f"{fit.estimated_tps:.0f}" if fit.runnable else "-",
+            escape(candidate.model_id),
+            escape(option.label + cache),
+            f"{candidate.runtime}, {runs_on(option)}",
+            f"{option.memory_required_gb:.1f} GB",
+            speed_cell(option),
+            escape(why),
         )
     console.print(table)
-    console.print("[dim]Check one in detail: ocq feasibility <model>[/dim]")
+
+
+def make_command(candidate) -> str:
+    """The ocq optimize command that makes a recommended file."""
+    option = candidate.option
+    parts = ["ocq optimize", candidate.model_ref]
+    if option.row_kind == "gguf":
+        parts += ["-b gguf", f"--gguf-type {option.label}"]
+    else:
+        parts.append(f"-b {option.row_kind}")
+        words = option.label.split()
+        bits = next((w.removesuffix("-bit") for w in words if w.endswith("-bit")), "")
+        if bits and option.row_kind != "nvfp4":
+            parts[-1] += f" --bits {bits}"
+        if option.label.endswith((" double", " single")):
+            parts.append(f"--{option.label.split()[-1]}-quant")
+    parts += [f"--context {candidate.context}", f"--kv-cache {candidate.kv_cache}", "--execute"]
+    return " ".join(parts)
 
 
 @app.command("feasibility")

@@ -71,9 +71,10 @@ class RowTable(DataTable):
             super().action_cursor_left()
 
 
-class Results(VerticalScroll, can_focus=False):
+class Results(VerticalScroll, can_focus=False, inherit_bindings=False):
     """Where a page shows its result. It scrolls to whatever is focused inside it but takes
-    no focus itself, so the arrow keys keep moving between fields."""
+    no focus itself, and no keys: once it is taller than the screen, its scrolling keys would
+    take Up and Down from the fields inside it."""
 
 
 class Action(Button):

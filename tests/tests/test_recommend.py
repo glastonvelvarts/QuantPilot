@@ -540,3 +540,55 @@ def test_why_not_names_the_limit_that_matters_not_a_runtime_that_cannot_run(save
     reasons = explain_model(result, QWEN)
     assert reasons[0].text == "Its closest option: Q2_K in llama.cpp, q8_0 cache"
     assert reasons[1].text.startswith("Needs ") and "0.5 GB is free" in reasons[1].text
+
+
+# What the CLI shows (6F) --------------------------------------------------------------------
+
+
+def run_recommend(monkeypatch, *args):
+    from typer.testing import CliRunner
+
+    from ocq import cli
+    from ocq import recommend as engine
+    from ocq.cli import app
+
+    monkeypatch.setattr(cli, "detect_hardware", lambda *a: make_hardware(ram_gb=24))
+    monkeypatch.setattr(engine, "free_disk_gb", lambda path: 1000.0)
+    monkeypatch.setattr(engine, "converter_architectures", lambda: frozenset({"Qwen2ForCausalLM"}))
+    return CliRunner().invoke(app, ["recommend", *args], env={"COLUMNS": "200"})
+
+
+def test_ocq_recommend_shows_the_pick_alternatives_and_why_not(saved_hub, monkeypatch):
+    result = run_recommend(monkeypatch, QWEN, QWEN_AWQ, "-w", "coding", "--why", QWEN_AWQ)
+    assert result.exit_code == 0, result.output
+    out = result.output
+    request = RecommendationRequest(WORKLOADS["coding"], (QWEN, QWEN_AWQ))
+    expected = recommend(request, make_hardware(ram_gb=24), disk_free_gb=1000)
+    best = expected.best.candidate
+    assert "Coding on this PC, 32,768 tokens of context" in out
+    assert "★ Recommended" in out and f"{best.option.label} · llama.cpp" in out
+    assert f"Confidence: {expected.best.confidence.level}" in out
+    assert "Alternatives" in out and "Why not" in out
+    assert f"Why not {QWEN_AWQ}?" in out and "vLLM needs an NVIDIA GPU" in out
+    assert "Ruled out: " in out and "need a runtime this PC cannot run" in out
+    make = f"ocq optimize {QWEN} -b gguf --gguf-type {best.option.label} --context 32768"
+    assert make in out.replace("\n", " ")
+
+
+def test_ocq_recommend_names_the_workloads_it_knows(saved_hub, monkeypatch):
+    result = run_recommend(monkeypatch, QWEN, "-w", "gaming")
+    assert result.exit_code == 1
+    assert "Unknown workload 'gaming'" in result.output and "long-context" in result.output
+
+
+def test_compare_rows_list_each_format_once_with_its_reason(saved_hub):
+    from ocq.recommend import PICK, REJECTED, compare_rows
+
+    result = recommend(RecommendationRequest(models=(QWEN,)), make_hardware(ram_gb=24), None, 1000)
+    rows = compare_rows(result, QWEN)
+    labels = [row.candidate.option.label for row in rows]
+    assert len(labels) == len(set(labels))  # one row per format, whatever the cache
+    assert rows[0].status == PICK and rows[0].candidate is result.best.candidate
+    awq = next(row for row in rows if row.candidate.option.label == "AWQ 4-bit")
+    assert (awq.status, awq.limit) == (REJECTED, RUNTIME)
+    assert awq.why.startswith("vLLM needs an NVIDIA GPU")

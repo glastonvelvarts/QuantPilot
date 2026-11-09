@@ -151,6 +151,7 @@ HARDWARE = HardwareProfile(
     backend="CPU",
     unified_memory=False,
     os_name="Linux",
+    ram_bandwidth_gbs=50.0,
 )
 
 
@@ -170,6 +171,24 @@ async def settle(app, pilot) -> None:
     await pilot.pause()
     await app.workers.wait_for_complete()
     await pilot.pause()
+
+
+def offline_engine(monkeypatch, catalog=()):
+    """The recommendation engine without the network: no models on this PC, Hub repos read
+    from the saved headers in data/, the popular list replaced by `catalog`."""
+    from conftest import real_model
+
+    from ocq import discovery, recommend
+
+    monkeypatch.setattr(discovery, "find_models", lambda *a, **k: [])
+    monkeypatch.setattr(recommend, "CATALOG", tuple(recommend.entry(m) for m in catalog))
+    monkeypatch.setattr(model_analyzer, "fetch_hf_model", lambda repo: real_model(repo)[0])
+    monkeypatch.setattr(model_analyzer, "fetch_model_files", lambda r, sha: real_model(r)[1:])
+    monkeypatch.setattr(model_analyzer, "catalog_entry", lambda *a: None)
+    monkeypatch.setattr(recommend, "free_disk_gb", lambda path: 1000.0)
+    monkeypatch.setattr(
+        recommend, "converter_architectures", lambda: frozenset({"Qwen2ForCausalLM"})
+    )
 
 
 def fake_model(monkeypatch, warnings=()):
@@ -199,7 +218,7 @@ def fake_model(monkeypatch, warnings=()):
     monkeypatch.setattr(model_analyzer, "resolve_model", lambda *a, **k: snapshot)
     monkeypatch.setattr(model_analyzer, "quant_options", lambda *a, **k: options)
     monkeypatch.setattr(plan, "generate_plan", lambda *a, **k: made)
-    monkeypatch.setattr(model_analyzer, "recommend_models", lambda *a, **k: [])
+    offline_engine(monkeypatch)
     return made
 
 
@@ -207,7 +226,8 @@ def text_of(app, selector: str) -> str:
     return str(app.query_one(selector).render())
 
 
-def test_menu_arrow_keys_open_the_pages_in_order(tmp_path: Path):
+def test_menu_arrow_keys_open_the_pages_in_order(tmp_path: Path, monkeypatch):
+    offline_engine(monkeypatch)  # Discover opens on the way
     seen = []
 
     async def steps(app, pilot):
@@ -220,59 +240,83 @@ def test_menu_arrow_keys_open_the_pages_in_order(tmp_path: Path):
     assert seen == order[:4]
 
 
-def test_check_recommends_a_format_in_plain_words(tmp_path: Path, monkeypatch):
-    fake_model(monkeypatch, ["GGUF backend not installed. Run: uv sync --extra gguf"])
+def test_check_shows_the_engines_pick_in_plain_words(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
+    from ocq import recommend
+
+    offline_engine(monkeypatch)
+    made = SimpleNamespace(warnings=["GGUF backend not installed. Run: uv sync --extra gguf"])
+    monkeypatch.setattr(plan, "generate_plan", lambda *a, **k: made)
+    request = recommend.RecommendationRequest(recommend.WORKLOADS["coding"], (QWEN,))
+    expected = recommend.recommend(request, HARDWARE)  # what ocq recommend shows
     seen = {}
 
     async def steps(app, pilot):
         app.show_page("check", focus=True)
-        await pilot.press(*"org/model", "enter")
+        app.query_one("#check #workload").value = "coding"
+        await pilot.press(*QWEN, "enter")
         await settle(app, pilot)
         seen["card"] = text_of(app, "#pick-text")
+        seen["why"] = text_of(app, "#why-text")
         seen["rows"] = app.query_one("#options").row_count
         await pilot.click(app.query_one("#quantize-pick"))
         await settle(app, pilot)
         seen["page"] = app.query_one("ContentSwitcher").current
         seen["format"] = app.query_one("#quantize #format").value
+        seen["context"] = app.query_one("#quantize #context").value
+        seen["saved"] = app.settings.workload
 
     run_app(tmp_path, steps)
-    assert "Recommended for this PC" in seen["card"] and "GGUF Q8_0 (8-bit)" in seen["card"]
-    assert "Fits easily" in seen["card"] and "up to 100 tok/s" in seen["card"]
+    best = expected.best.candidate
+    card = seen["card"].splitlines()
+    assert card[:2] == ["Recommended for Coding", f"{best.option.label} · llama.cpp"]
+    assert words.speed(best.option) in seen["card"] and "32K tokens" in seen["card"]
+    assert f"Confidence: {expected.best.confidence.level}" in seen["card"]
     assert "GGUF tools are not installed on this PC." in seen["card"]
     assert "uv sync" not in seen["card"]
-    assert seen["rows"] == 3
-    assert (seen["page"], seen["format"]) == ("quantize", "gguf:Q8_0")
+    assert expected.best.reasons[0].text in seen["why"] and "✓" in seen["why"]
+    assert seen["rows"] == len(recommend.compare_rows(expected))
+    assert (seen["page"], seen["format"]) == ("quantize", f"gguf:{best.option.label}")
+    assert seen["context"] == 32768 and seen["saved"] == "coding"
 
 
-def test_a_gguf_repo_gets_the_clis_best_fit_with_its_layer_split(tmp_path: Path, monkeypatch):
-    # A bigger file that is tight loses to a smaller one that fits, as in ocq feasibility.
-    tight = option("Q8_0", fit=FitLevel.MARGINAL, bits=8.5, gb=7.6, tps=30)
-    fits = option("Q4_K_M", fit=FitLevel.GOOD, bits=4.9, gb=6.1, tps=29)
-    fits = replace(fits, run_mode=RunMode.GPU_OFFLOAD, gpu_layers=14)
-    snapshot = SimpleNamespace(
-        model_id="org/model-GGUF",
-        is_quantized=False,
-        gguf_files=(("Q8_0", 8e9), ("Q4_K_M", 4.7e9)),
-        facts=ModelFacts(),
-        original_gb=None,
-        num_layers=28,
-    )
-    monkeypatch.setattr(model_analyzer, "resolve_model", lambda *a, **k: snapshot)
-    monkeypatch.setattr(model_analyzer, "quant_options", lambda *a, **k: [tight, fits])
+def test_a_gguf_file_is_recommended_as_it_is_not_quantized_again(tmp_path: Path, monkeypatch):
+    from test_discovery import smollm2_store
+
+    offline_engine(monkeypatch)
+    smollm2_store(tmp_path / "ollama")
+    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path / "ollama"))
     seen = {}
 
     async def steps(app, pilot):
         app.show_page("check", focus=True)
-        await pilot.press(*"org/model-GGUF", "enter")
+        app.query_one("#check #context").value = 2048  # what the small test file holds
+        await pilot.press(*"ollama:smollm2:135m", "enter")
         await settle(app, pilot)
         seen["card"] = text_of(app, "#pick-text")
         seen["quantize"] = app.query_one("#quantize-pick").display
 
     run_app(tmp_path, steps)
-    assert seen["card"].splitlines()[:2] == ["Best fit for this PC", "Q4_K_M"]
-    details = "Fits  6.1 GB  |  GPU + RAM  |  14 of 29 layers on GPU  |  up to 29 tok/s"
-    assert details in seen["card"]
+    assert seen["card"].splitlines()[1] == "Q8_0 · llama.cpp"
     assert not seen["quantize"]
+
+
+def test_discover_lists_each_models_best_option(tmp_path: Path, monkeypatch):
+    from conftest import QWEN, QWEN_AWQ
+
+    offline_engine(monkeypatch, catalog=(QWEN, QWEN_AWQ))
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("discover", focus=True)
+        await settle(app, pilot)
+        table = app.query_one("#discover DataTable")
+        seen["rows"] = [[str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)]
+
+    run_app(tmp_path, steps)
+    (row,) = seen["rows"]  # the AWQ repo needs vLLM, which needs an NVIDIA GPU
+    assert row[0] == f"{QWEN}  recommended" and row[-1] == "Download"
 
 
 def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
@@ -402,7 +446,8 @@ def test_a_failing_job_shows_a_message_and_the_app_stays_up(tmp_path: Path, monk
     def offline(*args, **kwargs):
         raise ConnectionError("network is unreachable")
 
-    monkeypatch.setattr(model_analyzer, "resolve_model", offline)
+    offline_engine(monkeypatch)
+    monkeypatch.setattr(model_analyzer, "fetch_hf_model", offline)
     seen = {}
 
     async def steps(app, pilot):
@@ -413,7 +458,7 @@ def test_a_failing_job_shows_a_message_and_the_app_stays_up(tmp_path: Path, monk
         seen["running"] = app.is_running
 
     run_app(tmp_path, steps)
-    assert seen["problem"] == "Something went wrong: network is unreachable"
+    assert seen["problem"] == "Could not read it: network is unreachable"
     assert seen["running"]
 
 
@@ -458,6 +503,8 @@ def test_verify_runs_llama_server_and_shows_layers_as_a_count(tmp_path: Path, mo
 
 
 def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
     fake_model(monkeypatch)
     seen = []
 
@@ -471,18 +518,20 @@ def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, 
         seen.append(where(app))
         await pilot.press("left")  # empty field: back to the menu
         seen.append(where(app))
-        await pilot.press("right", *"org/model")
+        await pilot.press("right", *QWEN)
         await pilot.press("left")  # moves the cursor inside the text, stays
         seen.append(where(app))
         await pilot.press("home", "left")  # at the start: back to the menu
         seen.append(where(app))
-        await pilot.press("right", "down", "down")  # model -> Browse -> Context
+        await pilot.press("right", "down", "down")  # model -> Browse -> Workload
         seen.append(where(app))
-        await pilot.press("down")  # a closed dropdown does not open on Down
+        await pilot.press("down")  # a closed dropdown does not open on Down: -> Context
+        seen.append(where(app))
+        await pilot.press("down")
         seen.append(where(app))
         await pilot.press("enter")  # Check
         await settle(app, pilot)
-        await pilot.press("down", "down")  # -> Quantize to this -> the table
+        await pilot.press("down", "down", "down")  # -> Quantize to this -> Why -> the table
         seen.append(where(app))
         await pilot.press("up")  # first row: leaves the table
         seen.append(where(app))
@@ -495,10 +544,11 @@ def test_keyboard_only_moves_into_pages_between_fields_and_back(tmp_path: Path, 
         "nav",
         "TextField",
         "nav",
+        "workload",
         "context",
         "check",
         "options",
-        "quantize-pick",
+        "CollapsibleTitle",
         "nav",
     ]
 

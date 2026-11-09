@@ -105,3 +105,34 @@ def hardware(hw) -> str:
     if not hw.gpus:
         parts.append("no GPU")
     return " | ".join(parts)
+
+
+CACHE_WORDS = {"f16": "full cache", "q8_0": "half-size cache", "q4_0": "quarter-size cache"}
+CONFIDENCE_STYLES = {"Low": "red", "Medium": "yellow", "High": "green", "Very High": "green"}
+REASON_MARKS = {"good": ("✓", "green"), "tradeoff": ("△", "yellow"), "bad": ("✗", "red")}
+
+
+def cache(kv_cache: str) -> str:
+    return CACHE_WORDS.get(kv_cache, f"{kv_cache} cache")
+
+
+def confidence(level) -> Text:
+    word = str(level)
+    return Text(word, style=CONFIDENCE_STYLES.get(word, ""))
+
+
+def reasons(items, sure=None) -> Text:
+    """The ✓ △ ✗ lines of a recommendation, then what its confidence rests on."""
+    text = Text()
+    for reason in items:
+        mark, style = REASON_MARKS[reason.kind.value]
+        text.append(f"{mark} ", style)
+        text.append(f"{plain(reason.text)}\n")
+    if sure is not None:
+        text.append("\nConfidence: ")
+        text.append_text(confidence(sure.level))
+        for evidence in sure.evidence:
+            mark, style = ("✓", "green") if evidence.known else ("✗", "dim")
+            text.append(f"\n  {mark} ", style)
+            text.append(evidence.text, "dim")
+    return text

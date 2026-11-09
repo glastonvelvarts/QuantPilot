@@ -41,9 +41,9 @@ Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate
 
 Run **`ocq`** with no command (or **`ocq tui`**) for the app: arrow keys and Enter, no flags to remember.
 
-- **Check a model**: type or browse to a model and QuantPilot recommends the version that suits this PC, with every other format and how it fits.
+- **Check a model**: type or browse to a model, pick the kind of work, and QuantPilot recommends the format, runtime and cache type for this PC, says why and how sure it is, and compares every other format with the reason it lost.
 - **Quantize**: review what will be made, then start it, with progress and the result in one place.
-- **Discover** suggests models for this PC; **My models** lists the ones already downloaded (Ollama, LM Studio, Hugging Face).
+- **Discover** ranks the best option of each model for the kind of work: the ones on this PC and popular ones to download; **My models** lists the ones already downloaded (Ollama, LM Studio, Hugging Face).
 - **Settings**: theme (including your terminal's own colors), default context, extra model folders, simple borders for old consoles. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
 - **?** shows the keys, **Ctrl+P** jumps anywhere, **q** quits.
 
@@ -124,7 +124,21 @@ Qwen/Qwen2.5-1.5B-Instruct
 
 **MLX models** (mlx-community, LM Studio's MLX downloads) are read from MLX's own `quantization` settings, including layers it stored at another bit width (for example the 8-bit layers of `gpt-oss-20b-MXFP4-Q8`, whose count then matches the original gpt-oss to the weight). MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio); on any other PC `feasibility` says so.
 
-Optional: `ocq recommend` suggests models from the [llmfit](https://github.com/AlexsJones/llmfit) catalog when available.
+### Recommendations
+
+`ocq recommend` chooses the model, format, runtime and cache type for a kind of work (`--workload chat`, `coding`, `rag`, `agentic`, `reasoning`, `long-context` or `throughput`), from the models on this PC and a list of popular ones (or only the ones you name):
+
+```
+ocq recommend --workload coding
+ocq recommend Qwen/Qwen3.5-9B Qwen/Qwen3.5-4B -w rag --context 65536 --why openai/gpt-oss-20b
+```
+
+1. Every model x format x runtime x cache type becomes a candidate, sized as `feasibility` sizes it.
+2. Candidates that cannot run here are ruled out, each with its reason: memory, runtime (vLLM needs an NVIDIA GPU on Linux or WSL2), context longer than the model holds, an architecture llama.cpp cannot convert yet, quantizing (AWQ needs an NVIDIA GPU), disk.
+3. The rest are ranked by the workload's priorities in order, never by one blended score: Coding asks for quality, then context, then speed. A later priority only chooses between options as good as the best on the earlier ones. Options slower than reading speed, using most of the free memory, or keeping less than half the model's quality come last.
+4. The pick says why it won, what the next options would give and cost, and how sure it is (Low to Very High) with the evidence: what was read from the files, what was measured on this PC, what is estimated.
+
+Quality is an estimate until it is measured: each GGUF type's loss is llama.cpp's own measurement on Llama-3-8B, valued in parameters with llama.cpp's LLaMA 7B and 13B perplexities; AWQ, GPTQ and NVFP4 count as Q4_K_S, bitsandbytes and MLX 4-bit as Q4_0. Speed is the memory-bandwidth limit until runs on this PC teach the real figure; runs of the same setup raise the confidence.
 
 ---
 
@@ -495,7 +509,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 | `models` | The models already on this PC, how each fits, and the name to use for it |
 | `inspect` | Every fact about a model, its source and how sure it is |
 | `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
-| `recommend` | Suggested Hub models for this PC |
+| `recommend` | Model, format, runtime and cache type for a kind of work, with reasons and confidence |
 | `feasibility` | Full format table for one model |
 | `plan` | Quant plan + warnings (no heavy work) |
 | `optimize` | Full pipeline; use `--execute` to quantize |

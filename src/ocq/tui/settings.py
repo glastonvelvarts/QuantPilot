@@ -15,6 +15,7 @@ from pathlib import Path
 from platformdirs import user_config_dir
 
 from ocq.model_analyzer import DEFAULT_CONTEXT
+from ocq.recommend import WORKLOADS
 from ocq.types import KV_CACHE_TYPES, OptimizationGoal
 
 SETTINGS_FILE = Path(user_config_dir("ocq", appauthor=False)) / "tui.json"
@@ -29,6 +30,7 @@ class Settings:
     context: int = DEFAULT_CONTEXT
     kv_cache: str = "f16"
     goal: str = OptimizationGoal.BALANCED.value
+    workload: str = "chat"  # the kind of work Check and Discover recommend for (WORKLOADS)
     model_folders: list[str] = field(default_factory=list)  # searched besides Ollama, LM Studio...
     llmfit_bin: str = ""  # empty: the llmfit that came with QuantPilot
     recent_models: list[str] = field(default_factory=list)  # newest first
@@ -63,6 +65,8 @@ def load_settings(path: Path = SETTINGS_FILE) -> Settings:
         settings.kv_cache = "f16"
     if settings.goal not in {goal.value for goal in OptimizationGoal}:
         settings.goal = OptimizationGoal.BALANCED.value
+    if settings.workload not in WORKLOADS:
+        settings.workload = Settings.workload
     if settings.context <= 0:
         settings.context = DEFAULT_CONTEXT
     settings.model_folders = [str(f) for f in settings.model_folders if isinstance(f, str)]

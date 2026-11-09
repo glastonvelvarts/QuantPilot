@@ -250,11 +250,15 @@ class QuantPilotApp(App):
         self.page.set_model(ref)
         self.page.run()
 
-    def open_quantize(self, ref: str, format_key: str) -> None:
+    def open_quantize(
+        self, ref: str, format_key: str, context: int = 0, kv_cache: str = ""
+    ) -> None:
+        """Quantize with this format, and the context and cache type it was recommended at."""
         self.show_page("quantize", focus=True)
         page = self.query_one(QuantizePage)
         page.set_model(ref)
         page.set_format(format_key)
+        page.preset(ref, format_key, context, kv_cache)
         page.run()
 
     @on(OptionList.OptionHighlighted, "#nav")
