@@ -12,6 +12,7 @@ It does not size anything itself: memory, layer split and speed come from fit_at
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import re
@@ -412,8 +413,8 @@ def hub_catalog(now: datetime | None = None) -> list[HubModel] | None:
     try:
         with ThreadPoolExecutor(RESOLVE_WORKERS) as pool:
             listings = list(pool.map(lambda key: fetch_hub_listing(*key), lists))
-    except (OSError, ValueError):
-        return models  # offline: the last list read, if any
+    except (OSError, ValueError, http.client.HTTPException):  # offline, or a reply cut short
+        return models  # the last list read, if any
     found: dict[str, HubModel] = {}
     for listing in listings:
         for model in chat_models(listing, now):

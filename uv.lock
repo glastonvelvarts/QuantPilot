@@ -1710,7 +1710,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'bnb'", specifier = ">=1.0" },
     { name = "bitsandbytes", marker = "extra == 'bnb'", specifier = ">=0.45" },
-    { name = "huggingface-hub", specifier = ">=0.24" },
+    { name = "huggingface-hub", specifier = ">=1.0" },
     { name = "llmcompressor", marker = "extra == 'awq'", specifier = ">=0.14" },
     { name = "llmcompressor", marker = "extra == 'gptq'", specifier = ">=0.14" },
     { name = "llmcompressor", marker = "extra == 'nvfp4'", specifier = ">=0.14" },

@@ -51,14 +51,22 @@ def model_weights_dir(plan: OptimizationPlan) -> Path:
 
 
 def download_model(model_id: str) -> Path:
+    from httpx import TransportError  # the Hub's connection errors, which are not OSErrors
     from huggingface_hub import list_repo_files, snapshot_download
 
-    skip = list(NOT_NEEDED_FOR_QUANTIZATION)
-    if any(name.endswith(".safetensors") for name in list_repo_files(model_id)):
-        skip += ["*.bin", "*.pt", "*.pth"]
+    from ocq.model_analyzer import hub_unreachable
 
-    print(f"Downloading {model_id} ...", flush=True)
-    return Path(snapshot_download(model_id, ignore_patterns=skip))
+    skip = list(NOT_NEEDED_FOR_QUANTIZATION)
+    try:
+        if any(name.endswith(".safetensors") for name in list_repo_files(model_id)):
+            skip += ["*.bin", "*.pt", "*.pth"]
+
+        print(f"Downloading {model_id} ...", flush=True)
+        return Path(snapshot_download(model_id, ignore_patterns=skip))
+    except TransportError as exc:
+        raise hub_unreachable(
+            f"downloading {model_id}", exc, " The files it finished are kept."
+        ) from exc
 
 
 def free_memory() -> None:
