@@ -12,19 +12,22 @@ It does not size anything itself: memory, layer split and speed come from fit_at
 
 from __future__ import annotations
 
+import math
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 from ocq.engine import calibration_fits_in_ram
-from ocq.model_analyzer import quant_options, resolve_model
+from ocq.model_analyzer import fit_at, quant_options, resolve_model
 from ocq.model_size import kv_value_bytes
 from ocq.plan import free_disk_gb
 from ocq.quantizers.llama_cpp import TAG as LLAMA_CPP_TAG
 from ocq.quantizers.llama_cpp import converter_architectures
 from ocq.types import (
     VLLM,
+    FitLevel,
     HardwareProfile,
     ModelSnapshot,
     OcqError,
@@ -575,3 +578,260 @@ def apply_limits(
         else:
             allowed.append((candidate, checks))
     return allowed, rejected
+
+
+# Ranking (6D) -------------------------------------------------------------------------------
+# No single weighted score. Candidates are first split into tiers (fits comfortably, fast enough
+# to read along), then picked one at a time: keep those within a tolerance of the best on the
+# workload's first objective, of those the ones within a tolerance of the best on the second,
+# and so on; the tie-breaks decide what is left. So a later objective only ever chooses among
+# candidates that are as good as the best on every earlier one.
+
+# Quality: an estimate until phase 7 measures it. Two published sources:
+# 1. What each GGUF type costs, llama.cpp b11429 (tools/quantize/quantize.cpp, "+x ppl @
+#    Llama-3-8B"; tools/perplexity/README.md: Llama 3 8B BF16 perplexity 6.225194).
+LLAMA3_8B_PPL = 6.225194
+LLAMA3_8B_PARAMETERS = 8.03e9
+GGUF_PPL_INCREASE = {
+    "Q8_0": 0.0026,
+    "Q6_K": 0.0217,
+    "Q5_K_M": 0.0569,
+    "Q5_K_S": 0.1049,
+    "Q5_1": 0.1062,
+    "Q5_0": 0.1316,
+    "Q4_K_M": 0.1754,
+    "Q4_K_S": 0.2689,
+    "Q4_1": 0.4511,
+    "Q4_0": 0.4685,
+    "Q3_K_L": 0.5562,
+    "Q3_K_M": 0.6569,
+    "Q3_K_S": 1.6321,
+    "Q2_K_S": 3.1836,
+    "Q2_K": 3.5199,
+}
+# 2. How much perplexity is worth in parameters, measured by the same tool on the same text:
+#    llama.cpp's README at ffb06a3 (2023-05-30) has LLaMA 7B (6.7B parameters) at 5.9066 and
+#    13B (13.0B) at 5.2543 in F16. Within a family, ln(perplexity) falls by SIZE_SLOPE for
+#    every e-fold of parameters, so a type that adds dL to ln(perplexity) leaves a model as
+#    good as one with exp(-dL / SIZE_SLOPE) of its parameters. (The same table: 13B at Q4_0,
+#    5.3860, still beats 7B at F16.) The share is applied to models of every size; bigger
+#    models lose less to quantization, so this is on the safe side for them.
+SIZE_SLOPE = math.log(5.9066 / 5.2543) / math.log(13.0 / 6.7)
+# Keeping less than this share of its quality, a model is worse than a smaller one at a
+# milder type (Q3_K_S and Q2_K on Llama-3-8B).
+DEGRADED = 0.5
+
+# Formats with no llama.cpp measurement, rated as the GGUF type closest to how they quantize.
+FULL = "full"
+AS_RELEASED = "as released"
+CALIBRATED_4BIT = "Q4_K_S"  # AWQ, GPTQ, NVFP4: 4-bit groups with importance-aware scales
+PLAIN_4BIT = "Q4_0"  # bitsandbytes NF4, MLX: 4-bit groups rounded to nearest
+BITS_AS_GGUF = {2: "Q2_K", 3: "Q3_K_S", 4: PLAIN_4BIT, 5: "Q5_0", 6: "Q6_K", 8: "Q8_0"}
+
+# Tiers. Reading speed: about 238 words a minute (Brysbaert 2019), 4 words a second, at
+# about 1.3 tokens a word. Slower than that, a chat makes people wait for every line.
+READING_SPEED_TPS = 6.0
+COMFORTABLE = (FitLevel.PERFECT, FitLevel.GOOD)  # Marginal: over 85% of the free memory
+CONTEXT_ROOM = 4
+SLOW = "slower than reading speed"
+TIGHT = "uses most of the free memory"
+DEGRADED_FORMAT = "keeps less than half of the model's quality"
+SPECIALIST = "made for code"
+
+# Differences smaller than these are within what the estimates can tell apart.
+TOLERANCE = {
+    Objective.QUALITY: 0.05,  # within a model the losses are measured: Q8_0 and Q6_K tie
+    Objective.SPEED: 0.10,
+    Objective.CONTEXT: 0.0,  # already in whole steps (doubling)
+    Objective.MEMORY: 0.10,
+    Objective.THROUGHPUT: 0.10,
+}
+
+
+def quality_kept(gguf_type: str) -> float:
+    """Share of a model's quality a GGUF type keeps (FULL and AS_RELEASED keep all of it)."""
+    if gguf_type in (FULL, AS_RELEASED):
+        return 1.0
+    increase = GGUF_PPL_INCREASE[gguf_type]
+    loss_added = math.log((LLAMA3_8B_PPL + increase) / LLAMA3_8B_PPL)
+    return math.exp(-loss_added / SIZE_SLOPE)
+
+
+def rated_as(candidate: Candidate) -> str:
+    """The GGUF type a candidate's quality is read from, FULL or AS_RELEASED."""
+    option = candidate.option
+    label = option.label.removesuffix(" (as stored)").strip()
+    upper = label.upper()
+    if option.row_kind == "stored" and not candidate.model.is_quantized:
+        return FULL  # the original weights
+    if upper in GGUF_PPL_INCREASE:
+        return upper
+    if upper in ("F32", "F16", "BF16"):
+        return FULL
+    if upper.startswith("MXFP4"):
+        return AS_RELEASED  # gpt-oss was trained for and released in MXFP4
+    bits = re.search(r"(\d+)-BIT|FP(\d+)|Q(\d)|INT(\d+)", upper)
+    width = int(next(group for group in bits.groups() if group)) if bits else 0
+    if width >= 8:
+        return "Q8_0"
+    if width == 4 and upper.startswith(("AWQ", "GPTQ", "NVFP4", "MODELOPT", "IQ4")):
+        return CALIBRATED_4BIT
+    # No width in the name (an unknown method): the most common, 4-bit.
+    return BITS_AS_GGUF.get(width, "Q2_K" if width else PLAIN_4BIT)
+
+
+def effective_parameters(model: ModelSnapshot) -> float:
+    """Parameters to compare models by. A mixture of experts counts as the geometric mean of
+    its total and active parameters, a rule of thumb (30B with 3B active is about a 9.5B)."""
+    total = model.facts.parameters.value or model.params_b * 1e9
+    active = model.facts.active_parameters
+    if model.is_moe and active.known and active.value:
+        return math.sqrt(total * active.value)
+    return float(total)
+
+
+def estimated_quality(candidate: Candidate) -> float:
+    """Effective parameters the candidate is worth: its size times the share its format keeps."""
+    return effective_parameters(candidate.model) * quality_kept(rated_as(candidate))
+
+
+def refit(candidate: Candidate, hardware: HardwareProfile, context: int) -> QuantOption:
+    """The candidate's row at another context: the same call quant_options makes."""
+    option = candidate.option
+    return fit_at(
+        option.label,
+        option.weights_gb,
+        candidate.model,
+        hardware,
+        context,
+        use_measurements=option.row_kind == "gguf",
+        row_kind=option.row_kind,
+        kv_cache=candidate.kv_cache,
+        runtime=option.runtime,
+    )
+
+
+def longest_context(candidate: Candidate, hardware: HardwareProfile, limit: int) -> int:
+    """The longest context that still fits, doubling from the one asked for, up to limit."""
+    best, context = candidate.context, candidate.context
+    while context < limit:
+        context = min(context * 2, limit)
+        if not refit(candidate, hardware, context).runnable:
+            break
+        best = context
+    return best
+
+
+def objective_values(
+    candidate: Candidate, workload: WorkloadProfile, hardware: HardwareProfile
+) -> dict[Objective, float]:
+    """Each objective as a number where more is better."""
+    option = candidate.option
+    values = {
+        Objective.QUALITY: estimated_quality(candidate),
+        Objective.SPEED: option.estimated_tps,
+        Objective.MEMORY: 1 / max(option.memory_required_gb, 0.01),
+    }
+    wanted = set(workload.priorities)
+    if Objective.CONTEXT in wanted:
+        # Room for more text, counted up to CONTEXT_ROOM times what was asked: past that, more
+        # room does not change what the workload can do.
+        limit = min(
+            candidate.model.context_length or candidate.context, CONTEXT_ROOM * candidate.context
+        )
+        values[Objective.CONTEXT] = float(longest_context(candidate, hardware, limit))
+    if Objective.THROUGHPUT in wanted:
+        # Decoding reads the weights once per step for every conversation in the batch, so
+        # while memory speed is the limit, tokens per second grow with the conversations
+        # that fit (an upper bound: compute becomes the limit at some point). The
+        # conversations share one cache (llama.cpp's unified cache, vLLM's pages).
+        conversations = 1  # the hard limits already checked one
+        while conversations < workload.conversations:
+            cells = candidate.context * (conversations + 1)
+            if not refit(candidate, hardware, cells).runnable:
+                break
+            conversations += 1
+        values[Objective.THROUGHPUT] = conversations * option.estimated_tps
+    return values
+
+
+def drawbacks(candidate: Candidate, workload: WorkloadProfile) -> list[str]:
+    """What makes a candidate a poor pick whatever it scores. Candidates with fewer come first."""
+    found = []
+    if workload.conversations == 1 and candidate.option.estimated_tps < READING_SPEED_TPS:
+        found.append(SLOW)
+    if candidate.option.fit_level not in COMFORTABLE:
+        found.append(TIGHT)
+    if quality_kept(rated_as(candidate)) < DEGRADED:
+        found.append(DEGRADED_FORMAT)
+    if CODER in candidate.tags and workload.key != "coding":
+        found.append(SPECIALIST)
+    return found
+
+
+def tier(candidate: Candidate, workload: WorkloadProfile) -> int:
+    return len(drawbacks(candidate, workload))
+
+
+def tie_break(candidate: Candidate, values: dict[Objective, float], workload: WorkloadProfile):
+    """What decides between candidates equally good on every objective: a model made for the
+    workload, the default cache, files already here, no quantizing, then quality and speed."""
+    made_for = {"coding": CODER, "reasoning": REASONING}.get(workload.key)
+    return (
+        made_for is not None and made_for not in candidate.tags,
+        candidate.kv_cache != "f16",
+        not candidate.local,
+        candidate.quantize,
+        -values[Objective.QUALITY],
+        -values[Objective.SPEED],
+    )
+
+
+def within(value: float, best: float, tolerance: float) -> bool:
+    return value >= best * (1 - tolerance) if best > 0 else value >= best
+
+
+def rank(
+    allowed: list[Candidate], workload: WorkloadProfile, hardware: HardwareProfile
+) -> list[Recommendation]:
+    """Best first. Each Recommendation's scores are its values over the best of them (0 to 1)."""
+    values = {id(c): objective_values(c, workload, hardware) for c in allowed}
+    remaining = list(allowed)
+    ranked: list[Candidate] = []
+    while remaining:
+        best_tier = min(tier(c, workload) for c in remaining)
+        pool = [c for c in remaining if tier(c, workload) == best_tier]
+        for objective in workload.priorities:
+            best = max(values[id(c)][objective] for c in pool)
+            pool = [c for c in pool if within(values[id(c)][objective], best, TOLERANCE[objective])]
+        winner = min(pool, key=lambda c: tie_break(c, values[id(c)], workload))
+        ranked.append(winner)
+        remaining.remove(winner)
+
+    tops = {
+        objective: max((values[id(c)][objective] for c in allowed), default=0.0)
+        for objective in (values[id(allowed[0])] if allowed else {})
+    }
+    return [
+        Recommendation(
+            c,
+            scores={
+                objective: (value / tops[objective] if tops[objective] else 0.0)
+                for objective, value in values[id(c)].items()
+            },
+        )
+        for c in ranked
+    ]
+
+
+def recommend(
+    request: RecommendationRequest,
+    hardware: HardwareProfile,
+    extra_dirs: list[Path] | None = None,
+    disk_free_gb: float | None = None,
+) -> RecommendationResult:
+    """The whole engine: candidates, hard limits, ranking. The CLI and the TUI call this."""
+    candidates, unread = generate_candidates(request, hardware, extra_dirs)
+    allowed, rejected = apply_limits(candidates, hardware, disk_free_gb)
+    ranked = rank([candidate for candidate, _ in allowed], request.workload, hardware)
+    return RecommendationResult(request, tuple(ranked), tuple(rejected), tuple(unread))

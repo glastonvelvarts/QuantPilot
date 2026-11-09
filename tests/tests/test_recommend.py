@@ -2,10 +2,11 @@
 a temporary home (test_discovery's fixtures), and Hub repos are read from the saved headers in
 data/."""
 
+import math
 from dataclasses import replace
 
 import pytest
-from conftest import MLX_QWEN, QWEN, QWEN_AWQ, QWEN_BNB, real_model
+from conftest import GPT_OSS, MLX_QWEN, QWEN, QWEN3_MOE, QWEN_AWQ, QWEN_BNB, real_model
 from test_discovery import empty_home, hf_repo, smollm2_store  # noqa: F401 (empty_home: autouse)
 from test_model_analyzer import make_hardware
 
@@ -13,24 +14,41 @@ from ocq import model_analyzer
 from ocq.quantizers import llama_cpp
 from ocq.recommend import (
     ARCHITECTURE,
+    AS_RELEASED,
+    CALIBRATED_4BIT,
     CATALOG,
     CODER,
     CONTEXT,
     DEFAULT_WORKLOAD,
     DISK,
+    FULL,
     MEMORY,
+    PLAIN_4BIT,
     QUANTIZATION,
     RUNTIME,
+    SIZE_SLOPE,
+    SLOW,
+    SPECIALIST,
+    TIGHT,
     WORKLOADS,
     Objective,
     RecommendationRequest,
     RecommendationResult,
     apply_limits,
     disk_needed_gb,
+    drawbacks,
+    effective_parameters,
+    estimated_quality,
     generate_candidates,
     model_sources,
+    objective_values,
+    quality_kept,
+    rank,
+    rated_as,
+    recommend,
+    refit,
 )
-from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM, OcqError
+from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM, FitLevel, OcqError
 
 
 def test_workloads_rank_on_distinct_objectives():
@@ -285,3 +303,123 @@ def test_converter_architectures_are_read_from_its_register_lines(tmp_path, monk
     monkeypatch.delenv("OCQ_LLAMA_CPP")
     monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "not-downloaded")
     assert llama_cpp.converter_architectures() is None  # and nothing is downloaded
+
+
+# Ranking (6D) -------------------------------------------------------------------------------
+
+BIG_GPU = replace(make_hardware(ram_gb=64, vram_gb=24), os_name="Linux")
+
+
+def by_label(models, hardware, context=0, workload="chat"):
+    request = RecommendationRequest(
+        workload=WORKLOADS[workload], models=tuple(models), context=context
+    )
+    candidates, _ = generate_candidates(request, hardware)
+    return {(c.model_ref, c.option.label, c.kv_cache): c for c in candidates}
+
+
+def test_quality_kept_follows_llama_cpp_measurements():
+    ladder = ["Q2_K", "Q3_K_S", "Q3_K_M", "Q4_0", "Q4_K_S", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"]
+    kept = [quality_kept(t) for t in ladder]
+    assert kept == sorted(kept) and kept[-1] < quality_kept(FULL) == 1.0
+    assert round(quality_kept("Q4_K_M"), 3) == 0.854
+    assert quality_kept("Q2_K") < 0.1 and quality_kept("Q8_0") > 0.99
+    # The exchange rate comes from llama.cpp's LLaMA table, and agrees with its other rows:
+    # 13B at Q4_0 (5.3860) is still worth more than 7B at F16 (5.9066).
+    assert round(SIZE_SLOPE, 4) == 0.1765
+    assert 13.0 * math.exp(-math.log(5.3860 / 5.2543) / SIZE_SLOPE) > 6.7
+
+
+def test_each_format_is_rated_as_the_gguf_type_closest_to_it(saved_hub):
+    rows = by_label([QWEN, QWEN_AWQ, MLX_QWEN, GPT_OSS], BIG_GPU)
+    rating = {(ref, label): rated_as(c) for (ref, label, kv), c in rows.items() if kv == "f16"}
+    assert rating[(QWEN, "BF16")] == FULL
+    assert rating[(QWEN, "Q4_K_M")] == "Q4_K_M"
+    assert rating[(QWEN, "AWQ 4-bit")] == rating[(QWEN, "GPTQ 4-bit")] == CALIBRATED_4BIT
+    assert rating[(QWEN, "BNB 4-bit double")] == PLAIN_4BIT
+    assert rating[(QWEN, "GPTQ 8-bit")] == rating[(QWEN, "BNB 8-bit")] == "Q8_0"
+    assert rating[(QWEN_AWQ, "AWQ 4-bit (as stored)")] == CALIBRATED_4BIT
+    (mlx,) = [r for (ref, _), r in rating.items() if ref == MLX_QWEN]
+    assert mlx == PLAIN_4BIT
+    (gpt_oss,) = [r for (ref, _), r in rating.items() if ref == GPT_OSS]
+    assert gpt_oss == AS_RELEASED
+
+
+def test_a_mixture_of_experts_counts_between_its_active_and_total_size(saved_hub):
+    (moe, *_) = by_label([QWEN3_MOE], BIG_GPU).values()
+    total, active = moe.model.facts.parameters.value, moe.model.facts.active_parameters.value
+    assert active < effective_parameters(moe.model) < total
+    assert effective_parameters(moe.model) == math.sqrt(total * active)
+
+
+def test_near_equal_quality_goes_to_the_faster_one(saved_hub):
+    # A big GPU runs every format; Q8_0 and Q6_K keep about the same quality, Q6_K is faster.
+    best = rank(list(by_label([QWEN], BIG_GPU).values()), WORKLOADS["chat"], BIG_GPU)[0]
+    assert (best.candidate.option.label, best.candidate.kv_cache) == ("Q6_K", "f16")
+    assert best.scores[Objective.QUALITY] > 0.95 and best.scores[Objective.SPEED] < 1
+
+
+def test_a_slow_or_tight_candidate_ranks_after_a_comfortable_one(saved_hub):
+    rows = by_label([QWEN], BIG_GPU)
+    good, smaller = rows[(QWEN, "Q8_0", "f16")], rows[(QWEN, "Q4_K_M", "f16")]
+    slow = replace(good, option=replace(good.option, estimated_tps=3.0))
+    tight = replace(good, option=replace(good.option, fit_level=FitLevel.MARGINAL))
+    assert drawbacks(slow, WORKLOADS["chat"]) == [SLOW]
+    assert drawbacks(tight, WORKLOADS["chat"]) == [TIGHT]
+    for worse in (slow, tight):
+        ranked = rank([worse, smaller], WORKLOADS["chat"], BIG_GPU)
+        assert ranked[0].candidate is smaller  # lower quality, but nothing against it
+    # Serving many conversations has no reading-speed floor.
+    assert SLOW not in drawbacks(slow, WORKLOADS["throughput"])
+
+
+def test_a_coding_model_is_kept_for_coding(saved_hub):
+    rows = by_label([QWEN], BIG_GPU)
+    general = rows[(QWEN, "Q4_K_M", "f16")]
+    coder = replace(rows[(QWEN, "Q8_0", "f16")], tags=frozenset({CODER}))
+    assert drawbacks(coder, WORKLOADS["chat"]) == [SPECIALIST]
+    assert rank([coder, general], WORKLOADS["chat"], BIG_GPU)[0].candidate is general
+    assert rank([coder, general], WORKLOADS["coding"], BIG_GPU)[0].candidate is coder
+
+
+def test_ties_go_to_the_default_cache_and_to_files_already_here(saved_hub):
+    rows = by_label([QWEN], BIG_GPU)
+    f16, q8 = rows[(QWEN, "Q6_K", "f16")], rows[(QWEN, "Q6_K", "q8_0")]
+    assert rank([q8, f16], WORKLOADS["chat"], BIG_GPU)[0].candidate is f16
+    here = replace(f16, local=True)
+    assert rank([f16, here], WORKLOADS["chat"], BIG_GPU)[0].candidate is here
+
+
+def test_context_room_is_counted_up_to_four_times_the_context_asked(saved_hub):
+    longest = real_model(QWEN)[1]["max_position_embeddings"]
+    rows = by_label([QWEN], BIG_GPU, context=4096, workload="rag")
+    values = objective_values(rows[(QWEN, "Q4_K_M", "f16")], WORKLOADS["rag"], BIG_GPU)
+    assert values[Objective.CONTEXT] == min(4 * 4096, longest)
+
+
+def test_throughput_counts_the_conversations_that_fit(saved_hub):
+    workload = WORKLOADS["throughput"]
+    rows = by_label([QWEN], BIG_GPU, workload="throughput")
+    q4 = rows[(QWEN, "Q4_K_M", "f16")]
+    values = objective_values(q4, workload, BIG_GPU)
+    assert values[Objective.THROUGHPUT] == workload.conversations * q4.option.estimated_tps
+    small = make_hardware(ram_gb=2.2)  # room for the weights and only some conversations
+    q4_small = by_label([QWEN], small, workload="throughput")[(QWEN, "Q4_K_M", "f16")]
+    fewer = objective_values(q4_small, workload, small)[Objective.THROUGHPUT]
+    conversations = fewer / q4_small.option.estimated_tps
+    assert conversations == round(conversations) and 1 < conversations < workload.conversations
+    fit = refit(q4_small, small, int(conversations) * q4_small.context)
+    assert fit.runnable  # exactly as many as fit: one more does not
+    assert not refit(q4_small, small, int(conversations + 1) * q4_small.context).runnable
+
+
+def test_recommend_runs_the_whole_engine(saved_hub):
+    request = RecommendationRequest(models=(QWEN, QWEN_AWQ, "nobody/missing"))
+    result = recommend(request, make_hardware(ram_gb=24), disk_free_gb=1000)
+    assert result.best is not None and result.best.candidate.runtime == "llama.cpp"
+    assert result.unread[0][0] == "nobody/missing"
+    assert {r.failed[0].name for r in result.rejected} == {RUNTIME}  # vLLM, bitsandbytes
+    for recommendation in result.ranked:
+        assert all(0 <= score <= 1 for score in recommendation.scores.values())
+    qualities = [estimated_quality(r.candidate) for r in result.ranked]
+    assert qualities[0] >= max(qualities) * 0.95  # quality first, within its tolerance
