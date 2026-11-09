@@ -208,7 +208,7 @@ class QuantPilotApp(App):
             summary = ""
         self.call_from_thread(self.show_hardware, summary)
         try:
-            self.known_models = find_models(self.settings.folders())
+            self.known_models = find_models(self.settings.folders(), skip_missing=True)
         except Exception:
             self.known_models = []
         self.call_from_thread(self.refresh_suggestions)

@@ -329,6 +329,7 @@ class ListPage(Page):
     """A table of models; Enter on a row asks what to do with it."""
 
     COLUMNS: tuple[str, ...] = ()
+    ON_THIS_PC = False  # every model listed is on this PC: its quality can be measured
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -378,24 +379,61 @@ class ListPage(Page):
         if not ref:
             return
 
+        actions = ModelActions(ref, gguf, quality=self.ON_THIS_PC)
+        self.app.push_screen(actions, self.act_on(ref))
+
+    def act_on(self, ref: str):
+        """What the model's menu does: open that page with the model (and run it)."""
+
         def chosen(page: str | None) -> None:
-            if page:
+            if page == "quality":  # its perplexity, the reference its formats are compared with
+                self.qp.open_bench(ref, "fixed")
+            elif page:
                 self.qp.open_with_model(page, ref)
 
-        self.app.push_screen(ModelActions(ref, gguf), chosen)
+        return chosen
 
 
 class ModelsPage(ListPage):
     TITLE = "My models"
     COLUMNS = ("Model", "From", "Size", "Fit", "Speed")
+    ON_THIS_PC = True
 
     def compose_filters(self) -> ComposeResult:
         with Horizontal(classes="actions"):
+            yield Action("+ Add your model", variant="primary", id="add-model")
             yield Action("Refresh", id="refresh")
 
     @on(Button.Pressed, "#refresh")
     def refresh_pressed(self) -> None:
         self.run()
+
+    @on(Button.Pressed, "#add-model")
+    def add_pressed(self) -> None:
+        from ocq.tui.widgets import AddModel
+
+        self.app.push_screen(AddModel(), self.added)
+
+    def added(self, chosen: str | None) -> None:
+        """A model of your own: its folder joins the model folders (Settings shows them), the
+        list is read again, and what to do with it is asked right away."""
+        from ocq.local_model import check_model
+
+        if not chosen:
+            return
+        path = Path(chosen)
+        found = check_model(path)
+        if found.folder is None:
+            return
+        folder = str(found.folder.resolve())
+        known = [str(Path(f).expanduser().resolve()) for f in self.qp.settings.model_folders]
+        if folder not in known:
+            self.qp.update_setting("model_folders", [*self.qp.settings.model_folders, folder])
+        self.notify(f"Added {path.name}: {found.label}")
+        self.run()
+
+        gguf = "GGUF" in found.label
+        self.app.push_screen(ModelActions(path.name, gguf, quality=True), self.act_on(chosen))
 
     def params(self) -> dict[str, Any]:
         s = self.qp.settings
@@ -406,7 +444,7 @@ class ModelsPage(ListPage):
         from ocq.discovery import GGUF, find_models
 
         try:
-            models = find_models(params["folders"])
+            models = find_models(params["folders"], skip_missing=True)
         except OcqError as exc:
             models = []
             self.app.call_from_thread(self.notify, str(exc), severity="error")
@@ -424,7 +462,7 @@ class ModelsPage(ListPage):
         empty = (
             "No models found yet.\n\n"
             "Models from Ollama, LM Studio and Hugging Face show up here by themselves. "
-            "Keep them somewhere else? Add the folder in Settings."
+            "A model of your own (a fine-tune)? Press + Add your model."
         )
         self.app.call_from_thread(self.fill, rows, empty)
         self.app.call_from_thread(self.qp.refresh_suggestions)
@@ -1530,6 +1568,11 @@ class SettingsPage(Page):
         self.show_token()
 
     def opened(self) -> None:
+        # Folders added since (+ Add your model on My models) show here too.
+        folders = self.query_one("#model_folders", TextArea)
+        saved = "\n".join(self.qp.settings.model_folders)
+        if folders.text != saved:
+            folders.text = saved
         token, where = env_file.hf_token()
         if token and self.account is None:
             self.check_token(token, save=False)  # who it belongs to, once per session

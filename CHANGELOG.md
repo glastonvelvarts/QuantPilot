@@ -8,8 +8,14 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 
 - README: how to open the app, for each way of installing QuantPilot (`ocq`, `uvx quantpilot`, `uv run ocq`).
 
+### Added
+
+- **+ Add your model** on the app's My models page: a folder browser that checks what you pick (config.json, the weights, the tokenizer; a LoRA adapter or `.bin` weights are explained), then lists the model with the others and asks what to do with it. Models on the PC that are not GGUF can have their quality measured from that menu.
+- The real tests quantize every format also from a plain folder, as a model of your own.
+
 ### Fixed
 
+- A model folder that was moved or deleted no longer empties My models and the recommendations: it is left out.
 - A model of your own (a folder saved with `save_pretrained`) is now compared with its original: what QuantPilot makes from it records the folder (in the GGUF, `general.source.url`; in `quantpilot.json`, `source_path`), and `ocq bench --quality` measures the original once from there. It said the original was not on the PC.
 
 ## [1.5.0] - 2026-11-09

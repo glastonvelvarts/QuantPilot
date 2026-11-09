@@ -378,6 +378,22 @@ ModalScreen {
     padding: 1 2;
 }
 
+.dialog.add-model {
+    width: 84;
+}
+
+#add-tree {
+    height: 12;
+    margin: 1 0;
+    border: round $border;
+    background: $surface;
+}
+
+#add-check {
+    height: auto;
+    margin-bottom: 1;
+}
+
 .dialog.keys {
     width: 44;
 }

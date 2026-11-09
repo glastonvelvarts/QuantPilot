@@ -82,7 +82,9 @@ ocq optimize ./my-model -b gguf --gguf-type Q4_K_M --execute  # or AWQ, GPTQ, bi
 ocq bench ocq-output/local--my-model/artifact/local--my-model-Q4_K_M.gguf --quality
 ```
 
-The file remembers the folder it was made from, so `--quality` compares it with your original (measured once): `Q4_K_M keeps about 77% of the model's quality`. In the app, type the folder (or Browse) on the Quantize page.
+The file remembers the folder it was made from, so `--quality` compares it with your original (measured once): `Q4_K_M keeps about 77% of the model's quality`. Every format works the same way: GGUF, AWQ, GPTQ, bitsandbytes and NVFP4.
+
+In the app, **My models → + Add your model** opens a folder browser that checks what you pick (✓ config.json, weights, tokenizer, or what is missing: a LoRA adapter to merge first, `.bin` weights to save again). Once added, the model is listed with the others and its menu offers Check, Quantize and Measure its quality.
 
 ## The app
 

@@ -601,11 +601,17 @@ def quantpilot_models(roots: list[Path] | None = None) -> list[LocalModel]:
     return models
 
 
-def find_models(extra_dirs: list[Path] | None = None) -> list[LocalModel]:
+def find_models(
+    extra_dirs: list[Path] | None = None, skip_missing: bool = False
+) -> list[LocalModel]:
+    """skip_missing: a folder that is gone (a model of your own moved or deleted) is left out
+    instead of stopping the whole list (the app); else it is an error (ocq models --dir)."""
     models = ollama_models() + lmstudio_models() + hf_cache_models() + llama_cpp_cache_models()
     models += quantpilot_models()
     for folder in extra_dirs or []:
         if not folder.is_dir():
+            if skip_missing:
+                continue
             raise OcqError(f"Folder not found: {folder}")
         models += folder_tree_models(folder.expanduser().resolve())
     return models

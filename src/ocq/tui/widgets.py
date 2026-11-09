@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 from rich.markup import escape
@@ -16,7 +17,17 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import SuggestFromList
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input, Label, OptionList, RichLog, Select, Static
+from textual.widgets import (
+    Button,
+    DataTable,
+    DirectoryTree,
+    Input,
+    Label,
+    OptionList,
+    RichLog,
+    Select,
+    Static,
+)
 from textual.widgets.option_list import Option
 
 from ocq.tui import words
@@ -358,12 +369,14 @@ class ModelActions(ModalScreen[str | None]):
 
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
 
-    def __init__(self, title: str, gguf: bool) -> None:
+    def __init__(self, title: str, gguf: bool, quality: bool = False) -> None:
         super().__init__()
         self.title_text = title
         self.actions = [("Check how it runs", "check"), ("Quantize", "quantize")]
         if gguf:  # a file llama.cpp runs: its speed can be measured, its memory checked
             self.actions += [("Benchmark", "bench"), ("Verify", "verify")]
+        elif quality:  # weights on this PC transformers runs: its quality can be measured
+            self.actions.append(("Measure its quality", "quality"))
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
@@ -406,6 +419,94 @@ class Confirm(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
+
+
+class ModelFolders(DirectoryTree):
+    """Folders and GGUF files only: what can be a model of your own."""
+
+    def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
+        return [
+            path
+            for path in paths
+            if not path.name.startswith(".") and (path.is_dir() or path.suffix.lower() == ".gguf")
+        ]
+
+
+class AddModel(ModalScreen[str | None]):
+    """Add a model of your own: the folder your training saved (save_pretrained), a folder of
+    GGUF files, or a .gguf file. What it holds is checked as it is chosen; Add only when
+    QuantPilot can work with it. Returns what was chosen (the folder, or the .gguf file), or
+    None."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
+
+    def __init__(self, start: Path | None = None) -> None:
+        super().__init__()
+        self.start = start or Path.home()
+        self.chosen: Path | None = None  # set when it can be added
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog add-model"):
+            yield Label("Add your model", classes="dialog-title")
+            yield Static(
+                "The folder your training saved with save_pretrained (Unsloth, Axolotl, the "
+                "Trainer), or a .gguf file. Type it or pick it below.",
+                classes="dialog-body",
+            )
+            yield TextField(placeholder="~/models/my-finetune", id="add-path")
+            yield ModelFolders(self.start, id="add-tree")
+            yield Static("", id="add-check")
+            with Horizontal(classes="dialog-buttons"):
+                yield Action("Add", variant="primary", id="add-ok", disabled=True)
+                yield Action("Cancel", id="add-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#add-path", Input).focus()
+
+    @on(Input.Changed, "#add-path")
+    def typed(self, event: Input.Changed) -> None:
+        self.show(event.value.strip())
+
+    @on(DirectoryTree.DirectorySelected)
+    @on(DirectoryTree.FileSelected)
+    def picked(self, event) -> None:
+        event.stop()
+        self.query_one("#add-path", Input).value = str(event.path)  # also checks it
+
+    def show(self, typed: str) -> None:
+        from ocq.local_model import check_model
+
+        check = self.query_one("#add-check", Static)
+        if not typed:
+            self.chosen = None
+            check.update("")
+            self.query_one("#add-ok", Button).disabled = True
+            return
+        found = check_model(Path(typed))
+        text = Text()
+        for fine, what in found.lines:
+            text.append("✓ " if fine else "✗ ", "green" if fine else "red")
+            text.append(f"{what}\n")
+        if found.ok:
+            text.append(f"Ready to add: {found.label}", "bold green")
+        check.update(text)
+        self.chosen = Path(typed).expanduser() if found.ok else None
+        self.query_one("#add-ok", Button).disabled = not found.ok
+
+    @on(Input.Submitted, "#add-path")
+    def submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        if self.chosen is not None:
+            self.dismiss(str(self.chosen))
+
+    @on(Button.Pressed, "#add-ok")
+    def add(self) -> None:
+        if self.chosen is not None:
+            self.dismiss(str(self.chosen))
+
+    @on(Button.Pressed, "#add-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
 
 
 KEYS = (
