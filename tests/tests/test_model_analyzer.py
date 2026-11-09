@@ -422,7 +422,7 @@ def test_without_hardware_only_the_facts_are_read():
 
 def test_bnb_repo_count_is_checked_against_its_base_model():
     facts = real_snapshot(QWEN_BNB).facts
-    assert facts.quantization.value == "BNB 4-bit"
+    assert facts.quantization.value == "BNB 4-bit double"  # as QuantPilot names its BNB rows
     assert facts.parameters.value == 1_543_714_304
     assert facts.parameters.kind == FactKind.CROSS_CHECKED
     assert facts.parameters.source == "safetensors headers + base model"

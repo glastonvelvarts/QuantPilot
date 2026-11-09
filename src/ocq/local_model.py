@@ -115,9 +115,48 @@ def read_safetensors_header(file: Path) -> dict:
     return header
 
 
+# What QuantPilot writes next to a model it made: the repo it came from and the method.
+PROVENANCE = "quantpilot.json"
+
+
+def provenance(folder: Path) -> dict:
+    try:
+        made = json.loads((folder / PROVENANCE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return made if isinstance(made, dict) else {}
+
+
+def compressed_method(folder: Path) -> str:
+    """Which method made a compressed-tensors folder: llm-compressor saves AWQ, GPTQ and NVFP4
+    alike. From QuantPilot's record, else llm-compressor's recipe.yaml, else the name
+    QuantPilot gives the folder (<model>-awq-4bit, -gptq-8bit, -nvfp4). "" when unknown."""
+    method = str(provenance(folder).get("method", "")).lower()
+    if method in ("awq", "gptq", "nvfp4"):
+        return method
+    try:
+        recipe = (folder / "recipe.yaml").read_text(encoding="utf-8")
+    except OSError:
+        recipe = ""
+    for modifier, method in (("AWQModifier", "awq"), ("GPTQModifier", "gptq")):
+        if modifier in recipe:
+            return method
+    if "NVFP4" in recipe:
+        return "nvfp4"
+    named = re.search(r"-(awq|gptq)-\d+bit$|-(nvfp4)(?:a16)?$", folder.name.lower())
+    return next((group for group in named.groups() if group), "") if named else ""
+
+
 def fetch_local_model_files(folder: Path) -> tuple[dict, list[Tensor], dict[str, str]]:
     """config.json, every tensor's shape, and every tensor's stored type."""
+    from ocq.model_analyzer import MADE_WITH, quantization_config
+
     config = load_local_config(folder)
+    settings = quantization_config(config)
+    if str(settings.get("quant_method", "")) == "compressed-tensors":
+        method = compressed_method(folder)
+        if method:
+            settings[MADE_WITH] = method
     tensors: list[Tensor] = []
     dtypes: dict[str, str] = {}
 
