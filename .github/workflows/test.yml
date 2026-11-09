@@ -4,13 +4,78 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch or pull request cancels the run still going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --group dev
-      - run: uv run pytest -q
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  # The fast suite on every OS QuantPilot supports, with its oldest and newest Python.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --group dev
+      - run: uv run pytest -q
+
+  # What people install: the package builds, and installs and starts with uv (uv tool
+  # install quantpilot, uvx quantpilot) on every OS.
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the source package, then the wheel from it
+        run: uv build
+      - name: uv tool install quantpilot
+        run: |
+          uv tool install dist/*.whl
+          bin="$(uv tool dir --bin)"
+          "$bin/quantpilot" --version
+          "$bin/ocq" --version
+          "$bin/ocq" --help
+      - name: uvx quantpilot
+        run: uvx --from "$(ls dist/*.whl)" quantpilot --version
+      - name: The app starts from the installed package
+        run: |
+          python="$(uv tool dir)/quantpilot/bin/python"
+          [ -x "$python" ] || python="$(uv tool dir)/quantpilot/Scripts/python.exe"
+          "$python" - <<'EOF'
+          import asyncio
+          from ocq.tui.app import QuantPilotApp
+
+          async def start():
+              app = QuantPilotApp(look_on_start=False)
+              async with app.run_test(size=(100, 30)) as pilot:
+                  await pilot.pause()
+                  assert app.query_one("ContentSwitcher").current == "home"
+
+          asyncio.run(start())
+          print("the app starts")
+          EOF

@@ -41,8 +41,24 @@ app = typer.Typer(
 console = Console()
 
 
+def show_version(value: bool) -> None:
+    if value:
+        from ocq import __version__
+
+        console.print(f"QuantPilot {__version__}", highlight=False)
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
-def start(ctx: typer.Context) -> None:
+def start(
+    ctx: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version", callback=show_version, is_eager=True, help="Show the version and exit"
+        ),
+    ] = False,
+) -> None:
     """ocq with no command: the full-screen app in a terminal, the help text anywhere else."""
     from ocq import env_file
 

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 
+from ocq import DISTRIBUTION
 from ocq.quantizers import get_quantizer
 from ocq.tui import words
 from ocq.types import HardwareProfile, QuantAlgorithm
@@ -65,7 +66,8 @@ def project_root() -> Path | None:
     root = Path(__file__).resolve().parents[3]
     pyproject = root / "pyproject.toml"
     try:
-        if pyproject.is_file() and re.search(r'^name = "ocq"', pyproject.read_text(), re.M):
+        named = rf'^name = "{DISTRIBUTION}"'
+        if pyproject.is_file() and re.search(named, pyproject.read_text(), re.M):
             return root
     except OSError:
         pass
@@ -75,7 +77,7 @@ def project_root() -> Path | None:
 def requirements(extra: str) -> list[str]:
     """The packages an extra adds, read from QuantPilot's installed metadata."""
     found = []
-    for requirement in metadata.requires("ocq") or []:
+    for requirement in metadata.requires(DISTRIBUTION) or []:
         spec, _, marker = requirement.partition(";")
         if re.search(rf"""extra\s*==\s*["']{re.escape(extra)}["']""", marker):
             found.append(spec.strip())

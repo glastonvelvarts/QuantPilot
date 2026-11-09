@@ -1,12 +1,28 @@
 [project]
-name = "ocq"
+name = "quantpilot"
 version = "0.1.0"
-description = "QuantPilot (OCQ) - terminal LLM quantization optimizer"
+description = "Which LLM, format and runtime to run on this PC, measured and explained, and quantizing it (GGUF, AWQ, GPTQ, bitsandbytes, NVFP4)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "QuantPilot contributors" }]
-keywords = ["llm", "quantization", "awq", "gptq", "gguf", "nvfp4", "quantpilot", "ocq", "cli"]
+keywords = ["llm", "quantization", "awq", "gptq", "gguf", "nvfp4", "llama.cpp", "vllm", "quantpilot", "ocq", "cli", "tui"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "typer>=0.12",
     "rich>=13.7",
@@ -30,8 +46,14 @@ dev = [
     "ruff>=0.15",
 ]
 
+[project.urls]
+Homepage = "https://github.com/glastonvelvarts/QuantPilot"
+Repository = "https://github.com/glastonvelvarts/QuantPilot"
+Issues = "https://github.com/glastonvelvarts/QuantPilot/issues"
+
 [project.scripts]
-ocq = "ocq.cli:app"
+ocq = "ocq.cli:main"
+quantpilot = "ocq.cli:main"  # uvx quantpilot
 
 [build-system]
 requires = ["hatchling"]
@@ -39,6 +61,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ocq"]
+
+# The source package: exactly these, never a local virtual environment or model outputs.
+[tool.hatch.build.targets.sdist]
+include = ["src/ocq", "tests", "assets", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
 
 # PyPI only ships CPU torch for Windows, so Windows pulls the CUDA build instead.
 # It still runs on machines without an NVIDIA card.

@@ -1661,83 +1661,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ocq"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "llmfit" },
-    { name = "platformdirs", version = "4.12.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "platformdirs", version = "4.14.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "psutil" },
-    { name = "rich" },
-    { name = "textual" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-awq = [
-    { name = "llmcompressor" },
-]
-bnb = [
-    { name = "accelerate" },
-    { name = "bitsandbytes" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
-    { name = "torch", version = "2.14.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform == 'win32'" },
-    { name = "transformers" },
-]
-gguf = [
-    { name = "protobuf" },
-    { name = "sentencepiece" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
-    { name = "torch", version = "2.14.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform == 'win32'" },
-    { name = "transformers" },
-]
-gptq = [
-    { name = "llmcompressor" },
-]
-nvfp4 = [
-    { name = "llmcompressor" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'bnb'", specifier = ">=1.0" },
-    { name = "bitsandbytes", marker = "extra == 'bnb'", specifier = ">=0.45" },
-    { name = "huggingface-hub", specifier = ">=1.0" },
-    { name = "llmcompressor", marker = "extra == 'awq'", specifier = ">=0.14" },
-    { name = "llmcompressor", marker = "extra == 'gptq'", specifier = ">=0.14" },
-    { name = "llmcompressor", marker = "extra == 'nvfp4'", specifier = ">=0.14" },
-    { name = "llmfit", specifier = ">=1.1" },
-    { name = "platformdirs", specifier = ">=4.12.4" },
-    { name = "protobuf", marker = "extra == 'gguf'", specifier = ">=4.21" },
-    { name = "psutil", specifier = ">=5.9" },
-    { name = "rich", specifier = ">=13.7" },
-    { name = "sentencepiece", marker = "extra == 'gguf'", specifier = ">=0.2" },
-    { name = "textual", specifier = ">=8.0" },
-    { name = "torch", marker = "sys_platform == 'win32' and extra == 'bnb'", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cu126" },
-    { name = "torch", marker = "sys_platform == 'win32' and extra == 'gguf'", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cu126" },
-    { name = "torch", marker = "sys_platform != 'win32' and extra == 'bnb'", specifier = ">=2.4" },
-    { name = "torch", marker = "sys_platform != 'win32' and extra == 'gguf'", specifier = ">=2.4" },
-    { name = "transformers", marker = "extra == 'bnb'", specifier = ">=4.45" },
-    { name = "transformers", marker = "extra == 'gguf'", specifier = ">=4.45" },
-    { name = "typer", specifier = ">=0.12" },
-]
-provides-extras = ["gguf", "awq", "gptq", "bnb", "nvfp4"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.15" },
-]
-
-[[package]]
 name = "packaging"
 version = "26.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2515,6 +2438,83 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/da/92/1446574745d74df0c92e6aa4a7b0b3130706a4142b2d1a5869f2eaa423c6/pyyaml-6.0.3-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:16249ee61e95f858e83976573de0f5b2893b3677ba71c9dd36b9cf8be9ac6d65", size = 829923, upload-time = "2025-09-25T21:32:54.537Z" },
     { url = "https://files.pythonhosted.org/packages/f0/7a/1c7270340330e575b92f397352af856a8c06f230aa3e76f86b39d01b416a/pyyaml-6.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:4ad1906908f2f5ae4e5a8ddfce73c320c2a1429ec52eafd27138b7f1cbe341c9", size = 174062, upload-time = "2025-09-25T21:32:55.767Z" },
     { url = "https://files.pythonhosted.org/packages/f1/12/de94a39c2ef588c7e6455cfbe7343d3b2dc9d6b6b2f40c4c6565744c873d/pyyaml-6.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:ebc55a14a21cb14062aa4162f906cd962b28e2e9ea38f9b4391244cd8de4ae0b", size = 149341, upload-time = "2025-09-25T21:32:56.828Z" },
+]
+
+[[package]]
+name = "quantpilot"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "llmfit" },
+    { name = "platformdirs", version = "4.12.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "platformdirs", version = "4.14.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "psutil" },
+    { name = "rich" },
+    { name = "textual" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+awq = [
+    { name = "llmcompressor" },
+]
+bnb = [
+    { name = "accelerate" },
+    { name = "bitsandbytes" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
+    { name = "torch", version = "2.14.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform == 'win32'" },
+    { name = "transformers" },
+]
+gguf = [
+    { name = "protobuf" },
+    { name = "sentencepiece" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
+    { name = "torch", version = "2.14.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform == 'win32'" },
+    { name = "transformers" },
+]
+gptq = [
+    { name = "llmcompressor" },
+]
+nvfp4 = [
+    { name = "llmcompressor" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", marker = "extra == 'bnb'", specifier = ">=1.0" },
+    { name = "bitsandbytes", marker = "extra == 'bnb'", specifier = ">=0.45" },
+    { name = "huggingface-hub", specifier = ">=1.0" },
+    { name = "llmcompressor", marker = "extra == 'awq'", specifier = ">=0.14" },
+    { name = "llmcompressor", marker = "extra == 'gptq'", specifier = ">=0.14" },
+    { name = "llmcompressor", marker = "extra == 'nvfp4'", specifier = ">=0.14" },
+    { name = "llmfit", specifier = ">=1.1" },
+    { name = "platformdirs", specifier = ">=4.12.4" },
+    { name = "protobuf", marker = "extra == 'gguf'", specifier = ">=4.21" },
+    { name = "psutil", specifier = ">=5.9" },
+    { name = "rich", specifier = ">=13.7" },
+    { name = "sentencepiece", marker = "extra == 'gguf'", specifier = ">=0.2" },
+    { name = "textual", specifier = ">=8.0" },
+    { name = "torch", marker = "sys_platform == 'win32' and extra == 'bnb'", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cu126" },
+    { name = "torch", marker = "sys_platform == 'win32' and extra == 'gguf'", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cu126" },
+    { name = "torch", marker = "sys_platform != 'win32' and extra == 'bnb'", specifier = ">=2.4" },
+    { name = "torch", marker = "sys_platform != 'win32' and extra == 'gguf'", specifier = ">=2.4" },
+    { name = "transformers", marker = "extra == 'bnb'", specifier = ">=4.45" },
+    { name = "transformers", marker = "extra == 'gguf'", specifier = ">=4.45" },
+    { name = "typer", specifier = ">=0.12" },
+]
+provides-extras = ["gguf", "awq", "gptq", "bnb", "nvfp4"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "ruff", specifier = ">=0.15" },
 ]
 
 [[package]]
