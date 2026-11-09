@@ -22,6 +22,7 @@ from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
 from ocq.types import (
     KV_CACHE_TYPES,
+    LLAMA_CPP,
     Fact,
     FactKind,
     FitLevel,
@@ -398,6 +399,112 @@ def cmd_verify(
         console.print("[dim]No layer is on the GPU, so the weights were not compared.[/dim]")
     if not all(check.ok for check in checks):
         raise typer.Exit(1)
+
+
+@app.command("bench")
+def cmd_bench(
+    model: Annotated[
+        str, typer.Argument(help="A local .gguf file or folder, or ollama:name:tag (ocq models)")
+    ],
+    context: Context = DEFAULT_CONTEXT,
+    kv_cache: KvCache = "f16",
+    llmfit_bin: LlmfitBin = None,
+) -> None:
+    """Run the standard benchmark on a model of this PC and save it to its benchmark history."""
+    from ocq import bench
+    from ocq.local_model import parse_model_ref
+    from ocq.quantizers.llama_cpp import tool_path
+
+    kv_cache = read_kv_cache(kv_cache)
+    suite = bench.STANDARD
+    try:
+        hw = detect_hardware(llmfit_bin)
+        path = parse_model_ref(model)[1]
+        if path is None:
+            raise OcqError(
+                "ocq bench measures a model that is on this PC: a .gguf file or folder, or "
+                "ollama:name:tag (ocq models lists them). To measure a Hugging Face model, "
+                "quantize it first with ocq optimize."
+            )
+        snapshot = resolve_model(model, hw, llmfit_bin, context, kv_cache)
+        if not snapshot.gguf_files:
+            raise OcqError("ocq bench measures GGUF models (llama.cpp) for now.")
+        prompts = bench.prompts_for(suite, snapshot.context_length)
+        # The fit at the longest test, as llama-bench sizes the context to it.
+        planned = max(context, max(prompts) + suite.tokens)
+        (option,) = quant_options(snapshot, hw, planned, kv_cache)
+        place, device = bench.placement(option)
+        if path.is_dir():
+            path = path / snapshot.gguf_files[0][0]
+        console.print(
+            f"[bold]{escape(snapshot.model_id)}[/bold] {option.label}: running the standard "
+            f"benchmark ({suite.repeats} runs of each test) ...",
+            highlight=False,
+        )
+        report = bench.llama_bench(
+            tool_path("llama-bench", hw),
+            path,
+            suite,
+            architecture=snapshot.architecture,
+            kv_cache=kv_cache,
+            place=place,
+            log=Path(measurements.STORE).parent / "bench.log",
+            model_context=snapshot.context_length,
+        )
+    except OcqError as exc:
+        raise fail(exc) from exc
+
+    model_id = bench.made_from(path) or snapshot.model_id
+    placed = measurements.placed(device)
+    earlier = len(measurements.runs_of(model_id, option.label, LLAMA_CPP, hw, placed))
+    bench.save(
+        report,
+        suite,
+        device=device,
+        read_gb=bench.file_gb(snapshot) * snapshot.read_fraction,
+        model=model_id,
+        label=option.label,
+        context=planned,
+        kv_cache=kv_cache,
+        hardware=hw,
+        file=path.name,
+    )
+    print_bench(report, option, device, kv_cache, earlier + 1)
+
+
+def print_bench(report, option, device: str, kv_cache: str, runs: int) -> None:
+    where = {"gpu": "all on the GPU", "cpu": "on the CPU"}.get(device, device.replace("gpu", "GPU"))
+    console.print(
+        f"llama.cpp {report.build or ''}, {where}, {kv_cache} cache".replace("  ", " "),
+        style="dim",
+        highlight=False,
+    )
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column()
+    expected = (
+        f"QuantPilot expected about {option.estimated_tps:.0f}"
+        if option.speed_basis == measurements.MEASURED
+        else f"QuantPilot expected up to {option.estimated_tps:.0f} (this PC's memory speed)"
+    )
+    table.add_row(
+        "Writing",
+        f"{report.tokens_per_second:,.1f} tok/s (± {report.stddev:.1f})  [dim]{expected}[/dim]",
+    )
+    lengths = sorted(report.prompt_speeds)
+    table.add_row(
+        "Reading",
+        ", ".join(f"{report.prompt_speeds[n]:,.0f} tok/s for {n:,} tokens" for n in lengths),
+    )
+    table.add_row(
+        "First token",
+        ", ".join(f"{report.first_token_seconds(n):.2f} s after {n:,} tokens" for n in lengths),
+    )
+    console.print(table)
+    console.print(
+        f"[dim]Saved to this PC's benchmark history ({runs} run{'s' * (runs > 1)} of this "
+        "setup).[/dim]"
+    )
 
 
 @app.command("models")

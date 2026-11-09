@@ -392,7 +392,7 @@ ocq-output/<model>/
 
 Validation checks: file exists, smaller than original, loads, generates readable text. Exit code **non-zero** if validation fails.
 
-- **GGUF** speed: **llama-bench** (3 × 128 tokens), with the `--kv-cache` you chose.  
+- **GGUF** speed: **llama-bench**, the quick suite of the standard benchmark (a 512-token prompt read, 128 tokens written, 3 times each), with the `--kv-cache` you chose. Every run is saved to this PC's benchmark history.  
 - **AWQ/GPTQ/BNB/NVFP4** speed: **transformers** generate (sanity check, not vLLM deployment speed).
 
 ---
@@ -428,6 +428,25 @@ The last column is what to pass to `inspect`, `feasibility` or `verify`, for exa
 The quantization of a GGUF comes from its own header, not its file name. The Hugging Face cache often holds only `config.json` (QuantPilot and other tools fetch it to size a model without downloading it); those are hidden unless you pass `--all`. Newer Ollama versions can store a model for Apple's MLX instead of GGUF (one small safetensors file per tensor, the quantization in each file's metadata): `inspect` and `feasibility` read that too; `verify` and `optimize` need a GGUF.
 
 ---
+
+## Benchmark a model on your PC: `ocq bench`
+
+```
+ocq bench ./Qwen3-30B-A3B-Q4_K_M.gguf
+ocq bench ollama:qwen3:8b --kv-cache q8_0
+```
+
+Runs the standard benchmark on a GGUF model already on this PC (any name `ocq models` shows): llama-bench reads a 512 and a 4,096 token prompt and writes 128 tokens, 3 times each, with the model placed as QuantPilot plans it (all on the GPU, some layers on it, or the experts of some layers in RAM). It prints the writing speed next to what QuantPilot expected, the reading speed, and the time to the first token after a short and a long prompt:
+
+```
+llama.cpp b11429, all on the GPU, f16 cache
+  Writing        79.4 tok/s (± 1.0)  QuantPilot expected about 80
+  Reading        1,187 tok/s for 512 tokens, 1,138 tok/s for 4,096 tokens
+  First token    0.44 s after 512 tokens, 3.61 s after 4,096 tokens
+Saved to this PC's benchmark history (2 runs of this setup).
+```
+
+Every run (here and after `optimize`) is saved in `~/.cache/ocq/measurements.json` with what ran (model, format, llama.cpp build, context, cache, placement) and where (this PC's CPU and RAM, and its GPU). Speed predictions and recommendations use only this PC's runs, and count a run for "this setup" only when it was placed the same way.
 
 ## Check QuantPilot on your PC: `ocq verify`
 
@@ -508,6 +527,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 | `backends` | Installed quant backends and what’s missing |
 | `models` | The models already on this PC, how each fits, and the name to use for it |
 | `inspect` | Every fact about a model, its source and how sure it is |
+| `bench` | Run the standard benchmark on a GGUF model of this PC and save it to its history |
 | `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
 | `recommend` | Model, format, runtime and cache type for a kind of work, with reasons and confidence |
 | `feasibility` | Full format table for one model |

@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from ocq import measurements
+from ocq.bench import QUICK
 from ocq.hardware import detect_hardware
 from ocq.model_analyzer import DEFAULT_CONTEXT, resolve_model
 from ocq.plan import generate_plan
 from ocq.quantizers import get_quantizer
+from ocq.quantizers.protocol import PROMPT_TOKENS
 from ocq.types import (
     LLAMA_CPP,
     BenchmarkResult,
@@ -44,6 +46,13 @@ def remember_speed(
         hardware=plan.hardware,
         runtime_version=benchmark.runtime_version,
         prompt_tps=benchmark.prompt_tokens_per_second or 0.0,
+        prompt_speeds=(
+            {PROMPT_TOKENS: benchmark.prompt_tokens_per_second}
+            if benchmark.prompt_tokens_per_second
+            else None
+        ),
+        suite=QUICK.name,
+        file=quantization.artifact_path.name if quantization.artifact_path else "",
     )
 
 

@@ -34,16 +34,27 @@ def record(
     hardware: HardwareProfile | None = None,
     runtime_version: str = "",
     prompt_tps: float = 0.0,
+    prompt_speeds: dict[int, float] | None = None,
+    suite: str = "",
+    file: str = "",
 ) -> None:
     """weights_gb is what one token reads: the whole file for a dense model, less for a
     mixture of experts (see ModelSnapshot.read_fraction). The other fields say what ran, so
     a recommendation can say it rests on earlier runs of the same setup. prompt_tps: how fast
-    the prompt was read (PROMPT_TOKENS of it), which sets the time to the first token."""
+    the prompt was read (PROMPT_TOKENS of it), which sets the time to the first token;
+    prompt_speeds: the same at every prompt length the suite (bench.Suite) timed. file: the
+    model file's name, so a run also counts for that file found on disk (local/<file>)."""
     runs = load()
     run = {"device": device, "weights_gb": weights_gb, "tps": tokens_per_second}
     run |= {"model": model, "label": label, "runtime": runtime}
     run |= {"context": context, "kv_cache": kv_cache}
+    if file:
+        run |= {"file": file}
     run |= {"prompt_tps": prompt_tps, "runtime_version": runtime_version}
+    if prompt_speeds:
+        run |= {"prompt_speeds": {str(length): tps for length, tps in prompt_speeds.items()}}
+    if suite:
+        run |= {"suite": suite}
     if hardware is not None:
         run |= {"machine": machine(hardware)}
         run |= {"gpu": gpu_of(hardware) if device.startswith("gpu") else ""}
@@ -91,18 +102,47 @@ def on_this_pc(run: dict, hardware: HardwareProfile | None) -> bool:
     return not run.get("gpu") or run["gpu"] == gpu_of(hardware)
 
 
+def placed(device: str) -> str:
+    """How a run was placed, whatever the details: gpu, cpu, gpu+cpu (some layers on the GPU)
+    or gpu+experts (the experts of some layers in RAM)."""
+    if device.startswith("gpu+cpu"):
+        return "gpu+cpu"
+    if "experts" in device:
+        return "gpu+experts"
+    return device
+
+
+def placed_as(run_mode: RunMode) -> str:
+    """The same for a row QuantPilot plans (QuantOption.run_mode)."""
+    return {
+        RunMode.GPU: "gpu",
+        RunMode.GPU_FULL: "gpu",
+        RunMode.CPU: "cpu",
+        RunMode.CPU_ONLY: "cpu",
+        RunMode.GPU_OFFLOAD: "gpu+cpu",
+        RunMode.GPU_EXPERTS_RAM: "gpu+experts",
+    }.get(run_mode, "")
+
+
 def runs_of(
-    model: str, label: str, runtime: str, hardware: HardwareProfile | None = None
+    model: str,
+    label: str,
+    runtime: str,
+    hardware: HardwareProfile | None = None,
+    placement: str = "",
 ) -> list[dict]:
-    """Earlier runs on this PC of this model in this format and runtime (runs saved before
-    these fields were recorded have none, and never match)."""
+    """Earlier runs on this PC of this model in this format and runtime, placed this way when
+    placement is given (see placed). Runs saved before these fields were recorded have none,
+    and never match. model is a repo id, or local/<file> for a file found on disk."""
     return [
         run
         for run in load()
-        if str(run.get("model", "")).lower() == model.lower()
+        if model.lower()
+        in (str(run.get("model", "")).lower(), f"local/{run.get('file', '')}".lower())
         and str(run.get("label", "")).upper() == label.upper()
         and run.get("runtime") == runtime
         and on_this_pc(run, hardware)
+        and (not placement or placed(str(run.get("device", ""))) == placement)
     ]
 
 

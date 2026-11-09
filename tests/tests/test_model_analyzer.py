@@ -751,7 +751,7 @@ def test_benchmark_runs_are_stored_as_what_one_token_reads():
     )
     hardware = make_hardware(ram_gb=32, vram_gb=8)
     plan = SimpleNamespace(model=snap, quant_config=config, hardware=hardware)
-    run = SimpleNamespace(artifact_size_gb=17.0)
+    run = SimpleNamespace(artifact_size_gb=17.0, artifact_path=Path("Qwen3-30B-A3B-Q4_K_M.gguf"))
     bench = SimpleNamespace(
         device="gpu", tokens_per_second=120.0, prompt_tokens_per_second=900.0,
         runtime_version="b11429",
@@ -767,6 +767,8 @@ def test_benchmark_runs_are_stored_as_what_one_token_reads():
     assert (saved["prompt_tps"], saved["runtime_version"]) == (900.0, "b11429")
     assert (saved["machine"], saved["gpu"]) == ("CPU, 32 GB RAM", "RTX 4060, 8 GB")
     assert saved["date"][:4].isdigit()
+    assert (saved["suite"], saved["file"]) == ("quick", "Qwen3-30B-A3B-Q4_K_M.gguf")
+    assert saved["prompt_speeds"] == {"512": 900.0}
     assert measurements.runs_of(QWEN3_MOE.lower(), "q4_k_m", "llama.cpp") == [saved]
     assert measurements.runs_of(QWEN3_MOE, "Q5_K_M", "llama.cpp") == []
     assert measurements.runs_of(QWEN3_MOE, "Q4_K_M", "llama.cpp", hardware) == [saved]
@@ -1217,8 +1219,11 @@ def test_a_model_lookup_cut_short_says_so_not_a_traceback(monkeypatch):
             raise http.client.IncompleteRead(b'{"id": "org/mo', 2000)
 
     monkeypatch.setattr(model_analyzer.urllib.request, "urlopen", lambda *a, **k: CutShort())
-    with pytest.raises(OcqError, match=r"^Could not reach HuggingFace while looking up org/model: "
-                       r"IncompleteRead\(14 bytes read, 2000 more expected\)\. Check the conn"):
+    with pytest.raises(
+        OcqError,
+        match=r"^Could not reach HuggingFace while looking up org/model: "
+        r"IncompleteRead\(14 bytes read, 2000 more expected\)\. Check the conn",
+    ):
         model_analyzer.fetch_hf_model("org/model")
 
 

@@ -26,7 +26,7 @@ from enum import Enum
 from pathlib import Path
 
 from ocq.engine import calibration_fits_in_ram
-from ocq.measurements import MEASURED, runs_of
+from ocq.measurements import MEASURED, placed_as, runs_of
 from ocq.model_analyzer import (
     ALREADY_QUANTIZED,
     AVERAGE_BITS,
@@ -1146,7 +1146,13 @@ def fit_reason(candidate: Candidate, hardware: HardwareProfile) -> Reason:
 
 def speed_reason(candidate: Candidate, hardware: HardwareProfile | None = None) -> Reason:
     option = candidate.option
-    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime, hardware)
+    runs = runs_of(
+        candidate.model.model_id,
+        option.label,
+        candidate.runtime,
+        hardware,
+        placed_as(option.run_mode),
+    )
     if runs:
         low, high = min(r["tps"] for r in runs), max(r["tps"] for r in runs)
         span = f"{low:.0f}" if round(low) == round(high) else f"{low:.0f}–{high:.0f}"
@@ -1350,7 +1356,13 @@ def confidence(recommendation: Recommendation, hardware: HardwareProfile) -> Con
             bool(bandwidth),
         )
     )
-    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime, hardware)
+    runs = runs_of(
+        candidate.model.model_id,
+        option.label,
+        candidate.runtime,
+        hardware,
+        placed_as(option.run_mode),
+    )
     measured = option.speed_basis == MEASURED
     if runs:
         evidence.append(

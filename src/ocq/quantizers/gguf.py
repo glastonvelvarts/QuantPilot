@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
-import json
 import os
 import platform
 import re
@@ -24,8 +23,6 @@ from ocq.types import (
     OptimizationPlan,
     QuantAlgorithm,
 )
-
-BENCHMARK_REPEATS = 3
 
 
 class GGUFQuantizer(Quantizer):
@@ -155,57 +152,44 @@ class GGUFQuantizer(Quantizer):
                 # Not a plain GPU run, so it does not go into this PC's GPU speed history.
                 device = f"gpu (experts of {experts} layers in ram)"
 
-        # Speed comes from llama-bench: a fixed number of tokens, repeated, then averaged. Two
-        # tests: reading a PROMPT_TOKENS prompt, and writing BENCHMARK_TOKENS.
-        report, _ = run_tool(
-            [
-                str(tool_path("llama-bench", plan.hardware)),
-                "-m",
-                artifact_path,
-                "-p",
-                str(PROMPT_TOKENS),
-                "-n",
-                str(BENCHMARK_TOKENS),
-                "-r",
-                str(BENCHMARK_REPEATS),
-                "-ngl",
-                str(gpu_layers),
-                "-o",
-                "json",
-                *cache_flags,
-                *(["-ncmoe", str(experts)] if experts else []),
-                *([] if has_gpu else ["-dev", "none"]),
-            ],
+        # Speed: the quick suite of the standard benchmark (ocq/bench.py), placed as it just ran.
+        from ocq.bench import QUICK, llama_bench
+
+        place = [
+            "-ngl",
+            str(gpu_layers),
+            *(["-ncmoe", str(experts)] if experts else []),
+            *([] if has_gpu else ["-dev", "none"]),
+        ]
+        report = llama_bench(
+            tool_path("llama-bench", plan.hardware),
+            Path(artifact_path),
+            QUICK,
+            architecture=plan.model.architecture,
+            kv_cache=cache,
+            place=place,
             log=workspace / "speed.log",
-            env=env,
         )
-        tests = json.loads(report)
-        speed = next((test for test in tests if test.get("n_gen")), tests[-1])
-        reading = next(
-            (test for test in tests if test.get("n_prompt") and not test.get("n_gen")), None
-        )
-        build = speed.get("build_number")
 
         notes = [
-            f"Speed is the average of {BENCHMARK_REPEATS} runs of {BENCHMARK_TOKENS} tokens "
-            f"(+/- {speed['stddev_ts']:.1f} tok/s)."
+            f"Speed is the average of {QUICK.repeats} runs of {QUICK.tokens} tokens "
+            f"(+/- {report.stddev:.1f} tok/s)."
         ]
+        reading = report.prompt_speeds.get(PROMPT_TOKENS)
         if reading:
-            notes.append(
-                f"A {reading['n_prompt']} token prompt is read at {reading['avg_ts']:.0f} tok/s."
-            )
+            notes.append(f"A {PROMPT_TOKENS} token prompt is read at {reading:.0f} tok/s.")
         if prompt:
             notes.append(f"Time to first token is for a {prompt.group(2)} token prompt.")
 
         return BenchmarkResult(
-            tokens_per_second=speed["avg_ts"],
+            tokens_per_second=report.tokens_per_second,
             time_to_first_token_s=float(prompt.group(1)) / 1000 if prompt else None,
             method="llama.cpp",
             device=device,
             sample_output=text.strip(),
             notes=notes,
-            prompt_tokens_per_second=reading["avg_ts"] if reading else None,
-            runtime_version=f"b{build}" if build else "",
+            prompt_tokens_per_second=reading,
+            runtime_version=report.build,
         )
 
 
