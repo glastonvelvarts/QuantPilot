@@ -361,7 +361,19 @@ class ModelActions(ModalScreen[str | None]):
 
 
 class Confirm(ModalScreen[bool]):
-    BINDINGS = [Binding("escape", "dismiss(False)", "Cancel")]
+    """A yes/no question. The arrow keys move between the buttons, Enter presses one."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss(False)", "Cancel"),
+        Binding("left,up", "move(-1)", show=False),
+        Binding("right,down", "move(1)", show=False),
+    ]
+
+    def action_move(self, delta: int) -> None:
+        if delta < 0:
+            self.focus_previous(Button)
+        else:
+            self.focus_next(Button)
 
     def __init__(self, title: str, message: str, yes: str) -> None:
         super().__init__()

@@ -712,3 +712,23 @@ def test_progress_box_keeps_only_the_last_state_of_a_progress_bar():
         log.on_print(events.Print(chunk))
     log.flush()
     assert lines == ["Starting done", "Converting ..."]
+
+
+def test_arrow_keys_move_between_the_buttons_of_a_question(tmp_path: Path):
+    from ocq.tui.widgets import Confirm
+
+    seen, answers = [], []
+
+    async def steps(app, pilot):
+        app.push_screen(Confirm("Install the GPTQ tools?", "A few GB.", "Install"), answers.append)
+        await pilot.pause()
+        seen.append(app.focused.id)  # Cancel first: nothing happens by accident
+        for key in ("left", "right", "up", "down", "left"):
+            await pilot.press(key)
+            seen.append(app.focused.id)
+        await pilot.press("enter")
+        await pilot.pause()
+
+    run_app(tmp_path, steps)
+    assert seen == ["no", "yes", "no", "yes", "no", "yes"]
+    assert answers == [True]
