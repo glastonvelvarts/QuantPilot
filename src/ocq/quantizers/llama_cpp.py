@@ -7,6 +7,7 @@ import platform
 import re
 import shutil
 import tarfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -150,28 +151,71 @@ def release_build(hardware: HardwareProfile) -> tuple[str, list[str]]:
     )
 
 
+def amount(size: int) -> str:
+    return f"{size / 2**20:,.0f} MB" if size >= 2**20 else f"{size:,} bytes"
+
+
+DOWNLOAD_TRIES = 3  # a connection that closes early is tried again, from where it stopped
+CONTENT_RANGE = re.compile(r"bytes \d+-\d+/(\d+)")
+
+
 def download(url: str, target: Path) -> Path:
+    """Downloads url to target. A connection can close early without an error (the CUDA
+    runtime zip stopped at 247 of 391 MB on a laptop): then the rest is asked for (an HTTP
+    Range request) up to DOWNLOAD_TRIES times, and the file is only kept when it is whole."""
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(target.name + ".part")
-    request = urllib.request.Request(url, headers={"User-Agent": "ocq/0.1"})
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, Progress() as progress:
-            size = int(response.headers.get("Content-Length") or 0)
-            bar = progress.add_task(f"Downloading {target.name}", total=size or None)
-            got = 0
-            with open(partial, "wb") as out:
-                while chunk := response.read(1024 * 1024):
-                    out.write(chunk)
-                    got += len(chunk)
-                    progress.advance(bar, len(chunk))
-    except OSError as exc:
-        raise OcqError(f"Could not download {url}: {exc}") from exc
+    got, size = 0, 0
+    with Progress() as progress:
+        bar = progress.add_task(f"Downloading {target.name}", total=None)
+        for attempt in range(1, DOWNLOAD_TRIES + 1):
+            headers = {"User-Agent": "ocq/0.1"}
+            if got:
+                headers["Range"] = f"bytes={got}-"
+            try:
+                with urllib.request.urlopen(
+                    urllib.request.Request(url, headers=headers), timeout=60
+                ) as response:
+                    resumed = got > 0 and getattr(response, "status", 200) == 206
+                    if not resumed:  # the whole file, from the start
+                        got = 0
+                        size = int(response.headers.get("Content-Length") or 0)
+                        progress.update(bar, total=size or None, completed=0)
+                    elif not size:
+                        whole = CONTENT_RANGE.match(response.headers.get("Content-Range") or "")
+                        size = int(whole.group(1)) if whole else 0
+                    with open(partial, "ab" if resumed else "wb") as out:
+                        while chunk := response.read(1024 * 1024):
+                            out.write(chunk)
+                            got += len(chunk)
+                            progress.advance(bar, len(chunk))
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500:  # not found, refused: another try would get the same
+                    partial.unlink(missing_ok=True)
+                    raise OcqError(f"Could not download {url}: {exc}") from exc
+                error = exc
+            except OSError as exc:  # a dropped connection, a timeout
+                error = exc
+            else:
+                error = None
+                if not size or got >= size:
+                    break
+            if attempt < DOWNLOAD_TRIES:
+                where = f" at {amount(got)} of {amount(size)}" if size else ""
+                next_try = f"try {attempt + 1} of {DOWNLOAD_TRIES}"
+                print(f"Download cut off{where}, resuming ({next_try}) ...", flush=True)
+        else:  # every try ended early
+            if error is not None:
+                partial.unlink(missing_ok=True)
+                raise OcqError(
+                    f"Could not download {url} in {DOWNLOAD_TRIES} tries: {error}. "
+                    "Check the internet connection and try again."
+                ) from error
     if size and got != size:
-        # The connection can close early without an error; the file would be cut off.
-        partial.unlink()
+        partial.unlink(missing_ok=True)
         raise OcqError(
-            f"The download of {target.name} stopped after {got:,} of {size:,} bytes. "
-            "Run the command again."
+            f"The download of {target.name} stopped after {got:,} of {size:,} bytes, "
+            f"{DOWNLOAD_TRIES} times. Check the internet connection and try again."
         )
     partial.replace(target)
     return target
