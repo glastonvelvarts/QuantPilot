@@ -158,12 +158,21 @@ def download(url: str, target: Path) -> Path:
         with urllib.request.urlopen(request, timeout=60) as response, Progress() as progress:
             size = int(response.headers.get("Content-Length") or 0)
             bar = progress.add_task(f"Downloading {target.name}", total=size or None)
+            got = 0
             with open(partial, "wb") as out:
                 while chunk := response.read(1024 * 1024):
                     out.write(chunk)
+                    got += len(chunk)
                     progress.advance(bar, len(chunk))
     except OSError as exc:
         raise OcqError(f"Could not download {url}: {exc}") from exc
+    if size and got != size:
+        # The connection can close early without an error; the file would be cut off.
+        partial.unlink()
+        raise OcqError(
+            f"The download of {target.name} stopped after {got:,} of {size:,} bytes. "
+            "Run the command again."
+        )
     partial.replace(target)
     return target
 
