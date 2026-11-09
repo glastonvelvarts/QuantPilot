@@ -1121,6 +1121,34 @@ def test_a_gated_repo_says_so_and_links_the_license(monkeypatch, tmp_path):
     assert "add a read token of that account in Settings" in str(error.value)
 
 
+@pytest.mark.parametrize("cut_off", ["hf_hub_download", "get_safetensors_metadata"])
+def test_a_dropped_connection_says_so_not_a_traceback(cut_off, monkeypatch, tmp_path):
+    # Seen on the RTX 4060 laptop: httpx.ReadError while reading the tensor headers. It is not
+    # an OSError, so it came out as a raw httpx traceback.
+    import httpx
+    import huggingface_hub
+
+    from ocq import model_analyzer
+
+    def dropped(*args, **kwargs):
+        raise httpx.ReadError("The operation did not complete (read) (_ssl.c:2578)")
+
+    def config(*args, **kwargs):
+        path = tmp_path / "config.json"
+        path.write_text('{"model_type": "llama"}')
+        return str(path)
+
+    monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", config)
+    monkeypatch.setattr(huggingface_hub, cut_off, dropped)
+    with pytest.raises(OcqError) as error:
+        model_analyzer.fetch_model_files("org/model", "abc")
+    assert str(error.value) == (
+        "Could not reach HuggingFace while reading org/model: The operation did not complete "
+        "(read) (_ssl.c:2578). Check the connection and try again."
+    )
+
+
 def test_a_model_too_big_for_the_gpu_is_as_fast_as_its_layers_in_ram_allow(qwen_tensors):
     # Whole layers fill the GPU, each with its share of the cache: the cache of a long context
     # pushes layers out too. Qwen2.5-7B Q4_K_M at 131k on the RTX 4060 was shown at the all-GPU

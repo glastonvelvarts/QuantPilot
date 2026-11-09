@@ -304,6 +304,7 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
     except (OSError, ValueError, KeyError):
         pass
 
+    from httpx import TransportError  # the Hub's connection errors, which are not OSErrors
     from huggingface_hub import get_safetensors_metadata, hf_hub_download
     from huggingface_hub.errors import (
         EntryNotFoundError,
@@ -313,10 +314,18 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
     )
     from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
 
+    def unreachable(exc: TransportError) -> OcqError:
+        return OcqError(
+            f"Could not reach HuggingFace while reading {model_id}: {exc}. "
+            "Check the connection and try again."
+        )
+
     try:
         config = json.loads(Path(hf_hub_download(model_id, "config.json")).read_text("utf-8"))
     except GatedRepoError as exc:
         raise OcqError(gated_message(model_id)) from exc
+    except TransportError as exc:
+        raise unreachable(exc) from exc
     except (OSError, ValueError, EntryNotFoundError):
         config = {}
 
@@ -328,6 +337,8 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
             for file in metadata.files_metadata.values()
             for name, info in file.tensors.items()
         ]
+    except TransportError as exc:
+        raise unreachable(exc) from exc
     except (OSError, NotASafetensorsRepoError, SafetensorsParsingError):
         headers = []
     finally:
