@@ -41,7 +41,7 @@ app = typer.Typer(
     help="One-Click Quantizer: inspect this PC, see which models it can run, quantize them. "
     "Run ocq alone for the full-screen app.",
 )
-console = Console()
+console = Console(legacy_windows=False if sys.platform == "win32" else None)
 
 
 def show_version(value: bool) -> None:

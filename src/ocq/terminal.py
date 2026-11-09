@@ -17,6 +17,8 @@ def prepare_terminal() -> None:
 
 
 def status_glyph(unicode_char: str, ascii_char: str) -> str:
+    if sys.platform == "win32":
+        return ascii_char
     enc = getattr(sys.stdout, "encoding", None) or "utf-8"
     try:
         unicode_char.encode(enc)

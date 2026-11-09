@@ -1,6 +1,11 @@
 from ocq.terminal import rich_status, status_glyph
 
 
+def test_status_glyph_uses_ascii_on_windows(monkeypatch):
+    monkeypatch.setattr("ocq.terminal.sys.platform", "win32")
+    assert status_glyph("\u2713", "+") == "+"
+
+
 def test_status_glyph_falls_back_on_cp1252(monkeypatch):
     class FakeOut:
         encoding = "cp1252"
