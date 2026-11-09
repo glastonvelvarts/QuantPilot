@@ -26,7 +26,6 @@ class Quantizer(ABC):
 
     algorithm: ClassVar[QuantAlgorithm]
     summary: ClassVar[str] = ""
-    install_hint: ClassVar[str] = ""
     needs_cuda: ClassVar[bool] = False
 
     @classmethod
@@ -36,7 +35,10 @@ class Quantizer(ABC):
     def check(self, hardware: HardwareProfile) -> tuple[bool, str]:
         name = self.algorithm.value.upper()
         if not self.is_available():
-            return False, f"{name} backend not installed. Run: {self.install_hint}"
+            from ocq.installation import install_hint
+
+            hint = install_hint(self.algorithm.value, hardware)
+            return False, f"{name} backend not installed. Run: {hint}"
         if self.needs_cuda and not hardware.has_cuda:
             return False, f"{name} needs an NVIDIA GPU, none was found on this PC."
         return True, self.summary

@@ -60,6 +60,7 @@ jobs:
           "$bin/quantpilot" --version
           "$bin/ocq" --version
           "$bin/ocq" --help
+          "$bin/quantpilot" doctor --offline
       - name: uvx quantpilot
         run: uvx --from "$(ls dist/*.whl)" quantpilot --version
       - name: The app starts from the installed package

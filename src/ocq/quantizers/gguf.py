@@ -29,7 +29,6 @@ from ocq.types import (
 class GGUFQuantizer(Quantizer):
     algorithm = QuantAlgorithm.GGUF
     summary = "2 to 8 bit. Runs on CPU and any GPU with llama.cpp or Ollama."
-    install_hint = "uv sync --extra gguf"
 
     def __init__(self) -> None:
         self.model_dir: Path | None = None

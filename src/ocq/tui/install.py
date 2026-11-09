@@ -1,25 +1,19 @@
 """Installing a quantization tool from the app: its Python libraries, and llama.cpp for GGUF.
 
-Each tool is one of QuantPilot's extras (gguf, awq, gptq, bnb, nvfp4). The libraries go into
-the Python that runs QuantPilot:
-- a checkout of this repo run with uv: `uv sync --inexact --extra <tool>`, which keeps what is
-  already installed and uses the project's own sources (CUDA PyTorch on Windows);
-- anything else: the extra's requirements with `uv pip install` or `pip install`.
+Each tool is one of QuantPilot's extras (gguf, awq, gptq, bnb, nvfp4), installed the way
+QuantPilot itself was (ocq/installation.py): uv tool install, uv sync in a checkout, or uv pip
+/ pip into its environment.
 """
 
 from __future__ import annotations
 
 import importlib
-import re
-import shutil
+import os
 import subprocess
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib import metadata
-from pathlib import Path
 
-from ocq import DISTRIBUTION
+from ocq.installation import install_command, requirements  # noqa: F401 (requirements: tests)
 from ocq.quantizers import get_quantizer
 from ocq.tui import words
 from ocq.types import HardwareProfile, QuantAlgorithm
@@ -61,46 +55,12 @@ def tool_state(algorithm: QuantAlgorithm, hardware: HardwareProfile) -> ToolStat
     return ToolState(algorithm, BLOCKED, words.plain(detail))
 
 
-def project_root() -> Path | None:
-    """The repo folder when QuantPilot runs from a checkout (an editable install), else None."""
-    root = Path(__file__).resolve().parents[3]
-    pyproject = root / "pyproject.toml"
-    try:
-        named = rf'^name = "{DISTRIBUTION}"'
-        if pyproject.is_file() and re.search(named, pyproject.read_text(), re.M):
-            return root
-    except OSError:
-        pass
-    return None
-
-
-def requirements(extra: str) -> list[str]:
-    """The packages an extra adds, read from QuantPilot's installed metadata."""
-    found = []
-    for requirement in metadata.requires(DISTRIBUTION) or []:
-        spec, _, marker = requirement.partition(";")
-        if re.search(rf"""extra\s*==\s*["']{re.escape(extra)}["']""", marker):
-            found.append(spec.strip())
-    return found
-
-
-def install_command(extra: str) -> tuple[list[str], Path | None]:
-    """(command, folder to run it in)."""
-    uv = shutil.which("uv")
-    root = project_root()
-    if uv and root is not None:
-        return [uv, "sync", "--inexact", "--extra", extra], root
-    packages = requirements(extra)
-    if uv:
-        return [uv, "pip", "install", "--python", sys.executable, *packages], None
-    return [sys.executable, "-m", "pip", "install", *packages], None
-
-
 def install(
     algorithm: QuantAlgorithm, hardware: HardwareProfile, say: Callable[[str], None]
 ) -> ToolState:
     """Installs one tool and returns its state afterwards. `say` gets each progress line."""
-    command, folder = install_command(algorithm.value)
+    # A uv tool on Windows: the running ocq.exe cannot be replaced, so into its environment.
+    command, folder = install_command(algorithm.value, hardware, in_place=os.name == "nt")
     say(f"Installing the {NAMES[algorithm]} tools ...")
     process = subprocess.Popen(
         command,

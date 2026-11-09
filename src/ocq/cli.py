@@ -153,7 +153,7 @@ KvCache = Annotated[
 
 
 def fail(exc: Exception) -> typer.Exit:
-    console.print(f"[red]Error:[/red] {exc}")
+    console.print(f"[red]Error:[/red] {escape(str(exc))}", highlight=False)
     return typer.Exit(1)
 
 
@@ -641,6 +641,44 @@ def local_fit(model, hw, context: int, kv_cache: str) -> tuple[str, str, str]:
     return colored_fit(option.fit_level), runs_on(option), speed_cell(option)
 
 
+@app.command("doctor")
+def cmd_doctor(
+    offline: Annotated[
+        bool, typer.Option("--offline", help="Skip the checks that use the network")
+    ] = False,
+    llmfit_bin: LlmfitBin = None,
+) -> None:
+    """Check that QuantPilot is ready to work on this PC, and what fixes what is not."""
+    from ocq import doctor
+
+    findings = doctor.run_checks(detect_hardware(llmfit_bin), online=not offline)
+    marks = {
+        doctor.OK: "[green]✓[/green]",
+        doctor.INFO: "[dim]·[/dim]",
+        doctor.WARN: "[yellow]![/yellow]",
+        doctor.FAIL: "[red]✗[/red]",
+    }
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column(width=1)
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column(overflow="fold")  # a command to copy is wrapped, never cut short
+    for finding in findings:
+        detail = escape(finding.detail)
+        if finding.fix:
+            detail += f"\n[dim]run:[/dim] [cyan]{escape(finding.fix)}[/cyan]"
+        table.add_row(marks[finding.status], finding.name, detail)
+    console.print(table)
+    problems = [f for f in findings if f.status == doctor.FAIL]
+    worth = [f for f in findings if f.status == doctor.WARN]
+    if problems:
+        console.print(f"[red]{len(problems)} problem{'s' * (len(problems) > 1)} to fix.[/red]")
+        raise typer.Exit(1)
+    if worth:
+        console.print(f"Ready, with {len(worth)} thing{'s' * (len(worth) > 1)} worth a look.")
+    else:
+        console.print("[green]Ready.[/green]")
+
+
 @app.command("backends")
 def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     """Show which quantization backends can run on this PC."""
@@ -650,7 +688,7 @@ def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     table.add_column("Detail")
     for status in backend_status(detect_hardware(llmfit_bin)):
         state = "[green]ready[/green]" if status.ready else "[red]not ready[/red]"
-        table.add_row(status.algorithm.value, state, status.detail)
+        table.add_row(status.algorithm.value, state, escape(status.detail))
     console.print(table)
 
 
@@ -947,14 +985,14 @@ def backend_cell(option, hardware) -> str:
         return "original"
     if option.row_kind == "gguf":
         ready, _ = get_quantizer(QuantAlgorithm.GGUF).check(hardware)
-        return "gguf" if ready else "gguf [dim](install --extra gguf)[/dim]"
+        return "gguf" if ready else "gguf [dim](not installed: ocq backends)[/dim]"
     try:
         algorithm = QuantAlgorithm(option.row_kind)
     except ValueError:
         return option.row_kind
     ready, _ = get_quantizer(algorithm).check(hardware)
     name = algorithm.value
-    return name if ready else f"{name} [dim](install --extra {name})[/dim]"
+    return name if ready else f"{name} [dim](not installed: ocq backends)[/dim]"
 
 
 def mode_label(run_mode) -> str:
@@ -1094,13 +1132,13 @@ def print_plan(plan: OptimizationPlan) -> None:
     if plan.warnings:
         console.print("\n[yellow]Warnings:[/yellow]")
         for warning in plan.warnings:
-            console.print(f"  ! {warning}")
+            console.print(f"  ! {escape(warning)}")
 
 
 def print_result(result: OptimizeResult) -> None:
     quantization = result.quantization
     color = "green" if quantization.success else "red"
-    console.print(f"\n[{color}]Quantization:[/{color}] {quantization.message}")
+    console.print(f"\n[{color}]Quantization:[/{color}] {escape(quantization.message)}")
     predicted = result.plan.predicted
     if quantization.success and predicted:
         console.print(

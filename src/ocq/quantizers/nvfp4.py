@@ -11,7 +11,6 @@ from ocq.types import OptimizationPlan, QuantAlgorithm, QuantConfig
 class NvFp4Quantizer(OneShotQuantizer):
     algorithm = QuantAlgorithm.NVFP4
     summary = "4-bit floats, two levels of scales. Native on Blackwell GPUs, served with vLLM."
-    install_hint = "uv sync --extra nvfp4"
 
     def artifact_name(self, config: QuantConfig) -> str:
         return "nvfp4" if config.fp4_activations else "nvfp4a16"

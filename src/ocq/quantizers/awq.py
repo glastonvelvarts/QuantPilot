@@ -9,7 +9,6 @@ from ocq.types import QuantAlgorithm
 class AwqQuantizer(OneShotQuantizer):
     algorithm = QuantAlgorithm.AWQ
     summary = "4 bit, calibrated on an NVIDIA GPU. For GPU serving with vLLM or transformers."
-    install_hint = "uv sync --extra awq"
     needs_cuda = True
     symmetric = False
 

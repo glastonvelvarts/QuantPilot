@@ -540,6 +540,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 
 | Command | Description |
 |---------|-------------|
+| `doctor` | Is QuantPilot ready on this PC (llama.cpp, tools, PyTorch, Hugging Face, disk), and the command that fixes what is not |
 | `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
 | `backends` | Installed quant backends and what’s missing |
 | `models` | The models already on this PC, how each fits, and the name to use for it |
