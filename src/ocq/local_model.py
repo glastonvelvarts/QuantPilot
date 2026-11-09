@@ -53,7 +53,23 @@ def validate_hf_folder(path: Path) -> str | None:
             f"{path} is not a HuggingFace-style model folder (missing config.json). "
             "Save the full model with save_pretrained()."
         )
-    if not weight_files(path):
+    files = weight_files(path)
+    missing = [file.name for file in files if not file.is_file()]
+    if missing:
+        try:
+            index = json.loads((path / "model.safetensors.index.json").read_text(encoding="utf-8"))
+            size = f", {index['metadata']['total_size'] / 1024**3:.2f} GB in all"
+        except (OSError, ValueError, KeyError, TypeError):
+            size = ""
+        shown = ", ".join(missing[:3]) + (
+            f" and {len(missing) - 3} more" if len(missing) > 3 else ""
+        )
+        return (
+            f"{path} is missing {len(missing)} of its {len(files)} weight files ({shown}{size}, "
+            "as model.safetensors.index.json lists them): only the config and the tokenizer "
+            "are there. Copy the weight files into the folder."
+        )
+    if not files:
         if list(path.glob("*.bin")):
             return (
                 f"{path} only has PyTorch .bin weights. Re-save it as safetensors: load it with "

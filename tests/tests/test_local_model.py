@@ -319,3 +319,41 @@ def test_a_model_folder_that_is_gone_is_left_out_in_the_app(tmp_path):
         find_models([tmp_path / "moved"])  # ocq models --dir: say so
     others = find_models()
     assert find_models([tmp_path / "moved"], skip_missing=True) == others  # the app: the others
+
+
+def test_a_folder_without_its_weights_says_which_and_how_much(tmp_path):
+    # /Documents/trained-model/qwen-awq-4bit on the M1: config, tokenizer and the index of a
+    # 7B AWQ, its two weight files not copied. It said "Could not read safetensors file".
+    folder = saved_model_folder(tmp_path / "qwen-awq-4bit", weights=False)
+    index = {
+        "metadata": {"total_size": 5_573_316_608},
+        "weight_map": {
+            "a": "model-00001-of-00002.safetensors",
+            "b": "model-00002-of-00002.safetensors",
+        },
+    }
+    (folder / "model.safetensors.index.json").write_text(json.dumps(index))
+    problem = validate_hf_folder(folder)
+    assert "is missing 2 of its 2 weight files (model-00001-of-00002.safetensors, " in problem
+    assert "5.19 GB in all" in problem and problem.endswith(
+        "Copy the weight files into the folder."
+    )
+    with pytest.raises(OcqError, match="missing 2 of its 2 weight files"):
+        parse_model_ref(str(folder))
+
+
+def test_a_quantized_folder_of_your_own_points_to_the_one_it_was_made_from(tmp_path):
+    from conftest import QWEN_AWQ
+
+    from ocq.plan import already_quantized
+
+    folder = tmp_path / "qwen-awq-4bit"
+    folder.mkdir()
+    _, config, tensors, dtypes = real_model(QWEN_AWQ)
+    config["_name_or_path"] = "outputs/qwen-merged-16bit"  # what transformers 4 saved
+    (folder / "config.json").write_text(json.dumps(config))
+    write_safetensors(folder / "model.safetensors", tensors, dtypes)
+    (folder / "tokenizer.json").write_text("{}")
+    message = already_quantized(resolve_model(str(folder), None, use_llmfit=False))
+    assert message.startswith("local/qwen-awq-4bit is already quantized (AWQ 4-bit)")
+    assert "It was made from outputs/qwen-merged-16bit (its config.json says so)" in message
