@@ -255,7 +255,7 @@ def test_the_gguf_says_quantpilot_made_it_and_from_which_repo(tmp_path, monkeypa
     plan = SimpleNamespace(
         output_dir=tmp_path / "out",
         model_id="Qwen/Qwen3.5-0.8B",
-        model=SimpleNamespace(stored_precision="BF16"),
+        model=SimpleNamespace(stored_precision="BF16", weights_dir=None),
         quant_config=SimpleNamespace(gguf_type="Q4_K_M"),
     )
     quantizer.quantize(plan)

@@ -78,6 +78,8 @@ def write_provenance(folder: Path, plan: OptimizationPlan) -> None:
 
     config = plan.quant_config
     made = {"source": plan.model_id, "method": config.algorithm.value, "bits": config.bits}
+    if plan.model.weights_dir is not None:  # a model of your own: the folder it came from
+        made["source_path"] = str(Path(plan.model.weights_dir).resolve())
     (folder / PROVENANCE).write_text(json.dumps(made | {"quantized_by": "QuantPilot"}, indent=2))
 
 

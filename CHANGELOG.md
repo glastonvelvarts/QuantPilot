@@ -8,6 +8,10 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 
 - README: how to open the app, for each way of installing QuantPilot (`ocq`, `uvx quantpilot`, `uv run ocq`).
 
+### Fixed
+
+- A model of your own (a folder saved with `save_pretrained`) is now compared with its original: what QuantPilot makes from it records the folder (in the GGUF, `general.source.url`; in `quantpilot.json`, `source_path`), and `ocq bench --quality` measures the original once from there. It said the original was not on the PC.
+
 ## [1.5.0] - 2026-11-09
 
 The first release on PyPI: `uv tool install quantpilot`.

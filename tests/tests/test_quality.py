@@ -402,6 +402,7 @@ def test_what_quantpilot_made_says_where_it_came_from_wherever_it_is(tmp_path):
     folder.mkdir(parents=True)
     plan = SimpleNamespace(
         model_id="Qwen/Qwen2.5-0.5B-Instruct",
+        model=SimpleNamespace(weights_dir=None),
         quant_config=SimpleNamespace(algorithm=QuantAlgorithm.AWQ, bits=4),
     )
     write_provenance(folder, plan)
@@ -430,3 +431,76 @@ def test_what_quantpilot_made_says_where_it_came_from_wherever_it_is(tmp_path):
     old.parent.mkdir(parents=True)
     old.write_bytes(gguf_bytes({"general.architecture": "llama"}, []))
     assert bench.made_from(old) == "org/model"
+
+
+def test_a_model_of_your_own_is_compared_with_its_own_folder(tmp_path):
+    # A fine-tune quantized with -o elsewhere said "the original weights of this model are not
+    # on this PC": only a repo was ever written down, never the folder.
+    from types import SimpleNamespace
+
+    from test_gguf_file import gguf_bytes
+
+    from ocq import bench
+    from ocq.quantizers.base import write_provenance
+    from ocq.quantizers.gguf import gguf_metadata
+    from ocq.types import QuantAlgorithm
+
+    original = tmp_path / "my finetune"  # a space: the file:// address escapes it
+    original.mkdir()
+    (original / "config.json").write_text("{}")
+
+    metadata = gguf_metadata("local/my finetune", original)
+    assert metadata["general.source.url"] == original.resolve().as_uri()
+    assert "general.source.repo_url" not in metadata
+    gguf = tmp_path / "out" / "artifact" / "my-Q4_K_M.gguf"
+    gguf.parent.mkdir(parents=True)
+    gguf.write_bytes(gguf_bytes({"general.architecture": "llama", **metadata}, []))
+    assert bench.provenance_of(gguf) == ("local/my finetune", original.resolve())
+
+    folder = tmp_path / "out" / "artifact" / "my-awq-4bit"
+    folder.mkdir()
+    plan = SimpleNamespace(
+        model_id="local/my finetune",
+        model=SimpleNamespace(weights_dir=original),
+        quant_config=SimpleNamespace(algorithm=QuantAlgorithm.AWQ, bits=4),
+    )
+    write_provenance(folder, plan)
+    assert bench.provenance_of(folder) == ("local/my finetune", original.resolve())
+
+    # The original moved or deleted: the name is kept, there is nothing to measure.
+    (original / "config.json").unlink()
+    assert bench.provenance_of(gguf) == ("local/my finetune", None)
+
+
+def test_the_reference_of_your_own_model_is_made_from_its_folder(tmp_path, monkeypatch):
+    from conftest import QWEN, real_model, write_safetensors
+
+    from ocq import bench
+    from ocq.quantizers import gguf, llama_cpp
+
+    _, config, tensors, dtypes = real_model(QWEN)
+    original = tmp_path / "my-finetune"
+    original.mkdir()
+    (original / "config.json").write_text(json.dumps(config))
+    write_safetensors(original / "model.safetensors", tensors, dtypes)
+    (original / "tokenizer.json").write_text("{}")
+    text = quality.DATASETS / "wikitext-2-raw" / "wiki.test.raw"
+    text.parent.mkdir(parents=True)
+    text.write_text("text")
+    converted = []
+
+    def run_tool(command, log, env=None, progress=False):
+        if "--outfile" in command:
+            converted.append(command[2])
+            Path(command[command.index("--outfile") + 1]).write_bytes(tiny_gguf(32))
+            return "", ""
+        return "", PERPLEXITY_LOG.read_text().replace("17.2720", "18.0000")
+
+    monkeypatch.setattr(gguf, "run_tool", run_tool)
+    monkeypatch.setattr(llama_cpp, "tool_path", lambda name, hardware: Path(name))
+    monkeypatch.setattr(llama_cpp, "converter_script", lambda: Path("convert_hf_to_gguf.py"))
+    saved = bench.make_reference(
+        "local/my-finetune", nvidia_pc(RTX_3090), quality.FIXED, tmp_path, original
+    )
+    assert converted == [str(original)]  # no Hugging Face cache involved
+    assert (saved["model"], saved["label"], saved["ppl"]) == ("local/my-finetune", "BF16", 18.0)

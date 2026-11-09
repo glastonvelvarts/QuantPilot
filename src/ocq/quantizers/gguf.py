@@ -66,7 +66,7 @@ class GGUFQuantizer(Quantizer):
             flush=True,
         )
         metadata = workspace / "metadata.json"
-        metadata.write_text(json.dumps(gguf_metadata(plan.model_id)))
+        metadata.write_text(json.dumps(gguf_metadata(plan.model_id, plan.model.weights_dir)))
         run_tool(
             [
                 sys.executable,
@@ -201,13 +201,16 @@ QUANTIZED_BY = "QuantPilot"
 HF = "https://huggingface.co/"
 
 
-def gguf_metadata(model_id: str) -> dict:
+def gguf_metadata(model_id: str, folder: Path | None = None) -> dict:
     """What the GGUF says about itself (the converter's --metadata): QuantPilot made it, from
-    this repo, so it is compared with its original wherever the file is moved. Its name is the
-    model's, not the cache folder's (a commit hash when it came from the Hugging Face cache)."""
+    this repo, or from this folder for a model of your own (general.source.url, file://), so
+    it is compared with its original wherever the file is moved. Its name is the model's, not
+    the cache folder's (a commit hash when it came from the Hugging Face cache)."""
     metadata = {"general.quantized_by": QUANTIZED_BY, "general.name": model_id.split("/")[-1]}
     if not model_id.startswith(("local/", "ollama/")) and "/" in model_id:
         metadata["general.source.repo_url"] = HF + model_id
+    elif folder is not None:
+        metadata["general.source.url"] = folder.resolve().as_uri()
     return metadata
 
 

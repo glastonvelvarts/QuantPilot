@@ -72,6 +72,18 @@ ocq bench ocq-output/Qwen--Qwen3-8B/artifact/Qwen--Qwen3-8B-Q4_K_M.gguf --qualit
 
 A model is a Hugging Face id, a folder of your own fine-tune (saved with `save_pretrained`), a `.gguf` file, or an Ollama model (`ollama:qwen3:8b`). `ocq models` lists the ones already on your PC: Ollama, LM Studio, the Hugging Face cache, your folders.
 
+### Your own model
+
+Point QuantPilot at the folder your training saved with `save_pretrained` (Unsloth, Axolotl, the Hugging Face Trainer, TRL): it needs `config.json`, the `*.safetensors` weights and the tokenizer files. Merge LoRA adapters into the model first: an adapter alone is not a model.
+
+```sh
+ocq feasibility ./my-model                                    # every format, on this PC
+ocq optimize ./my-model -b gguf --gguf-type Q4_K_M --execute  # or AWQ, GPTQ, bitsandbytes, NVFP4
+ocq bench ocq-output/local--my-model/artifact/local--my-model-Q4_K_M.gguf --quality
+```
+
+The file remembers the folder it was made from, so `--quality` compares it with your original (measured once): `Q4_K_M keeps about 77% of the model's quality`. In the app, type the folder (or Browse) on the Quantize page.
+
 ## The app
 
 Run `ocq` for the full-screen app. **Check a model** gives the pick with its reasons and confidence, and every format's memory, speed and quality side by side. **Quantize** makes it with live progress. **Benchmark** measures any model on the PC and keeps the history. **Discover** ranks models for a kind of work, **Settings** keeps a Hugging Face token for gated models.
