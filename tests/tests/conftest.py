@@ -17,11 +17,15 @@ DATA = Path(__file__).parent / "data"
 
 
 @pytest.fixture(autouse=True)
-def private_caches(tmp_path, monkeypatch):
+def private_caches(tmp_path, monkeypatch, request):
     """Tests must not read or write the speed measurements and model cache of the real user."""
     monkeypatch.setattr(measurements, "STORE", tmp_path / "measurements.json")
     monkeypatch.setattr(quality, "STORE", tmp_path / "quality.json")
-    monkeypatch.setattr(quality, "DATASETS", tmp_path / "datasets")
+    # Real quantizations (-m slow) keep the downloads they need: the WikiText text and
+    # llama.cpp's release are fetched once, not on every run. Their results stay private.
+    real_run = request.node.get_closest_marker("slow") is not None
+    if not real_run:
+        monkeypatch.setattr(quality, "DATASETS", tmp_path / "datasets")
     monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path / "models")
     # Nor the recommendation engine's list of Hub models, nor the Hub itself.
     monkeypatch.setattr(recommend, "HUB_CATALOG_CACHE", tmp_path / "hub_catalog.json")
@@ -35,14 +39,16 @@ def private_caches(tmp_path, monkeypatch):
     # Nor the llama.cpp this PC happens to have downloaded: a test that needs its converter
     # says which architectures it knows.
     monkeypatch.delenv("OCQ_LLAMA_CPP", raising=False)
-    monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "llama.cpp")
+    if not real_run:
+        monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "llama.cpp")
     # Nor the user's Hugging Face token, from the shell or from QuantPilot's .env file.
     for name in env_file.HF_TOKEN_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(env_file, "ENV_FILE", tmp_path / "settings" / ".env")
     monkeypatch.setattr(env_file, "from_file", set())
-    # Nor the GPU driver of the PC they run on.
-    monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
+    # Nor the GPU driver of the PC they run on (real quantizations place models with it).
+    if not real_run:
+        monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 
 
 def llama_style_tensors(

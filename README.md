@@ -556,11 +556,12 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 ## Development
 
 ```sh
-uv run pytest              # fast unit tests
-uv run pytest -m slow      # real quant on a tiny model, each installed backend
-uv run ruff check .
-make check                 # ruff + fast tests
+make check                 # lint, format check and the fast tests (uv run pytest)
+uv run pytest -m slow      # real quantizations of SmolLM2-135M, each installed backend
+make test-gpu              # every backend for real, into one report in results/ (NVIDIA PC)
 ```
+
+The real tests make each format from SmolLM2-135M, check it, measure its speed and its quality against the original, and for GGUF compare llama.cpp's memory with QuantPilot's prediction (`ocq verify`). GitHub runs the fast suite on Linux, macOS and Windows with Python 3.10 and 3.13 on every push, checks that the package installs with `uv tool install` and `uvx`, and runs the GGUF real test on all three every night (CPU only). AWQ, GPTQ, NVFP4 and bitsandbytes need an NVIDIA GPU: `make test-gpu` on a PC with one installs every backend, runs them all and writes a report that says what passed and what could not run there.
 
 Size formulas are tested against real files: `tests/tests/data/` holds the `config.json`, safetensors headers (no weights) and Hugging Face counts of real repos, and expected values come from real artifacts and llama.cpp's own logs.
 
