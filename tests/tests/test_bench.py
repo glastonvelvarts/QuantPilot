@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import RTX_3090, nvidia_pc
-from test_discovery import tiny_gguf
+from test_discovery import empty_home, tiny_gguf  # noqa: F401 (empty_home: autouse)
 from typer.testing import CliRunner
 
 from ocq import bench, cli, measurements
@@ -134,7 +134,7 @@ def test_ocq_bench_runs_the_standard_suite_and_saves_it(tmp_path, monkeypatch):
 def test_ocq_bench_says_it_measures_models_on_this_pc():
     result = CliRunner().invoke(cli.app, ["bench", "Qwen/Qwen2.5-7B-Instruct"])
     assert result.exit_code == 1
-    assert "measures a model that is on this PC" in result.output
+    assert "is not on this PC" in result.output
 
 
 def test_a_run_counts_for_the_same_setup_only_when_placed_the_same_way():

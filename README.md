@@ -448,6 +448,16 @@ llama.cpp b11429, all on the GPU, f16 cache
 Saved to this PC's benchmark history (2 runs of this setup).
 ```
 
+`--quality` also measures how good the model is: its perplexity on WikiText-2 (lower is better), the text llama.cpp's own quality numbers are measured on, the way llama-perplexity measures it (chunks of 512 tokens, each scored on its second half). By default the first 40 chunks (20,480 tokens: under a minute for a 1B model, a few minutes for a 7B one); `--full` takes the whole test text, comparable to published numbers but much longer. Every format of one model reads exactly the same tokens, so their perplexities compare much more closely than the ± suggests.
+
+```
+ocq bench ./Qwen3.5-0.8B-Q4_K_M.gguf --quality          # llama.cpp
+ocq bench Qwen/Qwen3.5-0.8B --quality                   # the original, in transformers
+ocq bench ./ocq-output/<model>/artifact/<awq folder> --quality   # AWQ, GPTQ, bitsandbytes (NVIDIA)
+```
+
+Models llama.cpp does not run (the original weights, AWQ, GPTQ, bitsandbytes, NVFP4) are measured in transformers with the same method: SmolLM2-135M scores 18.7853 there in BF16 and 18.7856 in llama.cpp as an f16 GGUF. The text (4.7 MB) is downloaded once and checked against llama.cpp's copy. Results are saved in `~/.cache/ocq/quality.json`, with where they ran: one file scores a little differently on a GPU and on a CPU (17.27 and 17.24).
+
 Every run (here and after `optimize`) is saved in `~/.cache/ocq/measurements.json` with what ran (model, format, llama.cpp build, context, cache, placement) and where (this PC's CPU and RAM, and its GPU). Speed predictions and recommendations use only this PC's runs, and count a run for "this setup" only when it was placed the same way.
 
 ## Check QuantPilot on your PC: `ocq verify`
@@ -529,7 +539,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 | `backends` | Installed quant backends and what’s missing |
 | `models` | The models already on this PC, how each fits, and the name to use for it |
 | `inspect` | Every fact about a model, its source and how sure it is |
-| `bench` | Run the standard benchmark on a GGUF model of this PC and save it to its history |
+| `bench` | Run the standard benchmark on a model of this PC (speed; `--quality`: perplexity) and save it to its history |
 | `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
 | `recommend` | Model, format, runtime and cache type for a kind of work, with reasons and confidence |
 | `feasibility` | Full format table for one model |

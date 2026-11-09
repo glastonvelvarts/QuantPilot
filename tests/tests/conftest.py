@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ocq import discovery, env_file, hardware, measurements, model_analyzer, recommend
+from ocq import discovery, env_file, hardware, measurements, model_analyzer, quality, recommend
 from ocq.quantizers import llama_cpp
 from ocq.types import DTYPE_BITS
 
@@ -20,6 +20,8 @@ DATA = Path(__file__).parent / "data"
 def private_caches(tmp_path, monkeypatch):
     """Tests must not read or write the speed measurements and model cache of the real user."""
     monkeypatch.setattr(measurements, "STORE", tmp_path / "measurements.json")
+    monkeypatch.setattr(quality, "STORE", tmp_path / "quality.json")
+    monkeypatch.setattr(quality, "DATASETS", tmp_path / "datasets")
     monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path / "models")
     # Nor the recommendation engine's list of Hub models, nor the Hub itself.
     monkeypatch.setattr(recommend, "HUB_CATALOG_CACHE", tmp_path / "hub_catalog.json")
