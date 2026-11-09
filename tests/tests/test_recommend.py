@@ -513,7 +513,21 @@ def test_alternatives_are_distinct_choices_and_say_why_they_lost(saved_hub):
     ]
 
 
-def test_confidence_rises_with_runs_on_this_pc(saved_hub):
+def test_without_llama_cpps_converter_making_a_gguf_is_not_checked(saved_hub):
+    # A PC that has not downloaded llama.cpp yet (the test setup gives every test an empty
+    # llama.cpp folder): whether the architecture converts cannot be checked, so it says so.
+    best = big_gpu_chat().best
+    assert best.candidate.quantize and best.candidate.option.row_kind == "gguf"
+    assert best.confidence.level == ConfidenceLevel.LOW
+    evidence = {e.text: e.known for e in best.confidence.evidence}
+    assert evidence["Architecture not checked: llama.cpp's converter is not on this PC"] is False
+
+
+def test_confidence_rises_with_runs_on_this_pc(saved_hub, monkeypatch):
+    from ocq import recommend as engine
+
+    # llama.cpp's converter is here and knows the model.
+    monkeypatch.setattr(engine, "converter_architectures", lambda: frozenset({"Qwen2ForCausalLM"}))
     best = big_gpu_chat().best
     assert best.confidence.level == ConfidenceLevel.MEDIUM
     evidence = {e.text: e.known for e in best.confidence.evidence}

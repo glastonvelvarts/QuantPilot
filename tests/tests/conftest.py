@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ocq import discovery, hardware, measurements, model_analyzer, recommend
+from ocq.quantizers import llama_cpp
 from ocq.types import DTYPE_BITS
 
 # Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
@@ -29,6 +30,10 @@ def private_caches(tmp_path, monkeypatch):
     monkeypatch.setattr(recommend, "fetch_hub_listing", no_network)
     # Nor the files ocq optimize made in the folder the tests run from.
     monkeypatch.setattr(discovery, "quantpilot_dirs", lambda: [])
+    # Nor the llama.cpp this PC happens to have downloaded: a test that needs its converter
+    # says which architectures it knows.
+    monkeypatch.delenv("OCQ_LLAMA_CPP", raising=False)
+    monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "llama.cpp")
     # Nor the GPU driver of the PC they run on.
     monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 
