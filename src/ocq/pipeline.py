@@ -63,6 +63,7 @@ def run_optimize(
         return OptimizeResult(plan=plan, dry_run=True)
 
     quantization, benchmark = get_quantizer(plan.quant_config.algorithm).run(plan)
+    print("Checking the result ...", flush=True)
     validation = validate_artifact(plan, quantization, benchmark)
     remember_speed(plan, quantization, benchmark)
 

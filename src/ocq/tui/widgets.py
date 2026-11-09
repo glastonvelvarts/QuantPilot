@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -148,12 +149,16 @@ class ProgressLog(RichLog, can_focus=False):
         super().__init__(min_width=20, wrap=True, markup=False, **kwargs)
         self._partial = ""
         self.on_line: Callable[[str], None] | None = None
+        # Hears each state of a progress meter as it redraws (the log itself leaves them out).
+        self.on_meter: Callable[[str], None] | None = None
 
     def on_print(self, event: events.Print) -> None:
         *lines, self._partial = (self._partial + event.text).split("\n")
         self._partial = self._last(self._partial, keep_empty=True)  # do not let redraws pile up
         for line in lines:
             self._add(self._last(line))
+        if self.on_meter and self._partial.strip():
+            self.on_meter(Text.from_ansi(self._partial.strip()).plain)
 
     def flush(self) -> None:
         self._add(self._last(self._partial))
@@ -166,10 +171,134 @@ class ProgressLog(RichLog, can_focus=False):
 
     def _add(self, line: str) -> None:
         text = Text.from_ansi(line.strip())
-        if text.plain and not self.METER.search(text.plain):
-            self.write(text)
-            if self.on_line:
-                self.on_line(text.plain)
+        if not text.plain:
+            return
+        # A meter left without a line end gets the next message glued on ("... 0.00B" then
+        # "Converting to GGUF ..."): the message is a line of its own.
+        start = STEP_START.search(text.plain)
+        if start and start.start() > 0:
+            self._add(text.plain[: start.start()])
+            self._add(text.plain[start.start() :])
+            return
+        if self.METER.search(text.plain):
+            if self.on_meter:
+                self.on_meter(text.plain)
+            return
+        self.write(text)
+        if self.on_line:
+            self.on_line(text.plain)
+
+
+# Steps of a quantization, and the line that starts each (printed by the pipeline).
+STEPS = (
+    ("Download", re.compile(r"^(Downloading|Using local weights)")),
+    ("Prepare", re.compile(r"^(Converting|Loading .*calibration)")),
+    ("Quantize", re.compile(r"^Quantizing")),
+    ("Measure speed", re.compile(r"^Measuring the speed")),
+    ("Check", re.compile(r"^Checking the result")),
+)
+STEP_START = re.compile("|".join(starts.pattern.removeprefix("^") for _, starts in STEPS))
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+PERCENT = re.compile(r"(\d{1,3})%\|")
+COUNT = re.compile(r"^\[\s*(\d+)/\s*(\d+)\]|\b(\d+)/(\d+) \[")  # llama-quantize, tqdm
+SIZES = re.compile(r"(\d+(?:\.\d+)?\s?[kMGT])(?:i?B)?\s*/\s*(\d+(?:\.\d+)?\s?[kMGT])(?:i?B)?")
+
+
+def meter_progress(line: str) -> tuple[float | None, str]:
+    """(percent, what is done) from a progress line: tqdm's "45%|", "12/335 [" or llama-quantize's
+    "[ 12/ 335]", and sizes such as "312M/1.8G". None when it shows no percentage."""
+    percent = None
+    found = PERCENT.search(line)
+    count = COUNT.search(line)
+    if found:
+        percent = float(found.group(1))
+    elif count:
+        done, total = (int(g) for g in (count.group(1, 2) if count.group(1) else count.group(3, 4)))
+        percent = 100 * done / total if total else None
+    sizes = SIZES.search(line)
+    detail = f"{sizes.group(1)}B of {sizes.group(2)}B" if sizes else ""
+    if not detail and count:
+        detail = " of ".join(count.group(1, 2) if count.group(1) else count.group(3, 4))
+    return percent, detail
+
+
+class StepTracker(Static):
+    """The steps of a quantization in a row: done ones with a tick and their time, the
+    current one with a spinner and a running timer, the rest waiting."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__("", **kwargs)
+        self.current = -1
+        self.times: list[float] = []  # seconds each finished step took
+        self.started = 0.0
+        self.failed = False
+        self.frame = 0
+        self.timer = None
+
+    def start(self) -> None:
+        self.current, self.times, self.failed, self.frame = -1, [], False, 0
+        self.timer = self.timer or self.set_interval(0.1, self.tick)
+        self.timer.resume()
+        self.show()
+
+    def heard(self, line: str) -> bool:
+        """Moves to the step this line starts, if it starts one. True when it did."""
+        for index, (_, starts) in enumerate(STEPS):
+            if starts.search(line) and index > self.current:
+                self.advance(index)
+                return True
+        return False
+
+    def advance(self, index: int) -> None:
+        now = time.monotonic()
+        if self.current >= 0:
+            self.times.append(now - self.started)
+        # Steps a backend skips (no download for a local model) count as done at once.
+        self.times += [0.0] * (index - len(self.times))
+        self.current, self.started = index, now
+        self.show()
+
+    def finish(self, ok: bool) -> None:
+        if self.current >= 0 and ok:
+            self.advance(len(STEPS))
+        self.failed = not ok
+        if self.timer:
+            self.timer.pause()
+        self.show()
+
+    def tick(self) -> None:
+        self.frame += 1
+        self.show()
+
+    def show(self) -> None:
+        if self.is_mounted:  # the steps themselves work without a screen (tests)
+            self.update(self.render_steps())
+
+    def render_steps(self) -> Text:
+        text = Text()
+        for index, (name, _) in enumerate(STEPS):
+            if index:
+                text.append("  ─  ", "dim")
+            if index < len(self.times):
+                text.append("✓ ", "green")
+                text.append(name)
+                text.append(f" {clock(self.times[index])}", "dim")
+            elif index == self.current and self.failed:
+                text.append("✗ ", "red")
+                text.append(name, "red")
+            elif index == self.current:
+                text.append(f"{SPINNER[self.frame % len(SPINNER)]} ", "bold cyan")
+                text.append(name, "bold")
+                text.append(f" {clock(time.monotonic() - self.started)}", "cyan")
+            else:
+                text.append("○ ", "dim")
+                text.append(name, "dim")
+        return text
+
+
+def clock(seconds: float) -> str:
+    seconds = int(seconds)
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 # Pop-ups ----------------------------------------------------------------------------------

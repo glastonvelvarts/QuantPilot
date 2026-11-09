@@ -16,6 +16,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.color import Gradient
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import (
     Button,
@@ -24,6 +25,7 @@ from textual.widgets import (
     Input,
     Label,
     LoadingIndicator,
+    ProgressBar,
     Static,
     Switch,
     TextArea,
@@ -42,7 +44,9 @@ from ocq.tui.widgets import (
     ProgressLog,
     Results,
     RowTable,
+    StepTracker,
     field,
+    meter_progress,
 )
 from ocq.types import (
     KV_CACHE_TYPES,
@@ -56,6 +60,7 @@ if TYPE_CHECKING:
     from ocq.tui.app import QuantPilotApp
 
 AUTO = "auto"
+BAR_GRADIENT = Gradient.from_colors("#22d3ee", "#3b82f6", "#a78bfa")
 CONTEXTS = (2048, 4096, 8192, 16384, 32768, 65536, 131072)
 KV_LABELS = {"f16": "Full", "q8_0": "Half (q8_0)", "q4_0": "Quarter (q4_0)"}
 # Format dropdown on the Quantize page: "backend:level".
@@ -523,6 +528,7 @@ class CheckPage(Page):
         self.format_rows: dict[str, tuple[str, int, str]] = {}  # row -> (format, context, cache)
         self.pick: tuple[str, int, str] | None = None  # what Quantize to this opens with
         self.ref = ""
+        self.chart = None  # the chart last shown (FormatChart)
 
     def compose_body(self) -> ComposeResult:
         with Grid(classes="form"):
@@ -545,6 +551,7 @@ class CheckPage(Page):
                 yield Action("Quantize to this", variant="primary", id="quantize-pick")
             with Collapsible(title="Why this pick", collapsed=True, id="why"):
                 yield Static("", id="why-text")
+            yield Static("", id="chart")
             yield RowTable(cursor_type="row", zebra_stripes=True, id="options")
             with Collapsible(title="About this model", collapsed=True, id="about"):
                 yield Static("", id="facts")
@@ -554,7 +561,7 @@ class CheckPage(Page):
         self.show_results(False)
 
     def show_results(self, shown: bool) -> None:
-        for selector in ("#pick", "#why", "#options", "#about"):
+        for selector in ("#pick", "#why", "#chart", "#options", "#about"):
             self.query_one(selector).display = shown
         self.query_one(".problem").display = False
 
@@ -664,6 +671,8 @@ class CheckPage(Page):
             if candidate.quantize and key and row.status != engine.REJECTED:
                 self.format_rows[str(i)] = (key, candidate.context, candidate.kv_cache)
         self.query_one("#facts", Static).update(facts_grid(model))
+        self.chart = format_chart(result, rows)
+        self.query_one("#chart", Static).update(self.chart)
         self.show_results(True)
         self.query_one("#why").display = best is not None
 
@@ -677,6 +686,58 @@ class CheckPage(Page):
         chosen = self.format_rows.get(event.row_key.value or "")
         if chosen:
             self.qp.open_quantize(self.ref, *chosen)
+
+
+CHART_ROWS = 12
+
+
+def short_runtime_reason(why: str) -> str:
+    """'bitsandbytes needs an NVIDIA GPU, and this PC has none.' -> 'needs an NVIDIA GPU'."""
+    for need in ("needs an NVIDIA GPU", "Apple Silicon"):
+        if need in why:
+            return need if need.startswith("needs") else "needs a Mac"
+    if "Windows" in why:
+        return "not on Windows"
+    return why.split(",")[0].rstrip(".")
+
+
+SHORT_LIMITS = {
+    "memory": "too big",
+    "context": "holds too little context",
+    "architecture": "cannot be converted yet",
+    "quantization": "cannot be made here",
+    "disk": "not enough disk",
+}
+
+
+def format_chart(result, rows):
+    """Memory, speed and quality of each format of the model, as bars."""
+    from ocq import recommend as engine
+    from ocq.tui.charts import ChartRow, FormatChart
+
+    chart = []
+    for row in rows[:CHART_ROWS]:
+        candidate, option = row.candidate, row.candidate.option
+        label = option.label
+        if candidate.kv_cache != "f16":
+            label += f" + {words.cache(candidate.kv_cache).removesuffix(' cache')}"
+        runs = row.status != engine.REJECTED
+        note = ""
+        if not runs:
+            note = SHORT_LIMITS.get(row.limit) or short_runtime_reason(row.why)
+        quality = engine.quality_kept(engine.rated_as(candidate))
+        speed = option.estimated_tps if runs else 0.0
+        chart.append(
+            ChartRow(label, option.memory_required_gb, speed, quality, row.status == engine.PICK,
+                     runs, note)
+        )  # fmt: skip
+    best = result.best
+    free = (
+        best.candidate.option.memory_available_gb
+        if best
+        else rows[0].candidate.option.memory_available_gb
+    )
+    return FormatChart(chart, free)
 
 
 FOR_WORKLOAD = "For the workload"
@@ -745,6 +806,11 @@ class QuantizePage(Page):
                 yield Action("Install", variant="primary", id="install")
             with Vertical(id="running"):
                 yield Static("", id="stage")
+                yield StepTracker(id="steps")
+                yield ProgressBar(
+                    id="step-bar", show_eta=False, show_percentage=False, gradient=BAR_GRADIENT
+                )
+                yield Static("", id="step-detail")
                 yield ProgressLog(id="progress")
             yield Card("", id="result", classes="card")
             yield Static("", classes="problem")
@@ -755,6 +821,18 @@ class QuantizePage(Page):
 
     def set_format(self, key: str) -> None:
         self.query_one("#format", Dropdown).value = key if key in FORMAT_KEYS else AUTO
+
+    def show_running(self, what: str) -> None:
+        """The progress area: "quantize" (title, steps, bar, log), "install" (title, bar, log),
+        "steps" (only the finished steps), or "" (hidden)."""
+        shown = {
+            "quantize": ("#stage", "#steps", "#step-bar", "#step-detail", "#progress"),
+            "install": ("#stage", "#step-bar", "#progress"),
+            "steps": ("#steps",),
+        }.get(what, ())
+        for selector in ("#stage", "#steps", "#step-bar", "#step-detail", "#progress"):
+            self.query_one(selector).display = selector in shown
+        self.query_one("#running").display = bool(shown)
 
     def preset(self, ref: str, key: str, context: int, kv_cache: str) -> None:
         """What Check recommended: its context goes in the field, and its cache type is used
@@ -863,10 +941,11 @@ class QuantizePage(Page):
             self.query_one("#plan").display = False
             self.query_one("#stage", Static).update(Text("Installing ...", "bold"))
             log.clear()
-            self.query_one("#running").display = True
+            self.query_one("#step-bar", ProgressBar).update(total=None, progress=0)
+            self.show_running("install")
 
         def done(state, problem: str) -> None:
-            self.query_one("#running").display = False
+            self.show_running("")
             if problem:
                 self.failed(problem)
             else:
@@ -900,16 +979,34 @@ class QuantizePage(Page):
             return
         self.query_one("#plan").display = False
         self.query_one("#result").display = False
-        self.query_one("#running").display = True
+        self.show_running("quantize")
         stage = self.query_one("#stage", Static)
         stage.update(Text(f"Quantizing {ref} ...", "bold"))
         progress = self.query_one(ProgressLog)
         progress.clear()
+        steps = self.query_one(StepTracker)
+        bar = self.query_one("#step-bar", ProgressBar)
+        detail = self.query_one("#step-detail", Static)
+        steps.start()
+        bar.update(total=None, progress=0)  # pulses until a step says how far it is
+        detail.update("")
 
         def step(line: str) -> None:  # the latest progress line, under the title
+            if steps.heard(line):
+                bar.update(total=None, progress=0)
+                detail.update("")
             stage.update(Text.assemble((f"Quantizing {ref}\n", "bold"), (line[:120], "dim")))
 
+        def meter(line: str) -> None:  # a download or conversion meter as it moves
+            percent, done = meter_progress(line)
+            if percent is not None:
+                bar.update(total=100, progress=percent)
+            shown = [f"{percent:.0f}%" if percent is not None else "", done]
+            if any(shown):
+                detail.update("  ·  ".join(part for part in shown if part))
+
         progress.on_line = step
+        progress.on_meter = meter
         self.qp.job_started("Quantizing")
         self.app.begin_capture_print(progress)
         self.quantize(ref, key, workload, context)
@@ -938,8 +1035,9 @@ class QuantizePage(Page):
         self.app.end_capture_print(progress)
         progress.flush()
         ok = bool(result and result.validation and result.validation.passed)
+        self.query_one(StepTracker).finish(ok)
         self.qp.job_finished("Quantized" if ok else "Quantizing failed", ok)
-        self.query_one("#running").display = False
+        self.show_running("steps")  # the steps and their times stay above the result
         card = self.query_one("#result", Card)
         card.update(result_text(result, problem))
         card.set_class(not ok, "bad")

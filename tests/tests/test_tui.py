@@ -15,6 +15,7 @@ from ocq.discovery import LocalModel
 from ocq.tui import pages, words
 from ocq.tui.app import MENU, QuantPilotApp
 from ocq.tui.banner import BANNER, BANNER_WIDTH, COMPACT, banner_text
+from ocq.tui.charts import lines_of
 from ocq.tui.pages import AUTO, CheckPage, QuantizePage, format_choices, format_key
 from ocq.tui.settings import Settings, load_settings, save_settings
 from ocq.tui.widgets import ModelPicker, ProgressLog
@@ -259,6 +260,7 @@ def test_check_shows_the_engines_pick_in_plain_words(tmp_path: Path, monkeypatch
         await settle(app, pilot)
         seen["card"] = text_of(app, "#pick-text")
         seen["why"] = text_of(app, "#why-text")
+        seen["chart"] = "\n".join(lines_of(app.query_one(CheckPage).chart, 130))
         seen["rows"] = app.query_one("#options").row_count
         await pilot.click(app.query_one("#quantize-pick"))
         await settle(app, pilot)
@@ -277,6 +279,8 @@ def test_check_shows_the_engines_pick_in_plain_words(tmp_path: Path, monkeypatch
     assert "uv sync" not in seen["card"]
     assert expected.best.reasons[0].text in seen["why"] and "✓" in seen["why"]
     assert seen["rows"] == len(recommend.compare_rows(expected))
+    assert "Memory (GB)" in seen["chart"] and f"★ {best.option.label}" in seen["chart"]
+    assert "free memory" in seen["chart"]
     assert (seen["page"], seen["format"]) == ("quantize", f"gguf:{best.option.label}")
     assert seen["context"] == 32768 and seen["saved"] == "coding"
 
@@ -381,12 +385,17 @@ def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
         await settle(app, pilot)
         seen["progress"] = [line.text for line in app.query_one("#progress", ProgressLog).lines]
         seen["result"] = text_of(app, "#result")
+        seen["steps"] = text_of(app, "#steps")
+        seen["bar shown"] = app.query_one("#step-bar").display
         seen["busy"] = app.busy
 
     run_app(tmp_path, steps)
     assert "GGUF Q8_0 (8-bit)" in seen["plan"] and "Saves to" in seen["plan"]
     assert seen["progress"] == ["Converting to GGUF ...", "Quantizing to Q8_0 ..."]
     assert seen["result"].startswith("Done") and "95 tok/s measured" in seen["result"]
+    # The steps stay above the result, all ticked; the bar and the log are put away.
+    assert seen["steps"].count("✓") == 5 and "✓ Quantize" in seen["steps"]
+    assert not seen["bar shown"]
     assert not seen["busy"]
 
 
