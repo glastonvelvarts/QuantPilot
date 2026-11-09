@@ -156,8 +156,13 @@ def resolve_model(
     llmfit_bin: str | None = None,
     context: int = DEFAULT_CONTEXT,
     kv_cache: str = "f16",
+    use_llmfit: bool = True,
 ) -> ModelSnapshot:
-    """Read a model's facts from its files. Without hardware, the fit is not computed."""
+    """Read a model's facts from its files. Without hardware, the fit is not computed.
+
+    use_llmfit: also ask llmfit's catalog about a Hugging Face repo (its use case, and a fallback
+    when the Hub cannot be reached). The recommendation engine turns it off: it reads the files.
+    """
     if model_ref.startswith("ollama:"):
         return ollama_snapshot(model_ref.removeprefix("ollama:"), hardware, context, kv_cache)
     display_id, local_dir = parse_model_ref(model_ref)
@@ -179,7 +184,7 @@ def resolve_model(
         )
 
     model_id = display_id
-    catalog = catalog_entry(model_id, llmfit_bin)
+    catalog = catalog_entry(model_id, llmfit_bin) if use_llmfit else None
     try:
         meta = fetch_hf_model(model_id)
     except OcqError:
