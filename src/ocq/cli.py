@@ -152,6 +152,29 @@ KvCache = Annotated[
 ]
 
 
+JsonOut = Annotated[
+    bool, typer.Option("--json", help="Print the result as JSON (its keys: docs/api.md)")
+]
+
+
+def emit_json(make) -> None:
+    """--json: stdout holds only the JSON of the matching ocq.api call (progress lines go to
+    stderr); a failure is {"schema_version": .., "error": "..."} and exit code 1."""
+    import contextlib
+    import json
+
+    from ocq import api
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            data = make()
+    except OcqError as exc:
+        sys.stdout.write(json.dumps({"schema_version": api.SCHEMA_VERSION, "error": str(exc)}))
+        sys.stdout.write("\n")
+        raise typer.Exit(1) from exc
+    sys.stdout.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
 def fail(exc: Exception) -> typer.Exit:
     console.print(f"[red]Error:[/red] {escape(str(exc))}", highlight=False)
     return typer.Exit(1)
@@ -230,8 +253,12 @@ def colored_fit(fit_level) -> str:
 
 
 @app.command("profile")
-def cmd_profile(llmfit_bin: LlmfitBin = None) -> None:
+def cmd_profile(llmfit_bin: LlmfitBin = None, as_json: JsonOut = False) -> None:
     """Show what this PC has: CPU, RAM, GPU, memory bandwidth, free disk."""
+    if as_json:
+        from ocq import api
+
+        return emit_json(lambda: api.profile(llmfit_bin=llmfit_bin))
     hw = detect_hardware(llmfit_bin)
 
     bandwidth = []
@@ -275,9 +302,14 @@ def cmd_inspect(
     model: ModelArg = None,
     model_path: ModelPath = None,
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Show what QuantPilot knows about a model, where each fact comes from and how sure it is."""
     ref = model_ref(model, model_path)
+    if as_json:
+        from ocq import api
+
+        return emit_json(lambda: api.inspect(ref, llmfit_bin))
     try:
         snapshot = resolve_model(ref, None, llmfit_bin)
     except OcqError as exc:
@@ -443,8 +475,15 @@ def cmd_bench(
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Run the standard benchmark on a model of this PC and save it to its benchmark history."""
+    if as_json:
+        from ocq import api
+
+        measure = "full" if full else ("fixed" if quality else "")
+        cache = read_kv_cache(kv_cache)
+        return emit_json(lambda: api.bench(model, measure, context, cache, llmfit_bin=llmfit_bin))
     from ocq import bench
     from ocq import quality as measured_quality
 
@@ -566,11 +605,18 @@ def cmd_models(
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """List the models already on this PC and how each one fits it, as it is on disk."""
     from ocq.discovery import SOURCES, find_models, searched_locations, tilde
 
     kv_cache = read_kv_cache(kv_cache)
+    if as_json:
+        from ocq import api
+
+        return emit_json(
+            lambda: api.models(folders or (), show_all, context, kv_cache, llmfit_bin=llmfit_bin)
+        )
     try:
         models = find_models(folders)
         hw = detect_hardware(llmfit_bin)
@@ -647,9 +693,24 @@ def cmd_doctor(
         bool, typer.Option("--offline", help="Skip the checks that use the network")
     ] = False,
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Check that QuantPilot is ready to work on this PC, and what fixes what is not."""
     from ocq import doctor
+
+    if as_json:
+        from ocq import api
+
+        report: dict = {}
+
+        def run() -> dict:
+            report.update(api.doctor(online=not offline, llmfit_bin=llmfit_bin))
+            return report
+
+        emit_json(run)
+        if not report.get("ready", True):
+            raise typer.Exit(1)
+        return
 
     findings = doctor.run_checks(detect_hardware(llmfit_bin), online=not offline)
     marks = {
@@ -677,6 +738,50 @@ def cmd_doctor(
         console.print(f"Ready, with {len(worth)} thing{'s' * (len(worth) > 1)} worth a look.")
     else:
         console.print("[green]Ready.[/green]")
+
+
+@app.command("history")
+def cmd_history(
+    model: Annotated[
+        str | None, typer.Argument(help="Only this model (a repo id, or local/<file>)")
+    ] = None,
+    as_json: JsonOut = False,
+) -> None:
+    """This PC's saved benchmarks: speed runs and quality results, newest first."""
+    from ocq import api
+
+    if as_json:
+        return emit_json(lambda: api.history(model or ""))
+    data = api.history(model or "")
+    speeds = Table(title="Speed runs")
+    for column in ("When", "Model", "Format", "Where", "Writing", "Reading 512"):
+        speeds.add_column(column)
+    for run in data["speed_runs"][:30]:
+        reading = run.get("prompt_tps")
+        speeds.add_row(
+            str(run.get("date", ""))[:16].replace("T", " ") or "earlier",
+            escape(str(run.get("model", "")).removeprefix("local/")),
+            escape(str(run.get("label", ""))),
+            escape(str(run.get("device", ""))),
+            f"{run.get('tps', 0):,.1f} tok/s",
+            f"{reading:,.0f} tok/s" if reading else "",
+        )
+    qualities = Table(title="Quality (perplexity on WikiText-2, lower is better)")
+    for column in ("When", "Model", "Format", "Perplexity", "Where"):
+        qualities.add_column(column)
+    for entry in data["quality_results"][:30]:
+        qualities.add_row(
+            str(entry.get("date", ""))[:16].replace("T", " "),
+            escape(str(entry.get("model", "")).removeprefix("local/")),
+            escape(str(entry.get("label", ""))),
+            f"{entry['ppl']:.4f}",
+            escape(str(entry.get("device", ""))),
+        )
+    if not data["speed_runs"] and not data["quality_results"]:
+        console.print("Nothing benchmarked on this PC yet: ocq bench <model>.")
+        return
+    console.print(speeds)
+    console.print(qualities)
 
 
 @app.command("backends")
@@ -726,8 +831,24 @@ def cmd_recommend(
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Alternatives to list")] = 8,
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Which model, format and runtime to use on this PC for a kind of work, and why."""
+    if as_json:
+        from ocq import api
+
+        caches = [read_kv_cache(cache) for cache in kv_cache or ()]
+        return emit_json(
+            lambda: api.recommend(
+                models or (),
+                workload,
+                context,
+                caches,
+                folders or (),
+                llmfit_bin=llmfit_bin,
+                limit=limit,
+            )  # fmt: skip
+        )
     from ocq.recommend import (
         WORKLOADS,
         RecommendationRequest,
@@ -772,6 +893,8 @@ def cmd_recommend(
     for label, reason in result.unread:
         console.print(f"[yellow]Could not read {escape(label)}: {escape(reason)}[/yellow]")
     if best is not None and best.candidate.quantize:
+        from ocq.recommend import make_command
+
         console.print(f"[dim]Make it: {escape(make_command(best.candidate))}[/dim]")
 
 
@@ -818,24 +941,6 @@ def print_alternatives(result, limit: int) -> None:
     console.print(table)
 
 
-def make_command(candidate) -> str:
-    """The ocq optimize command that makes a recommended file."""
-    option = candidate.option
-    parts = ["ocq optimize", candidate.model_ref]
-    if option.row_kind == "gguf":
-        parts += ["-b gguf", f"--gguf-type {option.label}"]
-    else:
-        parts.append(f"-b {option.row_kind}")
-        words = option.label.split()
-        bits = next((w.removesuffix("-bit") for w in words if w.endswith("-bit")), "")
-        if bits and option.row_kind != "nvfp4":
-            parts[-1] += f" --bits {bits}"
-        if option.label.endswith((" double", " single")):
-            parts.append(f"--{option.label.split()[-1]}-quant")
-    parts += [f"--context {candidate.context}", f"--kv-cache {candidate.kv_cache}", "--execute"]
-    return " ".join(parts)
-
-
 @app.command("feasibility")
 def cmd_feasibility(
     model: ModelArg = None,
@@ -843,9 +948,15 @@ def cmd_feasibility(
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Show whether a model can run on this PC at each quantization level."""
     ref = model_ref(model, model_path)
+    if as_json:
+        from ocq import api
+
+        cache = read_kv_cache(kv_cache)
+        return emit_json(lambda: api.feasibility(ref, context, cache, llmfit_bin=llmfit_bin))
     try:
         hw = detect_hardware(llmfit_bin)
         kv_cache = read_kv_cache(kv_cache)

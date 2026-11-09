@@ -64,7 +64,7 @@ packages = ["src/ocq"]
 
 # The source package: exactly these, never a local virtual environment or model outputs.
 [tool.hatch.build.targets.sdist]
-include = ["src/ocq", "tests", "assets", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
+include = ["src/ocq", "tests", "assets", "docs", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
 
 # PyPI only ships CPU torch for Windows, so Windows pulls the CUDA build instead.
 # It still runs on machines without an NVIDIA card.

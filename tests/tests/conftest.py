@@ -9,7 +9,7 @@ import pytest
 
 from ocq import discovery, env_file, hardware, measurements, model_analyzer, quality, recommend
 from ocq.quantizers import llama_cpp
-from ocq.types import DTYPE_BITS
+from ocq.types import DTYPE_BITS, OcqError
 
 # Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
 # 2026-10-31. Headers only: names, types and shapes, no weights.
@@ -231,3 +231,22 @@ def nvidia_pc(
         gpus=cards,
         os_name="Windows" if windows else "Linux",
     )
+
+
+@pytest.fixture
+def saved_hub(monkeypatch):
+    """The Hub, answered from data/: saved repos only, anything else is not found."""
+
+    def model(repo):
+        try:
+            return real_model(repo)
+        except FileNotFoundError:
+            raise OcqError(f"Model {repo!r} was not found on HuggingFace.") from None
+
+    monkeypatch.setattr(model_analyzer, "fetch_hf_model", lambda repo: model(repo)[0])
+    monkeypatch.setattr(model_analyzer, "fetch_model_files", lambda repo, sha: model(repo)[1:])
+
+    def no_llmfit(*args):
+        raise AssertionError("the engine must not ask llmfit")
+
+    monkeypatch.setattr(model_analyzer, "catalog_entry", no_llmfit)

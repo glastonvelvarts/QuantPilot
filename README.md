@@ -542,6 +542,7 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 |---------|-------------|
 | `doctor` | Is QuantPilot ready on this PC (llama.cpp, tools, PyTorch, Hugging Face, disk), and the command that fixes what is not |
 | `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
+| `history` | This PC's saved benchmarks: speed runs and quality results |
 | `backends` | Installed quant backends and what’s missing |
 | `models` | The models already on this PC, how each fits, and the name to use for it |
 | `inspect` | Every fact about a model, its source and how sure it is |
@@ -553,6 +554,19 @@ Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` a
 | `optimize` | Full pipeline; use `--execute` to quantize |
 
 ---
+
+## Scripts and agents: `--json` and `ocq.api`
+
+`profile`, `inspect`, `feasibility`, `models`, `recommend`, `bench`, `history` and `doctor` take `--json`: stdout then holds only the result as JSON (progress goes to stderr), and a failure is `{"error": ...}` with exit code 1. The same data comes from Python:
+
+```python
+from ocq import api
+
+pick = api.recommend(workload="coding")["best"]
+print(pick["model"]["id"], pick["format"]["label"], pick["quality"]["kept"])
+```
+
+The shape is versioned (`schema_version`): within a version keys are only added, never renamed or removed. [docs/api.md](docs/api.md) lists every function and key.
 
 ## Development
 
