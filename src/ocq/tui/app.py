@@ -7,6 +7,7 @@ settings, the hardware reading, the models found on this PC and the last model u
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -380,7 +381,12 @@ class QuantPilotApp(App):
                 self.exit()
 
         self.push_screen(
-            Confirm("Quit?", "A quantization is still running. Quitting stops it.", "Quit"),
+            Confirm(
+                "Quit?",
+                "Something is still running (quantizing, benchmarking or installing). "
+                "Quitting stops it.",
+                "Quit",
+            ),
             answer,
         )
 
@@ -393,8 +399,29 @@ class QuantPilotApp(App):
 
 
 def run_tui() -> None:
+    import asyncio
+
     app = QuantPilotApp()
-    app.run()
-    if app.busy:
-        # A quantization thread cannot be stopped from outside; leave without waiting for it.
-        os._exit(0)
+    # Our own loop: asyncio.run() would wait, after the app has closed, for every lookup
+    # still running in the background.
+    app.run(loop=asyncio.new_event_loop())
+    leave_now(app.return_code or 0)
+
+
+def leave_now(code: int = 0) -> None:
+    """The app has closed and given the terminal back: stop the programs it started (a
+    quantization, a benchmark, an installer) and do not wait for the work it left running in
+    the background. Python would otherwise finish every lookup still queued (the Hub catalog,
+    the models a recommendation reads: 31 s with no cache) before it exits."""
+    from ocq import processes
+
+    processes.stop_all()
+    others = [
+        thread
+        for thread in threading.enumerate()
+        if thread is not threading.main_thread() and thread.is_alive() and not thread.daemon
+    ]
+    if others:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)

@@ -15,6 +15,7 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 
 ### Fixed
 
+- Quitting the app (Ctrl+C) is instant again: it no longer waits, after the screen has closed, for the model lookups still running in the background (up to 30 s while Discover or Check a model was loading). Quitting during a quantize, a benchmark or an install stops the programs it started (llama.cpp's tools, the installer) instead of leaving them running.
 - A model folder that was moved or deleted no longer empties My models and the recommendations: it is left out.
 - A model folder whose weight files were not copied with it says which are missing and how big they are, instead of "Could not read safetensors file".
 - A quantized model folder of your own, refused as any quantized model is, names the folder it was made from (its config.json's `_name_or_path`) to quantize instead.

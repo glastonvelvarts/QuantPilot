@@ -13,6 +13,7 @@ import sys
 import threading
 from pathlib import Path
 
+from ocq import processes
 from ocq.quantizers.base import model_slug, model_weights_dir
 from ocq.quantizers.llama_cpp import converter_script, missing_library, tool_path
 from ocq.quantizers.protocol import BENCHMARK_PROMPT, BENCHMARK_TOKENS, PROMPT_TOKENS, Quantizer
@@ -245,15 +246,23 @@ def run_tool(
     if progress:
         completed = run_showing_progress(command, environment)
     else:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            env=environment,
+        process = processes.started(
+            subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                env=environment,
+            )
         )
+        try:
+            out, err = process.communicate()
+        finally:
+            processes.ended(process)
+        completed = subprocess.CompletedProcess(command, process.returncode, out, err)
     log.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
         library = missing_library(completed.stdout + completed.stderr, completed.returncode)
@@ -266,15 +275,17 @@ def run_tool(
 
 def run_showing_progress(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
     """subprocess.run with both outputs captured, printing their progress lines as they come."""
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
+    process = processes.started(
+        subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
     )
     kept: dict[str, list[str]] = {"out": [], "err": []}
     shown = threading.Event()
@@ -298,7 +309,10 @@ def run_showing_progress(command: list[str], env: dict[str, str]) -> subprocess.
     ]
     for reader in readers:
         reader.start()
-    code = process.wait()
+    try:
+        code = process.wait()
+    finally:
+        processes.ended(process)
     for reader in readers:
         reader.join()
     if shown.is_set():
