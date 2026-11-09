@@ -706,11 +706,20 @@ def test_benchmark_runs_are_stored_as_what_one_token_reads():
     from ocq.types import QuantAlgorithm
 
     snap = real_snapshot(QWEN3_MOE)
-    plan = SimpleNamespace(model=snap, quant_config=SimpleNamespace(algorithm=QuantAlgorithm.GGUF))
+    config = SimpleNamespace(
+        algorithm=QuantAlgorithm.GGUF, gguf_type="Q4_K_M", context=8192, kv_cache="q8_0"
+    )
+    plan = SimpleNamespace(model=snap, quant_config=config)
     run = SimpleNamespace(artifact_size_gb=17.0)
     remember_speed(plan, run, SimpleNamespace(device="gpu", tokens_per_second=120.0))
     # A 17 GB MoE file that reads 1.7 GB per token must not look like a fast 17 GB dense model.
-    assert measurements.load()[-1]["weights_gb"] == pytest.approx(17.0 * snap.read_fraction)
+    saved = measurements.load()[-1]
+    assert saved["weights_gb"] == pytest.approx(17.0 * snap.read_fraction)
+    # What ran is saved too, so a recommendation can count earlier runs of the same setup.
+    assert (saved["model"], saved["label"], saved["runtime"]) == (QWEN3_MOE, "Q4_K_M", "llama.cpp")
+    assert (saved["context"], saved["kv_cache"]) == (8192, "q8_0")
+    assert measurements.runs_of(QWEN3_MOE.lower(), "q4_k_m", "llama.cpp") == [saved]
+    assert measurements.runs_of(QWEN3_MOE, "Q5_K_M", "llama.cpp") == []
 
 
 # Context memory for sliding-window attention and MLA. Expected sizes are from llama.cpp's own

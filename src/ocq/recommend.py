@@ -15,11 +15,12 @@ from __future__ import annotations
 import math
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
 from ocq.engine import calibration_fits_in_ram
+from ocq.measurements import MEASURED, runs_of
 from ocq.model_analyzer import fit_at, quant_options, resolve_model
 from ocq.model_size import kv_value_bytes
 from ocq.plan import free_disk_gb
@@ -27,12 +28,14 @@ from ocq.quantizers.llama_cpp import TAG as LLAMA_CPP_TAG
 from ocq.quantizers.llama_cpp import converter_architectures
 from ocq.types import (
     VLLM,
+    FactKind,
     FitLevel,
     HardwareProfile,
     ModelSnapshot,
     OcqError,
     QuantAlgorithm,
     QuantOption,
+    RunMode,
 )
 
 
@@ -218,9 +221,16 @@ class Recommendation:
     # Each objective on its own scale (0 worst, 1 best among the candidates). Used to order
     # them, never shown as a number.
     scores: dict[Objective, float] = field(default_factory=dict)
+    # The best one: why it won. Any other: why it lost to the best one.
     reasons: tuple[Reason, ...] = ()
     warnings: tuple[str, ...] = ()
     confidence: Confidence = Confidence(ConfidenceLevel.LOW)
+    # Each objective in its own unit (effective parameters, tok/s, tokens, 1/GB).
+    values: dict[Objective, float] = field(default_factory=dict)
+    checks: tuple[Check, ...] = ()  # the hard limits it passed
+    # Where it dropped out while the best one was picked: LOST_ON_DRAWBACKS, an Objective's
+    # value, or LOST_ON_TIE. Empty for the best one.
+    lost_on: str = ""
 
 
 @dataclass(frozen=True)
@@ -237,7 +247,16 @@ class RecommendationResult:
 
     @property
     def alternatives(self) -> tuple[Recommendation, ...]:
-        return self.ranked[1:]
+        """The next best of each other model and format: the same file with another cache
+        type is the same choice, so only its best ranked version is listed."""
+        seen = set()
+        distinct = []
+        for recommendation in self.ranked:
+            key = (recommendation.candidate.model_ref, recommendation.candidate.option.label)
+            if key not in seen:
+                seen.add(key)
+                distinct.append(recommendation)
+        return tuple(distinct[1:])
 
 
 # Candidates (6B) ----------------------------------------------------------------------------
@@ -638,6 +657,9 @@ TIGHT = "uses most of the free memory"
 DEGRADED_FORMAT = "keeps less than half of the model's quality"
 SPECIALIST = "made for code"
 
+LOST_ON_DRAWBACKS = "drawbacks"
+LOST_ON_TIE = "tie"
+
 # Differences smaller than these are within what the estimates can tell apart.
 TOLERANCE = {
     Objective.QUALITY: 0.05,  # within a model the losses are measured: Q8_0 and Q6_K tie
@@ -798,13 +820,22 @@ def rank(
     values = {id(c): objective_values(c, workload, hardware) for c in allowed}
     remaining = list(allowed)
     ranked: list[Candidate] = []
+    lost_on: dict[int, str] = {}  # where each one dropped out while the best one was picked
     while remaining:
+        first = not ranked
         best_tier = min(tier(c, workload) for c in remaining)
         pool = [c for c in remaining if tier(c, workload) == best_tier]
+        if first:
+            lost_on |= {id(c): LOST_ON_DRAWBACKS for c in remaining if c not in pool}
         for objective in workload.priorities:
             best = max(values[id(c)][objective] for c in pool)
-            pool = [c for c in pool if within(values[id(c)][objective], best, TOLERANCE[objective])]
+            kept = [c for c in pool if within(values[id(c)][objective], best, TOLERANCE[objective])]
+            if first:
+                lost_on |= {id(c): objective.value for c in pool if c not in kept}
+            pool = kept
         winner = min(pool, key=lambda c: tie_break(c, values[id(c)], workload))
+        if first:
+            lost_on |= {id(c): LOST_ON_TIE for c in pool if c is not winner}
         ranked.append(winner)
         remaining.remove(winner)
 
@@ -819,6 +850,8 @@ def rank(
                 objective: (value / tops[objective] if tops[objective] else 0.0)
                 for objective, value in values[id(c)].items()
             },
+            values=values[id(c)],
+            lost_on=lost_on.get(id(c), ""),
         )
         for c in ranked
     ]
@@ -830,8 +863,369 @@ def recommend(
     extra_dirs: list[Path] | None = None,
     disk_free_gb: float | None = None,
 ) -> RecommendationResult:
-    """The whole engine: candidates, hard limits, ranking. The CLI and the TUI call this."""
+    """The whole engine: candidates, hard limits, ranking, explanations. The CLI and the TUI
+    call this."""
     candidates, unread = generate_candidates(request, hardware, extra_dirs)
     allowed, rejected = apply_limits(candidates, hardware, disk_free_gb)
+    checks = {id(candidate): tuple(passed) for candidate, passed in allowed}
     ranked = rank([candidate for candidate, _ in allowed], request.workload, hardware)
+    ranked = [replace(r, checks=checks[id(r.candidate)]) for r in ranked]
+    ranked = explain(ranked, request.workload, hardware)
     return RecommendationResult(request, tuple(ranked), tuple(rejected), tuple(unread))
+
+
+# Explanations and confidence (6E) -----------------------------------------------------------
+# Never a score: what the pick does on this PC, what it gives up, why each alternative lost,
+# and what the advice rests on (measured or estimated).
+
+GOOD, TRADEOFF, BAD = ReasonKind.GOOD, ReasonKind.TRADEOFF, ReasonKind.BAD
+MADE_FOR = {"coding": (CODER, "Made for code"), "reasoning": (REASONING, "Made for reasoning")}
+KNOWN_KINDS = (FactKind.EXACT, FactKind.CROSS_CHECKED)
+TRADEOFFS_SHOWN = 2
+
+
+def tokens(count: float) -> str:
+    count = int(count)
+    return f"{count // 1024}K" if count >= 1024 and count % 1024 == 0 else f"{count:,}"
+
+
+def percent(share: float) -> str:
+    return f"{share:.0%}"
+
+
+def short_name(candidate: Candidate, other: Candidate) -> str:
+    """How to name a candidate next to another: only what differs."""
+    if candidate.model_ref != other.model_ref:
+        return f"{candidate.model_id} {candidate.option.label}"
+    if candidate.option.label == other.option.label:
+        return f"the {candidate.kv_cache} cache"
+    if candidate.kv_cache != other.kv_cache:
+        return f"{candidate.option.label} with the {candidate.kv_cache} cache"
+    return candidate.option.label
+
+
+def option_name(candidate: Candidate) -> str:
+    return f"{candidate.option.label} in {candidate.runtime}, {candidate.kv_cache} cache"
+
+
+def fit_reason(candidate: Candidate, hardware: HardwareProfile) -> Reason:
+    option = candidate.option
+    used = f"{option.memory_required_gb:.1f} of {option.memory_available_gb:.1f} GB free"
+    mode = option.run_mode
+    kind = GOOD if option.fit_level in COMFORTABLE else TRADEOFF
+    if mode == RunMode.GPU and hardware.unified_memory:
+        text = f"Fits in memory: {used}"
+    elif mode == RunMode.GPU:
+        cards = f" across {option.gpu_count} GPUs" if option.gpu_count > 1 else ""
+        text = f"Fits entirely in GPU memory{cards}: {used}"
+    elif mode == RunMode.GPU_EXPERTS_RAM:
+        text = f"Fits on the GPU with the experts of {option.experts_in_ram} layers in RAM"
+    elif mode == RunMode.GPU_OFFLOAD:
+        kind = TRADEOFF
+        layers = candidate.model.num_layers + 1  # llama.cpp counts the output layer too
+        on_gpu = f"{option.gpu_layers} of {layers} layers" if option.gpu_layers else "part"
+        text = f"Runs partly from RAM: {on_gpu} on the GPU"
+    elif hardware.has_gpu and not hardware.unified_memory:
+        kind = TRADEOFF
+        text = f"Runs from RAM on the CPU, too big for the GPU: {used}"
+    else:
+        text = f"Runs from RAM: {used}"
+    if option.fit_level not in COMFORTABLE:
+        text += ", most of the free memory"
+    return Reason(kind, text)
+
+
+def speed_reason(candidate: Candidate) -> Reason:
+    option = candidate.option
+    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime)
+    if runs:
+        low, high = min(r["tps"] for r in runs), max(r["tps"] for r in runs)
+        span = f"{low:.0f}" if round(low) == round(high) else f"{low:.0f}–{high:.0f}"
+        text = f"Measured {span} tok/s in {len(runs)} run{'s' * (len(runs) > 1)} on this PC"
+    elif option.speed_basis == MEASURED:
+        text = f"About {option.estimated_tps:.0f} tok/s, from earlier runs on this PC"
+    else:
+        text = f"Up to {option.estimated_tps:.0f} tok/s, as fast as this PC's memory allows"
+    slow = option.estimated_tps < READING_SPEED_TPS
+    return Reason(TRADEOFF if slow else GOOD, text + (", slower than reading" if slow else ""))
+
+
+def quality_reason(candidate: Candidate) -> Reason:
+    rating = rated_as(candidate)
+    kept = quality_kept(rating)
+    label = candidate.option.label
+    if rating == FULL:
+        text = "Full quality: the original weights"
+    elif rating == AS_RELEASED:
+        text = "Full quality: the format the model was released in"
+    elif rating == label.upper():
+        text = (
+            f"{label} keeps about {percent(kept)} of the model's quality (llama.cpp's measurements)"
+        )
+    else:
+        text = f"Keeps about {percent(kept)} of the model's quality (estimated as {rating})"
+    return Reason(BAD if kept < DEGRADED else GOOD, text)
+
+
+def difference(
+    objective: Objective, candidate: Recommendation, other: Recommendation, exact: bool = False
+) -> tuple[int, str]:
+    """(1 better, -1 worse, 0 about the same) and how, for candidate against other. exact:
+    any difference counts, not only one beyond the objective's tolerance."""
+    mine, theirs = candidate.values.get(objective), other.values.get(objective)
+    if mine is None or theirs is None:
+        return 0, ""
+    tolerance = 0.0 if exact else TOLERANCE[objective]
+    if (
+        theirs * (1 - tolerance) <= mine <= theirs / (1 - tolerance)
+        if tolerance
+        else mine == theirs
+    ):
+        return 0, ""
+    better = mine > theirs
+    a, b = candidate.candidate, other.candidate
+    if objective == Objective.QUALITY and a.model_ref == b.model_ref:
+        kept = (quality_kept(rated_as(a)), quality_kept(rated_as(b)))
+        word = "more" if better else "less"
+        text = f"keeps {word} of the model's quality ({percent(kept[0])} vs {percent(kept[1])})"
+    elif objective == Objective.QUALITY:
+        word = "stronger" if better else "weaker"
+        text = f"estimated {word}: like a {mine / 1e9:.1f}B model vs {theirs / 1e9:.1f}B"
+    elif objective == Objective.SPEED:
+        word = "faster" if better else "slower"
+        text = f"{abs(mine / theirs - 1):.0%} {word} ({mine:.0f} vs {theirs:.0f} tok/s)"
+    elif objective == Objective.CONTEXT:
+        word = "more" if better else "less"
+        text = f"room for {word} context ({tokens(mine)} vs {tokens(theirs)} tokens)"
+    elif objective == Objective.MEMORY:
+        word = "less" if better else "more"
+        gb = (a.option.memory_required_gb, b.option.memory_required_gb)
+        text = f"uses {word} memory ({gb[0]:.1f} vs {gb[1]:.1f} GB)"
+    else:
+        word = "more" if better else "less"
+        text = f"serves {word} at once ({mine:.0f} vs {theirs:.0f} tok/s in all)"
+    return (1 if better else -1), text
+
+
+def tie_reason(candidate: Candidate, best: Candidate, workload: WorkloadProfile) -> str:
+    """Why the best one won a tie, from the first tie-break that tells them apart."""
+    made_for = MADE_FOR.get(workload.key, (None, ""))[0]
+    if made_for and (made_for in best.tags) != (made_for in candidate.tags):
+        return f"the pick is {MADE_FOR[workload.key][1].lower()}"
+    if candidate.kv_cache != best.kv_cache:
+        return "the pick uses the default (f16) cache"
+    if candidate.local != best.local:
+        return "the pick is already on this PC"
+    if candidate.quantize != best.quantize:
+        return "the pick needs no quantizing"
+    return "the pick is a little better on quality or speed"
+
+
+def winner_reasons(
+    best: Recommendation,
+    alternatives: tuple[Recommendation, ...],
+    workload: WorkloadProfile,
+    hardware: HardwareProfile,
+) -> tuple[Reason, ...]:
+    candidate = best.candidate
+    reasons = [fit_reason(candidate, hardware), speed_reason(candidate)]
+    room = best.values.get(Objective.CONTEXT, candidate.context)
+    text = f"Holds the {tokens(candidate.context)} tokens of context asked for"
+    if room > candidate.context:
+        text += f", room for {tokens(room)}"
+    reasons.append(Reason(GOOD, text))
+    reasons.append(quality_reason(candidate))
+    tag, words = MADE_FOR.get(workload.key, (None, ""))
+    if tag and tag in candidate.tags:
+        reasons.append(Reason(GOOD, words))
+    if SPECIALIST in drawbacks(candidate, workload):
+        reasons.append(Reason(TRADEOFF, "Made for code, not for this kind of work"))
+    if not candidate.local:
+        size = disk_needed_gb(replace(candidate, quantize=False))
+        download = f" (about {size:.1f} GB)" if size else ""
+        reasons.append(Reason(TRADEOFF, f"Not on this PC yet: download it first{download}"))
+    if candidate.quantize:
+        reasons.append(
+            Reason(TRADEOFF, f"QuantPilot makes the {candidate.option.label} file first")
+        )
+    # What the best ranked alternatives that gain something would give, and what they cost.
+    shown = 0
+    for other in alternatives:
+        if shown == TRADEOFFS_SHOWN:
+            break
+        gains, costs = [], []
+        for objective in workload.priorities:
+            if other.lost_on == objective.value:
+                costs.append(difference(objective, other, best, exact=True)[1])
+                continue
+            sign, how = difference(objective, other, best)
+            (gains if sign > 0 else costs if sign < 0 else []).append(how)
+        if gains and costs:
+            name = short_name(other.candidate, candidate)
+            if name.startswith("the "):  # "the q8_0 cache": a sentence start, not a model name
+                name = name.capitalize()
+            reasons.append(Reason(TRADEOFF, f"{name}: {', '.join(gains)}, but {', '.join(costs)}"))
+            shown += 1
+    return tuple(reasons)
+
+
+def loser_reasons(
+    other: Recommendation, best: Recommendation, workload: WorkloadProfile
+) -> tuple[Reason, ...]:
+    """Why other ranks below best, replaying where it dropped out of the ranking: its
+    drawbacks, or the priority it fell short on (with what it does better before that), or
+    the tie-break."""
+    mine, theirs = drawbacks(other.candidate, workload), drawbacks(best.candidate, workload)
+    reasons = [Reason(BAD, capital(d)) for d in mine if d not in theirs]
+    for objective in workload.priorities:
+        if other.lost_on == objective.value:
+            _, how = difference(objective, other, best, exact=True)
+            reasons.append(Reason(BAD, capital(how)))
+            return tuple(reasons)
+        sign, how = difference(objective, other, best)
+        if sign > 0:
+            reasons.append(Reason(GOOD, capital(how)))
+    if other.lost_on == LOST_ON_TIE:
+        why = tie_reason(other.candidate, best.candidate, workload)
+        reasons.append(Reason(TRADEOFF, f"As good as the pick here; {why}"))
+    return tuple(reasons)
+
+
+def capital(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def confidence(recommendation: Recommendation, hardware: HardwareProfile) -> Confidence:
+    """What the advice rests on. Medium: the model read from its files, speed an upper bound.
+    High: speed from runs on this PC. Very High: runs of this very setup. Low: a fact the
+    advice depends on is estimated, or a check could not be made."""
+    candidate, option = recommendation.candidate, recommendation.candidate.option
+    facts = candidate.model.facts
+    evidence: list[Evidence] = []
+
+    sized = facts.parameters.kind in KNOWN_KINDS
+    evidence.append(
+        Evidence("Model size read from its files" if sized else "Model size estimated", sized)
+    )
+    cache_note = facts.kv_cache.note or ""
+    context_known = (
+        option.context_known
+        and facts.kv_cache.kind in KNOWN_KINDS
+        and "unknown layer kind" not in cache_note
+    )
+    if context_known:
+        context_text = "Context memory read from its files"
+    elif "unknown size" in cache_note:
+        context_text = "Context memory estimated: some layers keep a state of unknown size"
+    elif "unknown layer kind" in cache_note:
+        context_text = "Context memory estimated: some layers are of an unknown kind"
+    else:
+        context_text = "Context memory estimated"
+    evidence.append(Evidence(context_text, context_known))
+    moe_known = not candidate.model.is_moe or facts.active_parameters.known
+    if candidate.model.is_moe:
+        evidence.append(
+            Evidence(
+                "Weights used per token read from its files"
+                if moe_known
+                else "Weights used per token unknown",
+                moe_known,
+            )
+        )
+    gpu = option.run_mode in (RunMode.GPU, RunMode.GPU_EXPERTS_RAM) and not hardware.unified_memory
+    card = hardware.primary_gpu
+    bandwidth = card.measured_bandwidth_gbs if gpu and card else hardware.measured_ram_bandwidth_gbs
+    evidence.append(
+        Evidence(
+            "Memory speed measured on this PC" if bandwidth else "Memory speed from the specs",
+            bool(bandwidth),
+        )
+    )
+    runs = runs_of(candidate.model.model_id, option.label, candidate.runtime)
+    measured = option.speed_basis == MEASURED
+    if runs:
+        evidence.append(
+            Evidence(f"{len(runs)} run{'s' * (len(runs) > 1)} of this setup on this PC", True)
+        )
+    else:
+        evidence.append(
+            Evidence(
+                "Speed from earlier runs on this PC" if measured else "Speed is an upper bound",
+                measured,
+            )
+        )
+    evidence.append(Evidence("Quality estimated from size and format (not measured yet)", False))
+    unchecked = [check for check in recommendation.checks if check.text.startswith("not checked")]
+    for check in unchecked:
+        evidence.append(Evidence(f"{check.name.capitalize()} {check.text}", False))
+
+    if not (sized and context_known and moe_known) or unchecked:
+        level = ConfidenceLevel.LOW
+    elif runs:
+        level = ConfidenceLevel.VERY_HIGH
+    elif measured:
+        level = ConfidenceLevel.HIGH
+    else:
+        level = ConfidenceLevel.MEDIUM
+    return Confidence(level, tuple(evidence))
+
+
+def explain(
+    ranked: list[Recommendation], workload: WorkloadProfile, hardware: HardwareProfile
+) -> list[Recommendation]:
+    """Reasons, warnings and confidence for every ranked candidate."""
+    if not ranked:
+        return []
+    best = ranked[0]
+    shown = RecommendationResult(RecommendationRequest(workload), tuple(ranked), ())
+    explained = []
+    for recommendation in ranked:
+        if recommendation is best:
+            reasons = winner_reasons(best, shown.alternatives, workload, hardware)
+        else:
+            reasons = loser_reasons(recommendation, best, workload)
+        note = recommendation.candidate.option.note
+        explained.append(
+            replace(
+                recommendation,
+                reasons=reasons,
+                warnings=(note,) if note else (),
+                confidence=confidence(recommendation, hardware),
+            )
+        )
+    return explained
+
+
+def explain_model(result: RecommendationResult, model: str) -> tuple[Reason, ...]:
+    """Why not this model? Its best ranked option against the pick, else the rejected option
+    that came closest (a runtime that runs here, fewest limits broken, least memory), else why
+    it was not read."""
+    name = model.lower()
+
+    def named(candidate: Candidate) -> bool:
+        return name in (candidate.model_ref.lower(), candidate.model_id.lower())
+
+    for recommendation in result.ranked:
+        if named(recommendation.candidate):
+            option = option_name(recommendation.candidate)
+            if recommendation is result.best:
+                return (Reason(GOOD, f"It is the pick: {option}"), *recommendation.reasons)
+            lead = Reason(TRADEOFF, f"Its best option here: {option}")
+            return (lead, *recommendation.reasons)
+    rejected = [r for r in result.rejected if named(r.candidate)]
+    if rejected:
+        # A runtime that cannot run here stops at that one check, so it is not the closest.
+        closest = min(
+            rejected,
+            key=lambda r: (
+                r.failed[0].name == RUNTIME,
+                len(r.failed),
+                r.candidate.option.memory_required_gb,
+            ),
+        )
+        lead = Reason(TRADEOFF, f"Its closest option: {option_name(closest.candidate)}")
+        return (lead, *(Reason(BAD, check.text) for check in closest.failed))
+    for label, why in result.unread:
+        if label.lower() == name:
+            return (Reason(BAD, f"Could not be read: {why}"),)
+    return (Reason(BAD, "Not among the models considered"),)

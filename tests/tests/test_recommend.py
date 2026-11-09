@@ -10,7 +10,7 @@ from conftest import GPT_OSS, MLX_QWEN, QWEN, QWEN3_MOE, QWEN_AWQ, QWEN_BNB, rea
 from test_discovery import empty_home, hf_repo, smollm2_store  # noqa: F401 (empty_home: autouse)
 from test_model_analyzer import make_hardware
 
-from ocq import model_analyzer
+from ocq import measurements, model_analyzer
 from ocq.quantizers import llama_cpp
 from ocq.recommend import (
     ARCHITECTURE,
@@ -31,14 +31,19 @@ from ocq.recommend import (
     SPECIALIST,
     TIGHT,
     WORKLOADS,
+    Check,
+    ConfidenceLevel,
     Objective,
+    ReasonKind,
     RecommendationRequest,
     RecommendationResult,
     apply_limits,
+    confidence,
     disk_needed_gb,
     drawbacks,
     effective_parameters,
     estimated_quality,
+    explain_model,
     generate_candidates,
     model_sources,
     objective_values,
@@ -48,7 +53,7 @@ from ocq.recommend import (
     recommend,
     refit,
 )
-from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM, FitLevel, OcqError
+from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM, Fact, FactKind, FitLevel, OcqError
 
 
 def test_workloads_rank_on_distinct_objectives():
@@ -423,3 +428,115 @@ def test_recommend_runs_the_whole_engine(saved_hub):
         assert all(0 <= score <= 1 for score in recommendation.scores.values())
     qualities = [estimated_quality(r.candidate) for r in result.ranked]
     assert qualities[0] >= max(qualities) * 0.95  # quality first, within its tolerance
+
+
+# Explanations and confidence (6E) -----------------------------------------------------------
+
+
+def texts(reasons, kind=None):
+    return [r.text for r in reasons if kind is None or r.kind == kind]
+
+
+def big_gpu_chat(**request):
+    return recommend(RecommendationRequest(models=(QWEN,), **request), BIG_GPU, disk_free_gb=1000)
+
+
+def test_the_pick_says_what_it_does_here_and_what_it_takes(saved_hub):
+    best = big_gpu_chat().best
+    good = texts(best.reasons, ReasonKind.GOOD)
+    assert good[0].startswith("Fits entirely in GPU memory: ")
+    assert good[1].startswith("Up to ") and "tok/s" in good[1]
+    assert good[2] == "Holds the 8K tokens of context asked for"
+    assert good[3] == "Q6_K keeps about 98% of the model's quality (llama.cpp's measurements)"
+    steps = texts(best.reasons, ReasonKind.TRADEOFF)
+    assert any(t.startswith("Not on this PC yet: download it first (about ") for t in steps)
+    assert "QuantPilot makes the Q6_K file first" in steps
+    # The closest alternatives: what they would give, and what they would cost.
+    assert any(t.startswith("Q5_K_M: ") and ", but keeps less" in t for t in steps)
+
+
+def test_alternatives_are_distinct_choices_and_say_why_they_lost(saved_hub):
+    result = big_gpu_chat()
+    keys = [(a.candidate.model_ref, a.candidate.option.label) for a in result.alternatives]
+    assert len(keys) == len(set(keys))
+    assert (QWEN, result.best.candidate.option.label) not in keys
+    q8 = next(a for a in result.alternatives if a.candidate.option.label == "Q8_0")
+    assert texts(q8.reasons, ReasonKind.BAD)[-1].endswith(
+        "slower (" + texts(q8.reasons)[-1].split("(")[1]
+    )
+    # Q5_K_M is within 5% of Q6_K's quality but not of the best quality there is (BF16), so
+    # it dropped out on quality: the explanation says so instead of calling it a tie.
+    q5 = next(a for a in result.alternatives if a.candidate.option.label == "Q5_K_M")
+    assert texts(q5.reasons, ReasonKind.BAD) == ["Keeps less of the model's quality (95% vs 98%)"]
+    # The same file with the other cache ties on everything; the default cache wins the tie.
+    same = next(
+        r
+        for r in result.ranked
+        if r.candidate.option.label == "Q6_K" and r.candidate.kv_cache == "q8_0"
+    )
+    assert texts(same.reasons) == [
+        "As good as the pick here; the pick uses the default (f16) cache"
+    ]
+
+
+def test_confidence_rises_with_runs_on_this_pc(saved_hub):
+    best = big_gpu_chat().best
+    assert best.confidence.level == ConfidenceLevel.MEDIUM
+    evidence = {e.text: e.known for e in best.confidence.evidence}
+    assert (
+        evidence["Model size read from its files"]
+        and evidence["Context memory read from its files"]
+    )
+    assert evidence["Memory speed measured on this PC"]
+    assert evidence["Speed is an upper bound"] is False
+    assert evidence["Quality estimated from size and format (not measured yet)"] is False
+
+    # Runs of other sizes on this GPU: speed predictions come from them.
+    measurements.record("gpu", 0.5, 300.0)
+    measurements.record("gpu", 4.0, 60.0)
+    assert big_gpu_chat().best.confidence.level == ConfidenceLevel.HIGH
+
+    label = big_gpu_chat().best.candidate.option.label
+    for tps in (101.0, 104.0):
+        measurements.record("gpu", 1.2, tps, model=QWEN, label=label, runtime="llama.cpp")
+    best = big_gpu_chat().best
+    assert best.confidence.level == ConfidenceLevel.VERY_HIGH
+    assert "2 runs of this setup on this PC" in [e.text for e in best.confidence.evidence]
+    assert "Measured 101–104 tok/s in 2 runs on this PC" in texts(best.reasons)
+
+
+def test_confidence_is_low_when_a_fact_is_estimated_or_a_check_was_not_made(saved_hub):
+    best = big_gpu_chat().best
+    facts = best.candidate.model.facts
+    guessed = Fact(
+        1, "config.json", FactKind.ESTIMATE, "2 of 28 layers keep a state of unknown size"
+    )
+    model = replace(best.candidate.model, facts=replace(facts, kv_cache=guessed))
+    unsure = replace(best, candidate=replace(best.candidate, model=model))
+    low = confidence(unsure, BIG_GPU)
+    assert low.level == ConfidenceLevel.LOW
+    assert "Context memory estimated: some layers keep a state of unknown size" in [
+        e.text for e in low.evidence
+    ]
+    unchecked = replace(best, checks=(Check(ARCHITECTURE, True, "not checked: no converter"),))
+    assert confidence(unchecked, BIG_GPU).level == ConfidenceLevel.LOW
+
+
+def test_why_not_a_model(saved_hub):
+    request = RecommendationRequest(models=(QWEN, QWEN_AWQ, "nobody/missing"))
+    result = recommend(request, make_hardware(ram_gb=24), disk_free_gb=1000)
+    assert texts(explain_model(result, QWEN))[0].startswith("It is the pick: ")
+    awq = explain_model(result, QWEN_AWQ)  # stored for vLLM, and this PC has no NVIDIA GPU
+    assert awq[0].text == "Its closest option: AWQ 4-bit (as stored) in vLLM, f16 cache"
+    assert "vLLM needs an NVIDIA GPU" in awq[1].text
+    assert texts(explain_model(result, "nobody/missing"))[0].startswith("Could not be read: ")
+    assert texts(explain_model(result, "other/model")) == ["Not among the models considered"]
+
+
+def test_why_not_names_the_limit_that_matters_not_a_runtime_that_cannot_run(saved_hub):
+    request = RecommendationRequest(models=(QWEN,))
+    result = recommend(request, make_hardware(ram_gb=0.5), disk_free_gb=1000)
+    assert result.best is None
+    reasons = explain_model(result, QWEN)
+    assert reasons[0].text == "Its closest option: Q2_K in llama.cpp, q8_0 cache"
+    assert reasons[1].text.startswith("Needs ") and "0.5 GB is free" in reasons[1].text
