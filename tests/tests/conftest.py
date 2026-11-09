@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ocq import hardware, measurements, model_analyzer
+from ocq import hardware, measurements, model_analyzer, recommend
 from ocq.types import DTYPE_BITS
 
 # Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
@@ -20,6 +20,13 @@ def private_caches(tmp_path, monkeypatch):
     """Tests must not read or write the speed measurements and model cache of the real user."""
     monkeypatch.setattr(measurements, "STORE", tmp_path / "measurements.json")
     monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path / "models")
+    # Nor the recommendation engine's list of Hub models, nor the Hub itself.
+    monkeypatch.setattr(recommend, "HUB_CATALOG_CACHE", tmp_path / "hub_catalog.json")
+
+    def no_network(author, pipeline):
+        raise OSError("no network in tests")
+
+    monkeypatch.setattr(recommend, "fetch_hub_listing", no_network)
     # Nor the GPU driver of the PC they run on.
     monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 

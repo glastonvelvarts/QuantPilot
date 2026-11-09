@@ -6,7 +6,16 @@ import math
 from dataclasses import replace
 
 import pytest
-from conftest import GPT_OSS, MLX_QWEN, QWEN, QWEN3_MOE, QWEN_AWQ, QWEN_BNB, real_model
+from conftest import (
+    GPT_OSS,
+    MLX_QWEN,
+    QWEN,
+    QWEN3_MOE,
+    QWEN_AWQ,
+    QWEN_BNB,
+    SMOLVLM,
+    real_model,
+)
 from test_discovery import empty_home, hf_repo, smollm2_store  # noqa: F401 (empty_home: autouse)
 from test_model_analyzer import make_hardware
 
@@ -117,7 +126,7 @@ def saved_hub(monkeypatch):
 
 
 def test_models_on_this_pc_come_first_then_the_catalog(ollama_pc):
-    sources = model_sources(RecommendationRequest())
+    sources, _ = model_sources(RecommendationRequest())
     assert (sources[0].ref, sources[0].label, sources[0].local) == (
         "ollama:smollm2:135m",
         "smollm2:135m",
@@ -133,7 +142,7 @@ def test_a_catalog_repo_already_downloaded_is_read_from_disk_once(tmp_path, monk
     hf_repo(tmp_path / "hub", coder.repo, {"config.json": config, "model.safetensors": b"w"})
     monkeypatch.setenv("HF_HOME", str(tmp_path))
 
-    sources = [s for s in model_sources(RecommendationRequest()) if s.label == coder.repo]
+    sources = [s for s in model_sources(RecommendationRequest())[0] if s.label == coder.repo]
     assert len(sources) == 1
     assert sources[0].local and sources[0].tags == coder.tags
     assert sources[0].ref.endswith("snapshots/abc123")  # the folder on disk, not the Hub
@@ -141,7 +150,7 @@ def test_a_catalog_repo_already_downloaded_is_read_from_disk_once(tmp_path, monk
 
 def test_named_models_are_the_only_sources(ollama_pc):
     request = RecommendationRequest(models=("ollama:smollm2:135m", QWEN))
-    sources = model_sources(request)
+    sources, _ = model_sources(request)
     assert [(s.ref, s.local) for s in sources] == [("ollama:smollm2:135m", True), (QWEN, False)]
 
 
@@ -150,7 +159,7 @@ def test_every_format_runtime_and_cache_type_becomes_a_candidate(ollama_pc, save
         workload=WORKLOADS["coding"],
         models=("ollama:smollm2:135m", QWEN, QWEN_AWQ, "nobody/missing"),
     )
-    candidates, unread = generate_candidates(request, make_hardware(ram_gb=24))
+    candidates, unread, _ = generate_candidates(request, make_hardware(ram_gb=24))
 
     assert [label for label, _ in unread] == ["nobody/missing"]
     assert "not found" in unread[0][1]
@@ -182,7 +191,7 @@ LINUX_GPU = replace(make_hardware(ram_gb=24, vram_gb=12), os_name="Linux")
 def limits(models, hardware, context=0, disk_free_gb=1000.0, gguf_architectures=None):
     """{(model, label, cache): failed check names} and {(model, label, cache): failed texts}."""
     request = RecommendationRequest(models=tuple(models), context=context)
-    candidates, unread = generate_candidates(request, hardware)
+    candidates, unread, _ = generate_candidates(request, hardware)
     assert not unread
     allowed, rejected = apply_limits(candidates, hardware, disk_free_gb, gguf_architectures)
     key = lambda c: (c.model_ref, c.option.label, c.kv_cache)  # noqa: E731
@@ -261,6 +270,16 @@ def test_a_gguf_is_only_made_for_architectures_llama_cpp_converts(saved_hub, oll
     assert failed[(QWEN, "Q4_K_M", "f16")] == ()
 
 
+def test_an_unknown_architecture_is_not_checked_rather_than_rejected(saved_hub):
+    from ocq.recommend import supports_architecture
+
+    candidates, _, _ = generate_candidates(RecommendationRequest(models=(QWEN,)), LINUX_GPU)
+    q4 = next(c for c in candidates if c.option.label == "Q4_K_M")
+    unknown = replace(q4, model=replace(q4.model, architecture="unknown"))
+    check = supports_architecture(unknown, frozenset({"LlamaForCausalLM"}))
+    assert check.passed and check.text.startswith("not checked")
+
+
 def test_awq_is_made_on_an_nvidia_gpu_with_the_original_model_in_ram(saved_hub):
     failed, _ = limits([QWEN], LINUX_GPU)
     assert failed[(QWEN, "AWQ 4-bit", "f16")] == ()
@@ -275,7 +294,7 @@ def test_awq_is_made_on_an_nvidia_gpu_with_the_original_model_in_ram(saved_hub):
 def test_disk_for_downloading_and_quantizing(saved_hub, ollama_pc):
     models = (QWEN, "ollama:smollm2:135m")
     request = RecommendationRequest(models=models, context=SMOLLM2_CONTEXT)
-    candidates, _ = generate_candidates(request, LINUX_GPU)
+    candidates, _, _ = generate_candidates(request, LINUX_GPU)
     by_key = {(c.model_ref, c.option.label, c.kv_cache): c for c in candidates}
     stored, q4 = by_key[(QWEN, "BF16", "f16")], by_key[(QWEN, "Q4_K_M", "f16")]
     original = stored.model.original_gb
@@ -319,7 +338,7 @@ def by_label(models, hardware, context=0, workload="chat"):
     request = RecommendationRequest(
         workload=WORKLOADS[workload], models=tuple(models), context=context
     )
-    candidates, _ = generate_candidates(request, hardware)
+    candidates, _, _ = generate_candidates(request, hardware)
     return {(c.model_ref, c.option.label, c.kv_cache): c for c in candidates}
 
 
@@ -355,6 +374,21 @@ def test_a_mixture_of_experts_counts_between_its_active_and_total_size(saved_hub
     total, active = moe.model.facts.parameters.value, moe.model.facts.active_parameters.value
     assert active < effective_parameters(moe.model) < total
     assert effective_parameters(moe.model) == math.sqrt(total * active)
+    # Active weights unknown: the A..B of the name, else the share of experts per token.
+    unknown = replace(moe.model.facts, active_parameters=Fact())
+    model = replace(moe.model, facts=unknown)
+    assert effective_parameters(model) == math.sqrt(total * 3e9)  # Qwen3-30B-A3B
+    model = replace(model, model_id="org/moe")
+    share = model.experts_per_token / model.experts
+    assert effective_parameters(model) == pytest.approx(total * math.sqrt(share))
+
+
+def test_a_vision_language_model_counts_its_language_model_only(saved_hub):
+    (vlm, *_) = by_label([SMOLVLM], BIG_GPU, context=4096).values()
+    vision = sum(math.prod(s) for n, s in vlm.model.tensors if "vision" in n)
+    assert vision > 0
+    total = vlm.model.facts.parameters.value
+    assert effective_parameters(vlm.model) == total - vision
 
 
 def test_near_equal_quality_goes_to_the_faster_one(saved_hub):
@@ -570,7 +604,7 @@ def test_ocq_recommend_shows_the_pick_alternatives_and_why_not(saved_hub, monkey
     assert f"Confidence: {expected.best.confidence.level}" in out
     assert "Alternatives" in out and "Why not" in out
     assert f"Why not {QWEN_AWQ}?" in out and "vLLM needs an NVIDIA GPU" in out
-    assert "Ruled out: " in out and "need a runtime this PC cannot run" in out
+    assert "Ruled out: " in out and "options need a runtime this PC cannot run" in out
     make = f"ocq optimize {QWEN} -b gguf --gguf-type {best.option.label} --context 32768"
     assert make in out.replace("\n", " ")
 
@@ -592,3 +626,67 @@ def test_compare_rows_list_each_format_once_with_its_reason(saved_hub):
     awq = next(row for row in rows if row.candidate.option.label == "AWQ 4-bit")
     assert (awq.status, awq.limit) == (REJECTED, RUNTIME)
     assert awq.why.startswith("vLLM needs an NVIDIA GPU")
+
+
+# The live catalog --------------------------------------------------------------------------
+
+
+def listing_item(repo, params=8e9, downloads=500_000, gated=False, created="2026-06-01", chat=True):
+    return {
+        "id": repo,
+        "gated": gated,
+        "safetensors": {"total": int(params)},
+        "createdAt": f"{created}T00:00:00.000Z",
+        "downloads": downloads,
+        "tags": ["conversational"] if chat else [],
+    }
+
+
+def test_the_live_catalog_keeps_popular_current_chat_models(monkeypatch):
+    from datetime import datetime
+
+    from ocq import recommend as engine
+
+    listing = [
+        listing_item("org/Chat-8B"),
+        listing_item("org/Chat-8B-AWQ"),  # someone's quantized copy: QuantPilot sizes it itself
+        listing_item("org/Gated-8B", gated="manual"),
+        listing_item("org/Old-8B", created="2023-01-01"),
+        listing_item("org/Chat-8B-Base", chat=False),
+        listing_item("org/Doc-OCR-2B"),
+        listing_item("org/Rare-2B", downloads=900),
+        listing_item("org/Toy", params=1e8),
+    ]
+    monkeypatch.setattr(engine, "fetch_hub_listing", lambda author, pipeline: listing)
+    now = datetime(2026, 11, 9)
+    assert [m.repo for m in engine.hub_catalog(now)] == ["org/Chat-8B"]
+
+    # Kept for a day; offline afterwards, the last list read is used.
+    def offline(author, pipeline):
+        raise OSError("offline")
+
+    monkeypatch.setattr(engine, "fetch_hub_listing", offline)
+    assert [m.repo for m in engine.hub_catalog(now)] == ["org/Chat-8B"]
+    later = datetime(2026, 11, 12)
+    assert [m.repo for m in engine.hub_catalog(later)] == ["org/Chat-8B"]
+
+
+def test_without_the_hub_the_curated_catalog_is_used():
+    sources, too_big = model_sources(RecommendationRequest())
+    assert [s.ref for s in sources] == [e.repo for e in CATALOG] and too_big == []
+
+
+def test_catalog_models_too_big_even_at_q2_k_are_named_not_read(monkeypatch):
+    from ocq import recommend as engine
+
+    listing = [listing_item("org/Small-4B", 4e9), listing_item("org/Huge-700B", 700e9)]
+    monkeypatch.setattr(engine, "fetch_hub_listing", lambda author, pipeline: listing)
+    monkeypatch.setattr(engine, "CATALOG", ())
+    hardware = make_hardware(ram_gb=24)
+    sources, too_big = model_sources(RecommendationRequest(), hardware=hardware)
+    assert [s.ref for s in sources] == ["org/Small-4B"]
+    ((repo, why),) = too_big
+    assert repo == "org/Huge-700B"
+    assert why.startswith("Too big for this PC: even its smallest version needs about 258 GB")
+    result = RecommendationResult(RecommendationRequest(), (), (), (), tuple(too_big))
+    assert explain_model(result, "org/Huge-700B")[0].text == why

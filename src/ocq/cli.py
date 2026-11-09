@@ -568,7 +568,10 @@ def cmd_recommend(
         console.print(f"\n[bold]Why not {escape(name)}?[/bold]")
         for reason in explain_model(result, name):
             console.print(f"  {MARKS[reason.kind.value]} {escape(reason.text)}")
-    ruled_out = ", ".join(f"{n} {words}" for n, words in rejected_summary(result))
+    summary = [f"{n} options {words}" for n, words in rejected_summary(result)]
+    if result.too_big:
+        summary.append(f"{len(result.too_big)} models too big to try even at the smallest size")
+    ruled_out = ", ".join(summary)
     if ruled_out:
         console.print(f"\n[dim]Ruled out: {ruled_out}. --why <model> explains one.[/dim]")
     for label, reason in result.unread:

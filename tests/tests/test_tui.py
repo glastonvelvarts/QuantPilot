@@ -315,8 +315,41 @@ def test_discover_lists_each_models_best_option(tmp_path: Path, monkeypatch):
         seen["rows"] = [[str(cell) for cell in table.get_row_at(i)] for i in range(table.row_count)]
 
     run_app(tmp_path, steps)
-    (row,) = seen["rows"]  # the AWQ repo needs vLLM, which needs an NVIDIA GPU
-    assert row[0] == f"{QWEN}  recommended" and row[-1] == "Download"
+    ranked, not_here = seen["rows"]  # every model, also the ones that cannot run here
+    assert ranked[0] == f"{QWEN}  recommended" and ranked[-2:] == ["Download", ""]
+    # The stored AWQ repo needs vLLM, which needs an NVIDIA GPU.
+    assert (not_here[0], not_here[1], not_here[2]) == (QWEN_AWQ, "-", "Not here")
+    assert not_here[-1].startswith("vLLM needs an NVIDIA GPU")  # and why
+
+
+def test_quantize_recommended_makes_the_engines_pick(tmp_path: Path, monkeypatch):
+    from conftest import QWEN
+
+    from ocq import recommend
+
+    offline_engine(monkeypatch)
+    made = []
+    real_plan = plan.generate_plan
+    monkeypatch.setattr(
+        plan, "generate_plan", lambda *a, **k: made.append(a[5]) or real_plan(*a, **k)
+    )
+    request = recommend.RecommendationRequest(recommend.WORKLOADS["chat"], (QWEN,), 8192)
+    best = recommend.recommend(request, HARDWARE).best.candidate
+    seen = {}
+
+    async def steps(app, pilot):
+        app.show_page("quantize", focus=True)
+        app.query_one("#quantize #context").value = 8192
+        await pilot.press(*QWEN, "enter")  # the format stays on Recommended
+        await settle(app, pilot)
+        seen["plan"] = text_of(app, "#plan-text")
+        seen["problem"] = app.query_one("#quantize .problem").display
+
+    run_app(tmp_path, steps)
+    assert not seen["problem"]
+    (choices,) = made
+    assert (choices.gguf_type, choices.kv_cache) == (best.option.label, best.kv_cache)
+    assert f"GGUF {best.option.label}" in seen["plan"]
 
 
 def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
@@ -339,6 +372,7 @@ def test_quantize_shows_the_plan_then_the_result(tmp_path: Path, monkeypatch):
 
     async def steps(app, pilot):
         app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
         await pilot.press(*"org/model", "enter")
         await settle(app, pilot)
         seen["plan"] = text_of(app, "#plan-text")
@@ -633,6 +667,7 @@ def test_quantize_offers_to_install_missing_tools(tmp_path: Path, monkeypatch):
 
     async def steps(app, pilot):
         app.show_page("quantize", focus=True)
+        app.query_one(QuantizePage).set_format("gguf:Q8_0")
         await pilot.press(*"org/model", "enter")
         await settle(app, pilot)
         seen["shown"] = app.query_one("#plan").display

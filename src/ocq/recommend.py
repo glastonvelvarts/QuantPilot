@@ -12,16 +12,28 @@ It does not size anything itself: memory, layer split and speed come from fit_at
 
 from __future__ import annotations
 
+import json
 import math
 import re
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 
 from ocq.engine import calibration_fits_in_ram
 from ocq.measurements import MEASURED, runs_of
-from ocq.model_analyzer import fit_at, quant_options, resolve_model
+from ocq.model_analyzer import (
+    ALREADY_QUANTIZED,
+    AVERAGE_BITS,
+    NOT_LANGUAGE_MODEL,
+    fit_at,
+    quant_options,
+    resolve_model,
+)
 from ocq.model_size import kv_value_bytes
 from ocq.plan import free_disk_gb
 from ocq.quantizers.llama_cpp import TAG as LLAMA_CPP_TAG
@@ -240,6 +252,8 @@ class RecommendationResult:
     rejected: tuple[Rejection, ...]
     # (model, why) for models whose files could not be read: offline, gated, broken.
     unread: tuple[tuple[str, str], ...] = ()
+    # (model, why) for catalog models too big for this PC even at the smallest type: not read.
+    too_big: tuple[tuple[str, str], ...] = ()
 
     @property
     def best(self) -> Recommendation | None:
@@ -303,7 +317,137 @@ CATALOG: tuple[CatalogEntry, ...] = (
 CATALOG_TAGS = {e.repo.lower(): e.tags for e in CATALOG}
 
 DEFAULT_KV_CACHES = ("f16", "q8_0")
-RESOLVE_WORKERS = 6  # Hub requests at once: each repo is a few small header reads
+RESOLVE_WORKERS = 8  # Hub requests at once: each repo is a few small header reads
+
+# The live catalog: what the main publishers have on the Hub now, read from its model list
+# (one request per publisher and kind), kept for a day. Chat models only (the "conversational"
+# tag), no gated ones (a license must be accepted first: name them to check them), no one
+# else's quantized copies (QuantPilot sizes every format itself), at most two years old, and
+# the most downloaded of each list. The curated CATALOG is added to it, and is what is used
+# when the Hub cannot be reached.
+HUB_API = "https://huggingface.co/api/models"
+PUBLISHERS = (
+    "Qwen", "google", "openai", "mistralai", "microsoft", "nvidia", "ibm-granite",
+    "deepseek-ai", "zai-org", "LiquidAI", "allenai", "HuggingFaceTB", "meta-llama", "tiiuae",
+)  # fmt: skip
+PIPELINES = ("text-generation", "image-text-to-text")
+LISTED = 40  # read from each list, most downloaded first
+KEPT_PER_LIST = 8
+MAX_AGE_DAYS = 730
+HUB_CATALOG_CACHE = Path.home() / ".cache" / "ocq" / "hub_catalog.json"
+HUB_CATALOG_HOURS = 24
+# Made for one narrow job (documents, charts, pointing, motion, driving a computer or phone),
+# not a general model; or a training step (SFT, DPO) or a helper (draft "assistant" models).
+NOT_A_CHAT_MODEL = re.compile(
+    r"ocr|embed|reward|guard|safety|-base\b|parse|docling|chart|locate|point|motion|"
+    r"molmoweb|fara|cosmos|phone|video|diffusion|assistant|synthetic|gsm8k|-sft\b|-dpo\b|"
+    r"preview|-vision\b|vision-",
+    re.IGNORECASE,
+)
+SMALLEST_MODEL = 200_000_000  # below this, a toy or a test model
+# Downloads in the last 30 days. Checked 2026-11-09: the models made for one narrow job that
+# the names above miss (captioners, GUI agents, X-ray and CT readers, diffusion LMs) had at
+# most 13,697; the least downloaded general model kept, granite-4.2-3b, had 37,906.
+MIN_DOWNLOADS = 20_000
+
+
+@dataclass(frozen=True)
+class HubModel:
+    repo: str
+    parameters: int  # as the Hub lists it, to rule out models far too big without reading them
+
+
+def fetch_hub_listing(author: str, pipeline: str) -> list[dict]:
+    """One page of the Hub's model list: a publisher's models of one kind, most downloaded first."""
+    fields = ("gated", "safetensors", "createdAt", "downloads", "tags")
+    query = urllib.parse.urlencode(
+        [("author", author), ("pipeline_tag", pipeline), ("sort", "downloads"),
+         ("limit", LISTED), *(("expand[]", name) for name in fields)]
+    )  # fmt: skip
+    request = urllib.request.Request(f"{HUB_API}?{query}", headers={"User-Agent": "ocq/0.1"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode())
+
+
+def chat_models(listing: list[dict], now: datetime) -> list[HubModel]:
+    """The models of one list worth recommending, most downloaded first."""
+    kept = []
+    for item in listing:
+        repo = str(item.get("id", ""))
+        name = repo.split("/")[-1]
+        total = (item.get("safetensors") or {}).get("total") or 0
+        created = str(item.get("createdAt") or "")[:10]
+        try:
+            age = (now - datetime.fromisoformat(created)).days
+        except ValueError:
+            continue
+        if (
+            item.get("gated") is not False
+            or "conversational" not in item.get("tags", [])
+            or total < SMALLEST_MODEL
+            or (item.get("downloads") or 0) < MIN_DOWNLOADS
+            or age > MAX_AGE_DAYS
+            or ALREADY_QUANTIZED.search(name)
+            or NOT_A_CHAT_MODEL.search(name)
+        ):
+            continue
+        kept.append(HubModel(repo, int(total)))
+        if len(kept) == KEPT_PER_LIST:
+            break
+    return kept
+
+
+def hub_catalog(now: datetime | None = None) -> list[HubModel] | None:
+    """The live catalog, from the cache when it is under a day old. None when the Hub cannot
+    be reached and nothing is cached."""
+    now = now or datetime.now()
+    try:
+        cached = json.loads(HUB_CATALOG_CACHE.read_text())
+        models = [HubModel(m["repo"], m["parameters"]) for m in cached["models"]]
+        if now - datetime.fromisoformat(cached["saved"]) < timedelta(hours=HUB_CATALOG_HOURS):
+            return models
+    except (OSError, ValueError, KeyError, TypeError):
+        models = None
+    lists = [(author, pipeline) for author in PUBLISHERS for pipeline in PIPELINES]
+    try:
+        with ThreadPoolExecutor(RESOLVE_WORKERS) as pool:
+            listings = list(pool.map(lambda key: fetch_hub_listing(*key), lists))
+    except (OSError, ValueError):
+        return models  # offline: the last list read, if any
+    found: dict[str, HubModel] = {}
+    for listing in listings:
+        for model in chat_models(listing, now):
+            found.setdefault(model.repo, model)
+    fresh = list(found.values())
+    try:
+        HUB_CATALOG_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        saved = {"saved": now.isoformat(), "models": [vars(m) for m in fresh]}
+        HUB_CATALOG_CACHE.write_text(json.dumps(saved, indent=1))
+    except OSError:
+        pass
+    return fresh
+
+
+def tags_of(repo: str) -> frozenset[str]:
+    """What a model is made for: the curated tags, else what its name says."""
+    if repo.lower() in CATALOG_TAGS:
+        return CATALOG_TAGS[repo.lower()]
+    name = repo.split("/")[-1].lower()
+    tags = {CODER} if "coder" in name else set()
+    if "think" in name or "reasoning" in name or "-r1" in name:
+        tags.add(REASONING)
+    return frozenset(tags)
+
+
+def smallest_gb(parameters: int) -> float:
+    """Weights of a model at the smallest type QuantPilot makes (Q2_K, measured average)."""
+    return parameters * AVERAGE_BITS["Q2_K"] / 8 / 1024**3
+
+
+def memory_pool_gb(hardware: HardwareProfile) -> float:
+    """All the memory a model could use here, RAM and GPU together (once on unified memory)."""
+    vram = 0.0 if hardware.unified_memory else hardware.free_vram_gb
+    return hardware.available_ram_gb + vram
 
 
 @dataclass(frozen=True)
@@ -317,9 +461,13 @@ class ModelSource:
 
 
 def model_sources(
-    request: RecommendationRequest, extra_dirs: list[Path] | None = None
-) -> list[ModelSource]:
-    """The models the user named, or else the ones on this PC plus the catalog."""
+    request: RecommendationRequest,
+    extra_dirs: list[Path] | None = None,
+    hardware: HardwareProfile | None = None,
+) -> tuple[list[ModelSource], list[tuple[str, str]]]:
+    """(sources, too_big): the models the user named, or else the ones on this PC plus the
+    catalog (live from the Hub, with the curated one). Catalog models too big for this PC even
+    at the smallest type are not read, only named with why."""
     from ocq.discovery import find_models
 
     found = [model for model in find_models(extra_dirs) if model.complete and readable(model)]
@@ -332,15 +480,25 @@ def model_sources(
                 sources.append(local_source(model))
             else:
                 local = ref.startswith("ollama:") or Path(ref).expanduser().exists()
-                sources.append(
-                    ModelSource(ref, ref, local, CATALOG_TAGS.get(ref.lower(), frozenset()))
-                )
-        return sources
+                sources.append(ModelSource(ref, ref, local, tags_of(ref)))
+        return sources, []
     sources = [local_source(model) for model in found]
-    sources += [
-        ModelSource(e.repo, e.repo, False, e.tags) for e in CATALOG if e.repo.lower() not in by_ref
-    ]
-    return sources
+    sizes = {m.repo: m.parameters for m in hub_catalog() or []}
+    repos = list(sizes) + [e.repo for e in CATALOG if e.repo not in sizes]
+    pool = memory_pool_gb(hardware) if hardware else None
+    too_big = []
+    for repo in repos:
+        if repo.lower() in by_ref:
+            continue
+        need = smallest_gb(sizes[repo]) if repo in sizes else 0.0
+        if pool is not None and need > pool:
+            too_big.append(
+                (repo, f"Too big for this PC: even its smallest version needs about {need:.0f} GB, "
+                 f"and {pool:.1f} GB is free.")
+            )  # fmt: skip
+            continue
+        sources.append(ModelSource(repo, repo, False, tags_of(repo)))
+    return sources, too_big
 
 
 def readable(model) -> bool:
@@ -353,7 +511,7 @@ def readable(model) -> bool:
 def local_source(model) -> ModelSource:
     # The copy on disk, not the Hub: no network, and exactly the files on this PC.
     ref = model.ref if model.ref.startswith("ollama:") else str(model.path)
-    return ModelSource(ref, model.label, True, CATALOG_TAGS.get(model.ref.lower(), frozenset()))
+    return ModelSource(ref, model.label, True, tags_of(model.ref))
 
 
 def expand(
@@ -395,14 +553,33 @@ def same_cache(kv_cache: str, runtime: str, hardware: HardwareProfile) -> bool:
     return kv_value_bytes(kv_cache, runtime, fp8) == kv_value_bytes("f16", runtime, fp8)
 
 
+@contextmanager
+def quiet_hub():
+    """No progress bar per model read: with many read at once they flood the screen."""
+    from huggingface_hub.utils import (
+        are_progress_bars_disabled,
+        disable_progress_bars,
+        enable_progress_bars,
+    )
+
+    was_off = are_progress_bars_disabled()
+    disable_progress_bars()
+    try:
+        yield
+    finally:
+        if not was_off:
+            enable_progress_bars()
+
+
 def generate_candidates(
     request: RecommendationRequest,
     hardware: HardwareProfile,
     extra_dirs: list[Path] | None = None,
-) -> tuple[list[Candidate], list[tuple[str, str]]]:
-    """(candidates, unread): every way to run every model, and the models that could not be
-    read with the reason. Hub repos are read a few at a time."""
-    sources = model_sources(request, extra_dirs)
+) -> tuple[list[Candidate], list[tuple[str, str]], list[tuple[str, str]]]:
+    """(candidates, unread, too_big): every way to run every model, the models that could not
+    be read, and the catalog models too big to read, each with the reason. Hub repos are read
+    a few at a time."""
+    sources, too_big = model_sources(request, extra_dirs, hardware)
     context = request.context_tokens
     kv_caches = request.kv_caches or DEFAULT_KV_CACHES
 
@@ -414,7 +591,7 @@ def generate_candidates(
         except (OSError, ValueError, KeyError) as exc:  # a broken file must not hide the others
             return f"could not read it: {exc or type(exc).__name__}"
 
-    with ThreadPoolExecutor(RESOLVE_WORKERS) as pool:
+    with quiet_hub(), ThreadPoolExecutor(RESOLVE_WORKERS) as pool:
         snapshots = list(pool.map(read, sources))
 
     candidates: list[Candidate] = []
@@ -427,7 +604,7 @@ def generate_candidates(
             candidates += expand(source, snapshot, hardware, context, kv_caches)
         except OcqError as exc:
             unread.append((source.label, str(exc)))
-    return candidates, unread
+    return candidates, unread, too_big
 
 
 # Hard limits (6C) ---------------------------------------------------------------------------
@@ -501,6 +678,8 @@ def supports_architecture(candidate: Candidate, gguf_architectures: frozenset[st
         return Check(ARCHITECTURE, True, "")
     if gguf_architectures is None:
         return Check(ARCHITECTURE, True, "not checked: llama.cpp's converter is not on this PC")
+    if not candidate.model.architecture_known:
+        return Check(ARCHITECTURE, True, "not checked: the model's architecture is not known")
     if architecture not in gguf_architectures:
         return Check(
             ARCHITECTURE,
@@ -702,14 +881,41 @@ def rated_as(candidate: Candidate) -> str:
     return BITS_AS_GGUF.get(width, "Q2_K" if width else PLAIN_4BIT)
 
 
-def effective_parameters(model: ModelSnapshot) -> float:
-    """Parameters to compare models by. A mixture of experts counts as the geometric mean of
-    its total and active parameters, a rule of thumb (30B with 3B active is about a 9.5B)."""
-    total = model.facts.parameters.value or model.params_b * 1e9
+ACTIVE_IN_NAME = re.compile(r"-A(\d+(?:\.\d+)?)B\b", re.IGNORECASE)  # Qwen3-30B-A3B
+
+
+def language_parameters(model: ModelSnapshot) -> float:
+    """Parameters of the language model alone: a vision or audio encoder adds nothing to the
+    answers (llama.cpp even keeps it in a separate file)."""
+    total = float(model.facts.parameters.value or model.params_b * 1e9)
+    encoders = sum(
+        math.prod(shape) for name, shape in model.tensors if NOT_LANGUAGE_MODEL.search(name)
+    )
+    return total - encoders if 0 < encoders < total else total
+
+
+def active_parameters(model: ModelSnapshot, total: float) -> float:
+    """Weights one token uses: read from the files, else the A..B in the name (an estimate),
+    else the share of experts each token uses, else all of them."""
     active = model.facts.active_parameters
-    if model.is_moe and active.known and active.value:
-        return math.sqrt(total * active.value)
-    return float(total)
+    if active.known and active.value:
+        return min(float(active.value), total)
+    named = ACTIVE_IN_NAME.search(model.model_id)
+    if named:
+        return min(float(named.group(1)) * 1e9, total)
+    if model.experts and model.experts_per_token:
+        return total * model.experts_per_token / model.experts
+    return total
+
+
+def effective_parameters(model: ModelSnapshot) -> float:
+    """Parameters to compare models by: the language model's. A mixture of experts counts as
+    the geometric mean of its total and active parameters, a rule of thumb (30B with 3B active
+    is about a 9.5B)."""
+    total = language_parameters(model)
+    if model.is_moe:
+        return math.sqrt(total * active_parameters(model, total))
+    return total
 
 
 def estimated_quality(candidate: Candidate) -> float:
@@ -865,13 +1071,15 @@ def recommend(
 ) -> RecommendationResult:
     """The whole engine: candidates, hard limits, ranking, explanations. The CLI and the TUI
     call this."""
-    candidates, unread = generate_candidates(request, hardware, extra_dirs)
+    candidates, unread, too_big = generate_candidates(request, hardware, extra_dirs)
     allowed, rejected = apply_limits(candidates, hardware, disk_free_gb)
     checks = {id(candidate): tuple(passed) for candidate, passed in allowed}
     ranked = rank([candidate for candidate, _ in allowed], request.workload, hardware)
     ranked = [replace(r, checks=checks[id(r.candidate)]) for r in ranked]
     ranked = explain(ranked, request.workload, hardware)
-    return RecommendationResult(request, tuple(ranked), tuple(rejected), tuple(unread))
+    return RecommendationResult(
+        request, tuple(ranked), tuple(rejected), tuple(unread), tuple(too_big)
+    )
 
 
 # Explanations and confidence (6E) -----------------------------------------------------------
@@ -1228,6 +1436,9 @@ def explain_model(result: RecommendationResult, model: str) -> tuple[Reason, ...
     for label, why in result.unread:
         if label.lower() == name:
             return (Reason(BAD, f"Could not be read: {why}"),)
+    for label, why in result.too_big:
+        if label.lower() == name:
+            return (Reason(BAD, why),)
     return (Reason(BAD, "Not among the models considered"),)
 
 
