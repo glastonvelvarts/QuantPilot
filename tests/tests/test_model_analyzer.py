@@ -1149,6 +1149,62 @@ def test_a_dropped_connection_says_so_not_a_traceback(cut_off, monkeypatch, tmp_
     )
 
 
+def test_a_model_lookup_cut_short_says_so_not_a_traceback(monkeypatch):
+    # The reply stopped before its end: http.client.IncompleteRead, which is not an OSError.
+    import http.client
+
+    from ocq import model_analyzer
+
+    class CutShort:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            raise http.client.IncompleteRead(b'{"id": "org/mo', 2000)
+
+    monkeypatch.setattr(model_analyzer.urllib.request, "urlopen", lambda *a, **k: CutShort())
+    with pytest.raises(OcqError, match=r"^Could not reach HuggingFace while looking up org/model: "
+                       r"IncompleteRead\(14 bytes read, 2000 more expected\)\. Check the conn"):
+        model_analyzer.fetch_hf_model("org/model")
+
+
+def test_a_reason_that_ends_with_a_period_gets_only_one():
+    import httpx
+
+    from ocq.model_analyzer import hub_unreachable
+
+    error = hub_unreachable("reading org/model", httpx.RemoteProtocolError("Server disconnected."))
+    assert "Server disconnected. Check" in str(error)
+
+
+def test_a_model_download_cut_off_says_so_not_a_traceback(monkeypatch):
+    # The weights are the biggest download, so the likeliest to be cut off: `ocq optimize`
+    # (AWQ, GPTQ, bitsandbytes) showed the raw httpx error.
+    import httpx
+    import huggingface_hub
+
+    from ocq.quantizers.base import download_model
+
+    def cut_off(*args, **kwargs):
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(received 5 bytes, expected 100000)"
+        )
+
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", lambda *a, **k: ["model.safetensors"])
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", cut_off)
+    with pytest.raises(OcqError) as error:
+        download_model("org/model")
+    assert str(error.value) == (
+        "Could not reach HuggingFace while downloading org/model: peer closed connection without "
+        "sending complete message body (received 5 bytes, expected 100000). Check the connection "
+        "and try again. The files it finished are kept."
+    )
+
+
 def test_a_model_too_big_for_the_gpu_is_as_fast_as_its_layers_in_ram_allow(qwen_tensors):
     # Whole layers fill the GPU, each with its share of the cache: the cache of a long context
     # pushes layers out too. Qwen2.5-7B Q4_K_M at 131k on the RTX 4060 was shown at the all-GPU

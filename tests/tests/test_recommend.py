@@ -685,6 +685,15 @@ def test_the_live_catalog_keeps_popular_current_chat_models(monkeypatch):
     later = datetime(2026, 11, 12)
     assert [m.repo for m in engine.hub_catalog(later)] == ["org/Chat-8B"]
 
+    # A reply cut short is not an OSError (http.client.IncompleteRead): the same.
+    import http.client
+
+    def cut_short(author, pipeline):
+        raise http.client.IncompleteRead(b"[{", 4000)
+
+    monkeypatch.setattr(engine, "fetch_hub_listing", cut_short)
+    assert [m.repo for m in engine.hub_catalog(later)] == ["org/Chat-8B"]
+
 
 def test_without_the_hub_the_curated_catalog_is_used():
     sources, too_big = model_sources(RecommendationRequest())

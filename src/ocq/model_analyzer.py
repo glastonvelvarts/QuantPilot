@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -275,8 +276,8 @@ def fetch_hf_model(model_id: str) -> dict:
                 "that account in Settings (or set HF_TOKEN)."
             ) from exc
         raise OcqError(f"HuggingFace API error {exc.code} for {model_id}") from exc
-    except urllib.error.URLError as exc:
-        raise OcqError(f"Could not reach HuggingFace: {exc.reason}") from exc
+    except (OSError, http.client.HTTPException) as exc:  # no connection, or it dropped mid-answer
+        raise hub_unreachable(f"looking up {model_id}", getattr(exc, "reason", exc)) from exc
 
 
 def gated_message(model_id: str) -> str:
@@ -290,6 +291,19 @@ def gated_message(model_id: str) -> str:
     return (
         f"{model_id} is gated: its files can be read only after accepting its license at "
         f"https://huggingface.co/{model_id}. {who}."
+    )
+
+
+def hub_unreachable(doing: str, exc: BaseException | str, then: str = "") -> OcqError:
+    """The message for a connection to the Hub that failed or dropped mid-answer. Several of
+    those errors are not OSErrors (httpx's, http.client.IncompleteRead) and would otherwise
+    reach the user as a traceback."""
+    reason = str(exc).strip().rstrip(".")
+    if not reason:
+        reason = type(exc).__name__ if isinstance(exc, BaseException) else "no answer"
+    return OcqError(
+        f"Could not reach HuggingFace while {doing}: {reason}. "
+        f"Check the connection and try again.{then}"
     )
 
 
@@ -315,10 +329,7 @@ def fetch_model_files(model_id: str, revision: str) -> tuple[dict, list[Tensor],
     from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
 
     def unreachable(exc: TransportError) -> OcqError:
-        return OcqError(
-            f"Could not reach HuggingFace while reading {model_id}: {exc}. "
-            "Check the connection and try again."
-        )
+        return hub_unreachable(f"reading {model_id}", exc)
 
     try:
         config = json.loads(Path(hf_hub_download(model_id, "config.json")).read_text("utf-8"))
