@@ -1,6 +1,6 @@
 [project]
 name = "quantpilot"
-version = "0.1.0"
+version = "1.5.0"
 description = "Which LLM, format and runtime to run on this PC, measured and explained, and quantizing it (GGUF, AWQ, GPTQ, bitsandbytes, NVFP4)"
 readme = "README.md"
 requires-python = ">=3.10"

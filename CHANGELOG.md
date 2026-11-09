@@ -4,6 +4,16 @@ What changed in each version of QuantPilot. The format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-09
+
+### Fixed
+
+- `ocq doctor` and ranking status marks on Windows when the console uses cp1252 (default CI and many terminals).
+
+### Added
+
+- PyPI package `quantpilot`, `ocq doctor`, `--json` on core commands, Python `ocq.api`, release workflow, and API docs (phase 8).
+
 ## [0.1.0] - 2026-11-09
 
 The first release.
@@ -38,5 +48,6 @@ The first release.
 - `ocq doctor` says what is ready on the PC and the command that fixes what is not.
 - Installs with `uv tool install quantpilot`, `uvx quantpilot` or pip on Linux, macOS and Windows, Python 3.10 to 3.13; quantization tools as extras, added the way QuantPilot was installed.
 
-[Unreleased]: https://github.com/glastonvelvarts/QuantPilot/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/glastonvelvarts/QuantPilot/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/glastonvelvarts/QuantPilot/releases/tag/v1.5.0
 [0.1.0]: https://github.com/glastonvelvarts/QuantPilot/releases/tag/v0.1.0
