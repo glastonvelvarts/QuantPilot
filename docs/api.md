@@ -24,7 +24,7 @@ Every result starts with:
 | Key | |
 |---|---|
 | `schema_version` | `1`. Within one version, keys are only added: never renamed or removed, and a value keeps its type and unit. Anything else is a new version. |
-| `quantpilot_version` | The QuantPilot that made it, `0.1.0` |
+| `quantpilot_version` | The QuantPilot that made it, e.g. `1.5.0` |
 | `kind` | Which result it is: `profile`, `inspect`, `feasibility`, `models`, `recommend`, `bench`, `history`, `doctor` |
 
 Units are in the names: `_gb` is GiB (1024³ bytes), `_gbs` is GB/s, `_seconds`, `tokens_per_second`. A value that is not known is `null`.

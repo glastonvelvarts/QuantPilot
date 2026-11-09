@@ -1,7 +1,7 @@
 name: release
 
-# Push a tag v<version> (the version in pyproject.toml) to publish that version on PyPI and as a
-# GitHub release. PyPI trusts this workflow (trusted publishing): no token is stored anywhere.
+# Push a tag v<version> (the version in pyproject.toml), or make a release with that tag on
+# GitHub, to publish that version on PyPI and as a GitHub release. PyPI trusts this workflow (trusted publishing): no token is stored anywhere.
 # Setting it up once is in CONTRIBUTING.md.
 on:
   push:
@@ -73,4 +73,11 @@ jobs:
             found && /^## \[/ { exit }
             found { print }
           ' CHANGELOG.md > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/* --title "QuantPilot $version" --notes-file notes.md
+          # A release made on GitHub's website (which also made the tag) gets the files and
+          # the notes; otherwise the workflow makes it.
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "QuantPilot $version" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "QuantPilot $version" --notes-file notes.md
+          fi

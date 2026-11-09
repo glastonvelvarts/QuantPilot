@@ -299,5 +299,5 @@ def run_showing_progress(command: list[str], env: dict[str, str]) -> subprocess.
     for reader in readers:
         reader.join()
     if shown.is_set():
-        print("\r\x1b[2K", end="", flush=True)  # clear the meter line
+        print("\r\x1b[2K", end="", flush=True)
     return subprocess.CompletedProcess(command, code, "".join(kept["out"]), "".join(kept["err"]))

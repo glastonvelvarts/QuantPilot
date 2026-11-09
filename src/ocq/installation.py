@@ -36,7 +36,7 @@ class Installation:
     # uv tool: what it was installed with, from uv's receipt.
     extras: tuple[str, ...] = ()
     source: str = ""  # " @ <path or URL>" when not from PyPI
-    specifier: str = ""  # a version asked for (==0.1.0)
+    specifier: str = ""
     editable: str = ""  # the folder of an editable install (uv tool install -e)
     others: tuple[str, ...] = field(default_factory=tuple)  # --with requirements
     python: str = ""
