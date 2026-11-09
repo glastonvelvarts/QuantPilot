@@ -1,4 +1,5 @@
 """CLI terminal encoding: Windows often uses cp1252; status symbols need UTF-8."""
+
 from __future__ import annotations
 
 import sys
