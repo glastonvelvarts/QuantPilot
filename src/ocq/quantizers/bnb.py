@@ -9,7 +9,6 @@ from ocq.types import OptimizationPlan, QuantAlgorithm, QuantConfig
 class BnbQuantizer(TransformersQuantizer):
     algorithm = QuantAlgorithm.BNB
     summary = "4 or 8 bit on an NVIDIA GPU, no calibration. Loads straight into transformers."
-    install_hint = "uv sync --extra bnb"
     needs = ("bitsandbytes", "transformers", "accelerate")
     needs_cuda = True
 

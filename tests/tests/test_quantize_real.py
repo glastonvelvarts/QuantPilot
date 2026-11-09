@@ -1,28 +1,75 @@
-"""Real quantization of a small model with every backend. Run with: uv run pytest -m slow"""
+"""Real quantization of a small model with every backend, then what it gives: its speed, its
+quality against the original, and (GGUF) llama.cpp's memory against QuantPilot's prediction.
+
+Run with: uv run pytest -m slow  (GitHub runs the GGUF one every night; the NVIDIA ones run on
+a PC with an NVIDIA GPU: make test-gpu)
+"""
 
 import pytest
+from typer.testing import CliRunner
 
+from ocq import bench, cli, quality
 from ocq.hardware import detect_hardware
 from ocq.pipeline import run_optimize
 from ocq.quantizers import get_quantizer
+from ocq.recommend import RecommendationRequest, kept_of, recommend
 from ocq.types import OptimizationGoal, QuantAlgorithm, QuantChoices
 
 MODEL = "HuggingFaceTB/SmolLM2-135M-Instruct"
+# The label each format is saved and recommended under: they must match for the measured
+# quality to reach the recommendations.
+LABELS = {
+    QuantAlgorithm.GGUF: "Q4_K_M",
+    QuantAlgorithm.AWQ: "AWQ 4-bit",
+    QuantAlgorithm.GPTQ: "GPTQ 4-bit",
+    QuantAlgorithm.NVFP4: "NVFP4 4-bit",
+    QuantAlgorithm.BNB: "BNB 4-bit",
+}
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("algorithm", list(QuantAlgorithm), ids=lambda a: a.value)
-def test_quantize_small_model(algorithm, tmp_path):
-    ready, reason = get_quantizer(algorithm).check(detect_hardware())
+def test_quantize_measure_and_compare_with_the_original(algorithm, tmp_path):
+    hardware = detect_hardware()
+    ready, reason = get_quantizer(algorithm).check(hardware)
     if not ready:
         pytest.skip(reason)
 
     choices = QuantChoices(
         algorithm=algorithm, bits=4, calibration_samples=16, calibration_seq_len=256
     )
-    result = run_optimize(MODEL, OptimizationGoal.BALANCED, tmp_path, choices=choices)
+    if algorithm == QuantAlgorithm.GGUF:
+        choices = QuantChoices(algorithm=algorithm, gguf_type="Q4_K_M")
+    # Not ocq-output/<org>--<name>/: what QuantPilot made says itself where it came from.
+    made = tmp_path / "somewhere"
+    result = run_optimize(MODEL, OptimizationGoal.BALANCED, made, choices=choices)
 
     assert result.quantization.success, result.quantization.message
     assert result.validation.passed, result.validation.checks
     assert result.benchmark.tokens_per_second > 0
     assert result.benchmark.time_to_first_token_s > 0
+    artifact = result.quantization.artifact_path
+
+    if algorithm == QuantAlgorithm.GGUF:
+        # llama.cpp's own memory numbers against QuantPilot's prediction, on this PC.
+        verified = CliRunner().invoke(cli.app, ["verify", str(artifact)], env={"COLUMNS": "200"})
+        assert verified.exit_code == 0, verified.output
+
+    # Its speed (GGUF), its quality, and the original's (made once from the Hugging Face cache).
+    outcome = bench.run_benchmark(str(artifact), hardware, piece=quality.FIXED)
+    assert outcome.model_id == MODEL
+    assert outcome.label.startswith(LABELS[algorithm])
+    if algorithm == QuantAlgorithm.GGUF:
+        assert outcome.speed.tokens_per_second > 0
+        assert set(outcome.speed.prompt_speeds) == {512, 4096}
+    assert 5 < outcome.quality.value < 60  # SmolLM2-135M: about 19 in 16 bits
+    assert outcome.kept is not None, outcome.note
+    assert outcome.kept.reference_label in ("BF16", "F16", "F32", "Q8_0")
+    assert 0.2 < outcome.kept.kept <= 1.0
+
+    # The recommendation for this model now uses what was measured.
+    if algorithm == QuantAlgorithm.GGUF:
+        result = recommend(RecommendationRequest(models=(MODEL,)), hardware)
+        q4 = next(r.candidate for r in result.ranked if r.candidate.option.label == "Q4_K_M")
+        kept, measured = kept_of(q4)
+        assert measured is not None and kept == pytest.approx(outcome.kept.kept)

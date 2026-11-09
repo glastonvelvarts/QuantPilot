@@ -9,7 +9,7 @@ import pytest
 
 from ocq import discovery, env_file, hardware, measurements, model_analyzer, quality, recommend
 from ocq.quantizers import llama_cpp
-from ocq.types import DTYPE_BITS
+from ocq.types import DTYPE_BITS, OcqError
 
 # Real config.json, safetensors headers and HuggingFace API counts of a few repos, saved
 # 2026-10-31. Headers only: names, types and shapes, no weights.
@@ -17,11 +17,15 @@ DATA = Path(__file__).parent / "data"
 
 
 @pytest.fixture(autouse=True)
-def private_caches(tmp_path, monkeypatch):
+def private_caches(tmp_path, monkeypatch, request):
     """Tests must not read or write the speed measurements and model cache of the real user."""
     monkeypatch.setattr(measurements, "STORE", tmp_path / "measurements.json")
     monkeypatch.setattr(quality, "STORE", tmp_path / "quality.json")
-    monkeypatch.setattr(quality, "DATASETS", tmp_path / "datasets")
+    # Real quantizations (-m slow) keep the downloads they need: the WikiText text and
+    # llama.cpp's release are fetched once, not on every run. Their results stay private.
+    real_run = request.node.get_closest_marker("slow") is not None
+    if not real_run:
+        monkeypatch.setattr(quality, "DATASETS", tmp_path / "datasets")
     monkeypatch.setattr(model_analyzer, "MODEL_CACHE", tmp_path / "models")
     # Nor the recommendation engine's list of Hub models, nor the Hub itself.
     monkeypatch.setattr(recommend, "HUB_CATALOG_CACHE", tmp_path / "hub_catalog.json")
@@ -35,14 +39,16 @@ def private_caches(tmp_path, monkeypatch):
     # Nor the llama.cpp this PC happens to have downloaded: a test that needs its converter
     # says which architectures it knows.
     monkeypatch.delenv("OCQ_LLAMA_CPP", raising=False)
-    monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "llama.cpp")
+    if not real_run:
+        monkeypatch.setattr(llama_cpp, "CACHE", tmp_path / "llama.cpp")
     # Nor the user's Hugging Face token, from the shell or from QuantPilot's .env file.
     for name in env_file.HF_TOKEN_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(env_file, "ENV_FILE", tmp_path / "settings" / ".env")
     monkeypatch.setattr(env_file, "from_file", set())
-    # Nor the GPU driver of the PC they run on.
-    monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
+    # Nor the GPU driver of the PC they run on (real quantizations place models with it).
+    if not real_run:
+        monkeypatch.setattr(hardware, "cuda_memory_mib", lambda: None)
 
 
 def llama_style_tensors(
@@ -225,3 +231,22 @@ def nvidia_pc(
         gpus=cards,
         os_name="Windows" if windows else "Linux",
     )
+
+
+@pytest.fixture
+def saved_hub(monkeypatch):
+    """The Hub, answered from data/: saved repos only, anything else is not found."""
+
+    def model(repo):
+        try:
+            return real_model(repo)
+        except FileNotFoundError:
+            raise OcqError(f"Model {repo!r} was not found on HuggingFace.") from None
+
+    monkeypatch.setattr(model_analyzer, "fetch_hf_model", lambda repo: model(repo)[0])
+    monkeypatch.setattr(model_analyzer, "fetch_model_files", lambda repo, sha: model(repo)[1:])
+
+    def no_llmfit(*args):
+        raise AssertionError("the engine must not ask llmfit")
+
+    monkeypatch.setattr(model_analyzer, "catalog_entry", no_llmfit)

@@ -9,7 +9,6 @@ from ocq.types import QuantAlgorithm
 class GptqQuantizer(OneShotQuantizer):
     algorithm = QuantAlgorithm.GPTQ
     summary = "4 or 8 bit, calibrated (GPU or CPU). For GPU serving with vLLM or transformers."
-    install_hint = "uv sync --extra gptq"
     symmetric = True
 
     def recipe(self, scheme) -> list:

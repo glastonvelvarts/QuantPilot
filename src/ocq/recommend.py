@@ -1714,3 +1714,25 @@ def rejected_summary(result: RecommendationResult) -> list[tuple[int, str]]:
         name = rejection.failed[0].name
         counts[name] = counts.get(name, 0) + 1
     return sorted(((n, LIMIT_WORDS[name]) for name, n in counts.items()), reverse=True)
+
+
+def make_command(candidate) -> str:
+    """The ocq optimize command that makes a recommended file."""
+    option = candidate.option
+    # The repo by name, also for a model read from the Hugging Face cache (whose ref is the
+    # cache's snapshot folder): ocq optimize finds it there.
+    repo = candidate.model_id
+    named = "/" in repo and not repo.startswith(("local/", "ollama/", "/", ".", "~"))
+    parts = ["ocq optimize", repo if named else candidate.model_ref]
+    if option.row_kind == "gguf":
+        parts += ["-b gguf", f"--gguf-type {option.label}"]
+    else:
+        parts.append(f"-b {option.row_kind}")
+        words = option.label.split()
+        bits = next((w.removesuffix("-bit") for w in words if w.endswith("-bit")), "")
+        if bits and option.row_kind != "nvfp4":
+            parts[-1] += f" --bits {bits}"
+        if option.label.endswith((" double", " single")):
+            parts.append(f"--{option.label.split()[-1]}-quant")
+    parts += [f"--context {candidate.context}", f"--kv-cache {candidate.kv_cache}", "--execute"]
+    return " ".join(parts)

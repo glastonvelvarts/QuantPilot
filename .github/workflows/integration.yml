@@ -1,0 +1,37 @@
+name: integration
+
+# Real quantizations, on GitHub's machines (CPU only): SmolLM2-135M made into a GGUF with the
+# llama.cpp release QuantPilot downloads, checked against llama.cpp's own memory numbers, its
+# speed and quality measured and compared with the original. The NVIDIA formats need a GPU:
+# make test-gpu on a PC with one.
+on:
+  schedule:
+    - cron: "17 3 * * *" # every night
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gguf:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # llama.cpp's release, the WikiText text and the model: downloaded once, then reused.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ocq/llama.cpp
+            ~/.cache/ocq/datasets
+            ~/.cache/huggingface/hub
+          key: real-runs-${{ runner.os }}-${{ hashFiles('src/ocq/quantizers/llama_cpp.py') }}
+          restore-keys: real-runs-${{ runner.os }}-
+      - run: uv sync --group dev --extra gguf
+      - run: uv run pytest -m slow -k gguf -v -rs --durations=0

@@ -20,6 +20,7 @@ from ocq.model_analyzer import DEFAULT_CONTEXT, quant_options, resolve_model
 from ocq.pipeline import run_optimize
 from ocq.plan import free_disk_gb, generate_plan
 from ocq.quantizers import backend_status, get_quantizer
+from ocq.terminal import prepare_terminal, rich_status
 from ocq.types import (
     KV_CACHE_TYPES,
     Fact,
@@ -33,6 +34,8 @@ from ocq.types import (
     QuantChoices,
 )
 
+prepare_terminal()
+
 app = typer.Typer(
     name="ocq",
     help="One-Click Quantizer: inspect this PC, see which models it can run, quantize them. "
@@ -41,8 +44,24 @@ app = typer.Typer(
 console = Console()
 
 
+def show_version(value: bool) -> None:
+    if value:
+        from ocq import __version__
+
+        console.print(f"QuantPilot {__version__}", highlight=False)
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
-def start(ctx: typer.Context) -> None:
+def start(
+    ctx: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version", callback=show_version, is_eager=True, help="Show the version and exit"
+        ),
+    ] = False,
+) -> None:
     """ocq with no command: the full-screen app in a terminal, the help text anywhere else."""
     from ocq import env_file
 
@@ -136,8 +155,31 @@ KvCache = Annotated[
 ]
 
 
+JsonOut = Annotated[
+    bool, typer.Option("--json", help="Print the result as JSON (its keys: docs/api.md)")
+]
+
+
+def emit_json(make) -> None:
+    """--json: stdout holds only the JSON of the matching ocq.api call (progress lines go to
+    stderr); a failure is {"schema_version": .., "error": "..."} and exit code 1."""
+    import contextlib
+    import json
+
+    from ocq import api
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            data = make()
+    except OcqError as exc:
+        sys.stdout.write(json.dumps({"schema_version": api.SCHEMA_VERSION, "error": str(exc)}))
+        sys.stdout.write("\n")
+        raise typer.Exit(1) from exc
+    sys.stdout.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
 def fail(exc: Exception) -> typer.Exit:
-    console.print(f"[red]Error:[/red] {exc}")
+    console.print(f"[red]Error:[/red] {escape(str(exc))}", highlight=False)
     return typer.Exit(1)
 
 
@@ -214,8 +256,12 @@ def colored_fit(fit_level) -> str:
 
 
 @app.command("profile")
-def cmd_profile(llmfit_bin: LlmfitBin = None) -> None:
+def cmd_profile(llmfit_bin: LlmfitBin = None, as_json: JsonOut = False) -> None:
     """Show what this PC has: CPU, RAM, GPU, memory bandwidth, free disk."""
+    if as_json:
+        from ocq import api
+
+        return emit_json(lambda: api.profile(llmfit_bin=llmfit_bin))
     hw = detect_hardware(llmfit_bin)
 
     bandwidth = []
@@ -259,9 +305,14 @@ def cmd_inspect(
     model: ModelArg = None,
     model_path: ModelPath = None,
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Show what QuantPilot knows about a model, where each fact comes from and how sure it is."""
     ref = model_ref(model, model_path)
+    if as_json:
+        from ocq import api
+
+        return emit_json(lambda: api.inspect(ref, llmfit_bin))
     try:
         snapshot = resolve_model(ref, None, llmfit_bin)
     except OcqError as exc:
@@ -427,8 +478,15 @@ def cmd_bench(
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Run the standard benchmark on a model of this PC and save it to its benchmark history."""
+    if as_json:
+        from ocq import api
+
+        measure = "full" if full else ("fixed" if quality else "")
+        cache = read_kv_cache(kv_cache)
+        return emit_json(lambda: api.bench(model, measure, context, cache, llmfit_bin=llmfit_bin))
     from ocq import bench
     from ocq import quality as measured_quality
 
@@ -550,11 +608,18 @@ def cmd_models(
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """List the models already on this PC and how each one fits it, as it is on disk."""
     from ocq.discovery import SOURCES, find_models, searched_locations, tilde
 
     kv_cache = read_kv_cache(kv_cache)
+    if as_json:
+        from ocq import api
+
+        return emit_json(
+            lambda: api.models(folders or (), show_all, context, kv_cache, llmfit_bin=llmfit_bin)
+        )
     try:
         models = find_models(folders)
         hw = detect_hardware(llmfit_bin)
@@ -625,6 +690,103 @@ def local_fit(model, hw, context: int, kv_cache: str) -> tuple[str, str, str]:
     return colored_fit(option.fit_level), runs_on(option), speed_cell(option)
 
 
+@app.command("doctor")
+def cmd_doctor(
+    offline: Annotated[
+        bool, typer.Option("--offline", help="Skip the checks that use the network")
+    ] = False,
+    llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
+) -> None:
+    """Check that QuantPilot is ready to work on this PC, and what fixes what is not."""
+    from ocq import doctor
+
+    if as_json:
+        from ocq import api
+
+        report: dict = {}
+
+        def run() -> dict:
+            report.update(api.doctor(online=not offline, llmfit_bin=llmfit_bin))
+            return report
+
+        emit_json(run)
+        if not report.get("ready", True):
+            raise typer.Exit(1)
+        return
+
+    findings = doctor.run_checks(detect_hardware(llmfit_bin), online=not offline)
+    marks = {
+        doctor.OK: rich_status("\u2713", "+", "green"),
+        doctor.INFO: rich_status("\u00b7", ".", "dim"),
+        doctor.WARN: rich_status("!", "!", "yellow"),
+        doctor.FAIL: rich_status("\u2717", "x", "red"),
+    }
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column(width=1)
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column(overflow="fold")  # a command to copy is wrapped, never cut short
+    for finding in findings:
+        detail = escape(finding.detail)
+        if finding.fix:
+            detail += f"\n[dim]run:[/dim] [cyan]{escape(finding.fix)}[/cyan]"
+        table.add_row(marks[finding.status], finding.name, detail)
+    console.print(table)
+    problems = [f for f in findings if f.status == doctor.FAIL]
+    worth = [f for f in findings if f.status == doctor.WARN]
+    if problems:
+        console.print(f"[red]{len(problems)} problem{'s' * (len(problems) > 1)} to fix.[/red]")
+        raise typer.Exit(1)
+    if worth:
+        console.print(f"Ready, with {len(worth)} thing{'s' * (len(worth) > 1)} worth a look.")
+    else:
+        console.print("[green]Ready.[/green]")
+
+
+@app.command("history")
+def cmd_history(
+    model: Annotated[
+        str | None, typer.Argument(help="Only this model (a repo id, or local/<file>)")
+    ] = None,
+    as_json: JsonOut = False,
+) -> None:
+    """This PC's saved benchmarks: speed runs and quality results, newest first."""
+    from ocq import api
+
+    if as_json:
+        return emit_json(lambda: api.history(model or ""))
+    data = api.history(model or "")
+    speeds = Table(title="Speed runs")
+    for column in ("When", "Model", "Format", "Where", "Writing", "Reading 512"):
+        speeds.add_column(column)
+    for run in data["speed_runs"][:30]:
+        reading = run.get("prompt_tps")
+        speeds.add_row(
+            str(run.get("date", ""))[:16].replace("T", " ") or "earlier",
+            escape(str(run.get("model", "")).removeprefix("local/")),
+            escape(str(run.get("label", ""))),
+            escape(str(run.get("device", ""))),
+            f"{run.get('tps', 0):,.1f} tok/s",
+            f"{reading:,.0f} tok/s" if reading else "",
+        )
+    qualities = Table(title="Quality (perplexity on WikiText-2, lower is better)")
+    for column in ("When", "Model", "Format", "Perplexity", "Where"):
+        qualities.add_column(column)
+    for entry in data["quality_results"][:30]:
+        qualities.add_row(
+            str(entry.get("date", ""))[:16].replace("T", " "),
+            escape(str(entry.get("model", "")).removeprefix("local/")),
+            escape(str(entry.get("label", ""))),
+            f"{entry['ppl']:.4f}",
+            escape(str(entry.get("device", ""))),
+        )
+    if not data["speed_runs"] and not data["quality_results"]:
+        console.print("Nothing benchmarked on this PC yet: ocq bench <model>.")
+        return
+    console.print(speeds)
+    console.print(qualities)
+
+
 @app.command("backends")
 def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     """Show which quantization backends can run on this PC."""
@@ -634,11 +796,15 @@ def cmd_backends(llmfit_bin: LlmfitBin = None) -> None:
     table.add_column("Detail")
     for status in backend_status(detect_hardware(llmfit_bin)):
         state = "[green]ready[/green]" if status.ready else "[red]not ready[/red]"
-        table.add_row(status.algorithm.value, state, status.detail)
+        table.add_row(status.algorithm.value, state, escape(status.detail))
     console.print(table)
 
 
-MARKS = {"good": "[green]✓[/green]", "tradeoff": "[yellow]△[/yellow]", "bad": "[red]✗[/red]"}
+MARKS = {
+    "good": rich_status("\u2713", "+", "green"),
+    "tradeoff": rich_status("\u25b3", "~", "yellow"),
+    "bad": rich_status("\u2717", "x", "red"),
+}
 CONFIDENCE_COLORS = {"Low": "red", "Medium": "yellow", "High": "green", "Very High": "green"}
 
 
@@ -672,8 +838,24 @@ def cmd_recommend(
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="Alternatives to list")] = 8,
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Which model, format and runtime to use on this PC for a kind of work, and why."""
+    if as_json:
+        from ocq import api
+
+        caches = [read_kv_cache(cache) for cache in kv_cache or ()]
+        return emit_json(
+            lambda: api.recommend(
+                models or (),
+                workload,
+                context,
+                caches,
+                folders or (),
+                llmfit_bin=llmfit_bin,
+                limit=limit,
+            )  # fmt: skip
+        )
     from ocq.recommend import (
         WORKLOADS,
         RecommendationRequest,
@@ -718,6 +900,8 @@ def cmd_recommend(
     for label, reason in result.unread:
         console.print(f"[yellow]Could not read {escape(label)}: {escape(reason)}[/yellow]")
     if best is not None and best.candidate.quantize:
+        from ocq.recommend import make_command
+
         console.print(f"[dim]Make it: {escape(make_command(best.candidate))}[/dim]")
 
 
@@ -734,7 +918,11 @@ def print_pick(best) -> None:
     lines += [f"[yellow]! {escape(warning)}[/yellow]" for warning in best.warnings]
     lines.append(f"\nConfidence: [{CONFIDENCE_COLORS[level]}]{level}[/]")
     for evidence in best.confidence.evidence:
-        mark = "[green]✓[/green]" if evidence.known else "[dim]✗[/dim]"
+        mark = (
+            rich_status("\u2713", "+", "green")
+            if evidence.known
+            else rich_status("\u2717", "x", "dim")
+        )
         lines.append(f"  {mark} [dim]{escape(evidence.text)}[/dim]")
     console.print(Panel("\n".join(lines), title="★ Recommended", title_align="left"))
 
@@ -764,24 +952,6 @@ def print_alternatives(result, limit: int) -> None:
     console.print(table)
 
 
-def make_command(candidate) -> str:
-    """The ocq optimize command that makes a recommended file."""
-    option = candidate.option
-    parts = ["ocq optimize", candidate.model_ref]
-    if option.row_kind == "gguf":
-        parts += ["-b gguf", f"--gguf-type {option.label}"]
-    else:
-        parts.append(f"-b {option.row_kind}")
-        words = option.label.split()
-        bits = next((w.removesuffix("-bit") for w in words if w.endswith("-bit")), "")
-        if bits and option.row_kind != "nvfp4":
-            parts[-1] += f" --bits {bits}"
-        if option.label.endswith((" double", " single")):
-            parts.append(f"--{option.label.split()[-1]}-quant")
-    parts += [f"--context {candidate.context}", f"--kv-cache {candidate.kv_cache}", "--execute"]
-    return " ".join(parts)
-
-
 @app.command("feasibility")
 def cmd_feasibility(
     model: ModelArg = None,
@@ -789,9 +959,15 @@ def cmd_feasibility(
     context: Context = DEFAULT_CONTEXT,
     kv_cache: KvCache = "f16",
     llmfit_bin: LlmfitBin = None,
+    as_json: JsonOut = False,
 ) -> None:
     """Show whether a model can run on this PC at each quantization level."""
     ref = model_ref(model, model_path)
+    if as_json:
+        from ocq import api
+
+        cache = read_kv_cache(kv_cache)
+        return emit_json(lambda: api.feasibility(ref, context, cache, llmfit_bin=llmfit_bin))
     try:
         hw = detect_hardware(llmfit_bin)
         kv_cache = read_kv_cache(kv_cache)
@@ -931,14 +1107,14 @@ def backend_cell(option, hardware) -> str:
         return "original"
     if option.row_kind == "gguf":
         ready, _ = get_quantizer(QuantAlgorithm.GGUF).check(hardware)
-        return "gguf" if ready else "gguf [dim](install --extra gguf)[/dim]"
+        return "gguf" if ready else "gguf [dim](not installed: ocq backends)[/dim]"
     try:
         algorithm = QuantAlgorithm(option.row_kind)
     except ValueError:
         return option.row_kind
     ready, _ = get_quantizer(algorithm).check(hardware)
     name = algorithm.value
-    return name if ready else f"{name} [dim](install --extra {name})[/dim]"
+    return name if ready else f"{name} [dim](not installed: ocq backends)[/dim]"
 
 
 def mode_label(run_mode) -> str:
@@ -1078,13 +1254,13 @@ def print_plan(plan: OptimizationPlan) -> None:
     if plan.warnings:
         console.print("\n[yellow]Warnings:[/yellow]")
         for warning in plan.warnings:
-            console.print(f"  ! {warning}")
+            console.print(f"  ! {escape(warning)}")
 
 
 def print_result(result: OptimizeResult) -> None:
     quantization = result.quantization
     color = "green" if quantization.success else "red"
-    console.print(f"\n[{color}]Quantization:[/{color}] {quantization.message}")
+    console.print(f"\n[{color}]Quantization:[/{color}] {escape(quantization.message)}")
     predicted = result.plan.predicted
     if quantization.success and predicted:
         console.print(

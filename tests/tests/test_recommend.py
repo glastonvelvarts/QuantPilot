@@ -63,7 +63,7 @@ from ocq.recommend import (
     recommend,
     refit,
 )
-from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM, Fact, FactKind, FitLevel, OcqError
+from ocq.types import LLAMA_CPP, TRANSFORMERS, VLLM, Fact, FactKind, FitLevel
 
 
 def test_workloads_rank_on_distinct_objectives():
@@ -106,25 +106,6 @@ def ollama_pc(tmp_path, monkeypatch):
     root = tmp_path / "ollama"
     smollm2_store(root)
     monkeypatch.setenv("OLLAMA_MODELS", str(root))
-
-
-@pytest.fixture
-def saved_hub(monkeypatch):
-    """The Hub, answered from data/: saved repos only, anything else is not found."""
-
-    def model(repo):
-        try:
-            return real_model(repo)
-        except FileNotFoundError:
-            raise OcqError(f"Model {repo!r} was not found on HuggingFace.") from None
-
-    monkeypatch.setattr(model_analyzer, "fetch_hf_model", lambda repo: model(repo)[0])
-    monkeypatch.setattr(model_analyzer, "fetch_model_files", lambda repo, sha: model(repo)[1:])
-
-    def no_llmfit(*args):
-        raise AssertionError("the engine must not ask llmfit")
-
-    monkeypatch.setattr(model_analyzer, "catalog_entry", no_llmfit)
 
 
 def test_models_on_this_pc_come_first_then_the_catalog(ollama_pc):
