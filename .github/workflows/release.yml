@@ -1,0 +1,76 @@
+name: release
+
+# Push a tag v<version> (the version in pyproject.toml) to publish that version on PyPI and as a
+# GitHub release. PyPI trusts this workflow (trusted publishing): no token is stored anywhere.
+# Setting it up once is in CONTRIBUTING.md.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: The tag is the package's version
+        run: |
+          version="$(uv version --short)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "The tag is $GITHUB_REF_NAME but pyproject.toml says $version." >&2
+            exit 1
+          fi
+      - name: The changelog has this version
+        run: grep -q "^## \[$(uv version --short)\]" CHANGELOG.md
+      - run: uv sync --group dev
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+      - name: Build the source package, then the wheel from it
+        run: uv build
+      - name: It installs and starts
+        run: |
+          uv tool install dist/*.whl
+          "$(uv tool dir --bin)/quantpilot" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/quantpilot/
+    permissions:
+      id-token: write # PyPI's trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: astral-sh/setup-uv@v5
+      - run: uv publish --trusted-publishing always dist/*
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: The release, with this version's changelog as its notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --title "QuantPilot $version" --notes-file notes.md

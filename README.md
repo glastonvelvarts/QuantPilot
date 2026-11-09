@@ -1,563 +1,115 @@
 <p align="center">
-  <img src="assets/banner.png" alt="QuantPilot — One-Click Quantizer" width="100%" />
+  <img src="https://raw.githubusercontent.com/glastonvelvarts/QuantPilot/main/assets/banner.png" alt="QuantPilot: which model, format and runtime to run on your PC" width="100%">
 </p>
 
-# QuantPilot (OCQ)
+<p align="center">
+  <a href="https://github.com/glastonvelvarts/QuantPilot/actions/workflows/test.yml"><img src="https://github.com/glastonvelvarts/QuantPilot/actions/workflows/test.yml/badge.svg" alt="tests"></a>
+  <a href="https://pypi.org/project/quantpilot/"><img src="https://img.shields.io/pypi/v/quantpilot" alt="PyPI"></a>
+  <img src="https://img.shields.io/badge/python-3.10%20to%203.13-blue" alt="Python 3.10 to 3.13">
+  <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Linux, macOS, Windows">
+  <a href="https://github.com/glastonvelvarts/QuantPilot/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license"></a>
+</p>
 
-**One command line tool to answer:** *Will this model run on my PC? How should I quantize it? Did the quant job actually work?*
+**QuantPilot** tells you which local LLM to run on your PC, in which format and runtime, and why. It sizes every option from the model's own files, checks it against your free memory, ranks the options for the kind of work you do, and measures speed and quality on your machine instead of guessing. Then it makes the file for you.
 
-You give QuantPilot either:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/glastonvelvarts/QuantPilot/main/assets/demo.gif" alt="Checking a model, then benchmarking its speed and quality in the app" width="100%">
+</p>
 
-- a **Hugging Face model id** (`Qwen/Qwen2.5-7B-Instruct`), or  
-- a **folder on disk** with your own fine-tuned weights (Unsloth, Axolotl, PyTorch Trainer, TRL, etc.)
-
-It inspects **your hardware**, estimates **memory and speed** from the model’s real **`config.json` + safetensors shapes**, picks or accepts a **quantization backend**, runs the job, **validates** the output, and **benchmarks** it.
-
-Every fact about the model is read from its files and labelled with **where it came from** and **how sure it is**. Nothing is guessed from the model’s name.
-
-Install the CLI as **`ocq`**.
-
----
-
-## What you get in one run
-
-```
-Your PC + model  →  feasibility table  →  plan  →  quantize  →  validate  →  benchmark
-```
-
-| Step | Command | What it does |
-|------|---------|----------------|
-| 1 | `ocq profile` | CPU, RAM, GPU, bandwidth, free disk |
-| | `ocq models` | The models already on this PC: Ollama, LM Studio, Hugging Face cache, your folders |
-| 2 | `ocq backends` | Which backends are installed on this machine |
-| 3 | `ocq inspect <model>` | What QuantPilot knows about the model: every fact, its source, how sure it is |
-| 4 | `ocq feasibility <model>` | Table: original weights + GGUF + AWQ + GPTQ + BNB (+ NVFP4 on NVIDIA) — fit and speed |
-| 5 | `ocq plan <model>` | What would run (dry run, no download) |
-| 6 | `ocq optimize <model> --execute` | Quantize, check artifact, measure tok/s and time-to-first-token |
-
-`optimize` defaults to **dry run**. Add **`--execute`** to really quantize.
-
-### The full-screen app
-
-Run **`ocq`** with no command (or **`ocq tui`**) for the app: arrow keys and Enter, no flags to remember.
-
-- **Check a model**: type or browse to a model, pick the kind of work, and QuantPilot recommends the format, runtime and cache type for this PC, says why and how sure it is, and compares every other format with the reason it lost.
-- **Quantize**: review what will be made, then start it, with progress and the result in one place.
-- **Discover** ranks the best option of each model for the kind of work: the ones on this PC and popular ones to download; **My models** lists the ones already downloaded (Ollama, LM Studio, Hugging Face).
-- **Benchmark**: measure a model on this PC (a GGUF file, an Ollama model): its writing and reading speed and time to the first token, against what QuantPilot expected, and with **Speed and quality** its perplexity and how much of the original's quality it keeps. Below, this PC's history of both. After a quantize, **Benchmark it** on the result does the same for the new file.
-- **Settings**: theme (including your terminal's own colors), default context and workload, extra model folders, simple borders for old consoles, and your **Hugging Face token** for gated models such as Llama and Gemma: paste a read token, QuantPilot checks it with Hugging Face, shows it masked, and keeps it in `.env` in its settings folder (readable by you only, never in the folder you run from). A token set in your shell (`HF_TOKEN`) wins over it, and the `ocq` commands use it too. Saved in `~/.config/ocq/tui.json` (Linux), `~/Library/Application Support/ocq/tui.json` (macOS) or `%LOCALAPPDATA%\ocq\tui.json` (Windows).
-- **?** shows the keys, **Ctrl+P** jumps anywhere, **q** quits.
-
-The banner uses plain ASCII only, so it looks the same on Windows, macOS and Linux. Piped or in scripts, `ocq` prints the help and every command works as before.
-
----
+- **Recommends** the model, format (GGUF, AWQ, GPTQ, bitsandbytes, NVFP4), runtime (llama.cpp, vLLM, transformers) and context cache for chat, coding, RAG, agents, reasoning, long context, low latency or throughput, with the reasons and how sure it is.
+- **Sizes exactly**: weights and context memory from `config.json` and the tensor headers (no download of the weights), checked against llama.cpp's own memory numbers on NVIDIA, Apple Silicon and CPU.
+- **Measures**: speed and time to the first token with llama.cpp's benchmark, and quality as perplexity on WikiText-2, compared with the original model. Every result is kept, and the recommendations learn from it.
+- **Quantizes**: one command (or one button) from a Hugging Face model or your own fine-tune to a checked, benchmarked file.
 
 ## Install
 
-You need [uv](https://docs.astral.sh/uv/) and Python 3.10+.
+QuantPilot runs with [uv](https://docs.astral.sh/uv/getting-started/installation/) on Linux, macOS and Windows, Python 3.10 or newer.
 
 ```sh
-cd quantPilot
-uv sync --group dev
+uv tool install quantpilot          # the ocq and quantpilot commands
+uvx quantpilot                      # or try it without installing
 ```
 
-| What you want | Install |
-|---------------|---------|
-| Look up fit / plan only (no quant) | `uv sync --group dev` |
-| Quantize to **GGUF** (llama.cpp / Ollama) | `uv sync --group dev --extra gguf` |
-| Quantize to **AWQ** | `uv sync --group dev --extra awq` |
-| Quantize to **GPTQ** | `uv sync --group dev --extra gptq` |
-| Quantize to **bitsandbytes** | `uv sync --group dev --extra bnb` |
-| Quantize to **NVFP4** | `uv sync --group dev --extra nvfp4` |
-| Everything | `uv sync --group dev --all-extras` |
-
-Extras pull in **PyTorch** (large download). On **Windows**, CUDA PyTorch is used when you have an NVIDIA GPU.
-
-**Tips**
-
-- Project on OneDrive? Put the venv elsewhere:  
-  ` $env:UV_PROJECT_ENVIRONMENT = "$HOME\.venvs\quantpilot" ` (PowerShell)
-- **Linux + GGUF:** llama.cpp's Linux builds need the OpenMP runtime: `sudo apt install libgomp1` (Fedora `libgomp`, Arch `gcc-libs`). Minimal installs (servers, containers, a fresh WSL) leave it out; QuantPilot then says which library is missing.
-
-**2-minute smoke test (Hub model, GGUF):**
+Each quantization format is an extra, installed when you want it (they bring PyTorch, a large download):
 
 ```sh
-uv sync --group dev --extra gguf
-uv run ocq optimize HuggingFaceTB/SmolLM2-135M-Instruct -b gguf --gguf-type Q4_K_M --execute
+uv tool install "quantpilot[gguf]"                              # GGUF: any PC
+uv tool install "quantpilot[gguf,awq,bnb]" --torch-backend auto # NVIDIA: PyTorch for your driver
 ```
 
----
+| Extra | Makes | Needs |
+|---|---|---|
+| `gguf` | GGUF for llama.cpp, Ollama, LM Studio (2 to 8 bit) | any PC; llama.cpp is downloaded on first use |
+| `awq`, `gptq` | AWQ and GPTQ for vLLM | an NVIDIA GPU, Linux or WSL2 |
+| `bnb` | bitsandbytes 4 and 8 bit for transformers | an NVIDIA GPU |
+| `nvfp4` | NVFP4 for vLLM | an NVIDIA GPU (Blackwell computes it in FP4) |
 
-## Path A — Hugging Face model
+`ocq doctor` then says what is ready on your PC and gives the command for anything that is not. The app's **This PC** page installs the extras with a button. With pip: `pip install "quantpilot[gguf]"`. From the source: `git clone https://github.com/glastonvelvarts/QuantPilot && cd QuantPilot && uv sync --extra gguf`, then `uv run ocq`.
+
+## Quick start
 
 ```sh
-# What is this model? (reads config.json and safetensors headers, no weights)
-uv run ocq inspect Qwen/Qwen2.5-7B-Instruct
-
-# Will it fit? (downloads metadata only, not full weights)
-uv run ocq feasibility Qwen/Qwen2.5-7B-Instruct
-
-# Pick backend yourself
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b gguf --gguf-type Q4_K_M --execute
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b awq --execute
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b gptq --bits 4 --execute
-uv run ocq optimize Qwen/Qwen2.5-0.5B-Instruct -b bnb --bits 4 --execute
+ocq                                   # the full-screen app: arrow keys and Enter
+ocq doctor                            # is everything ready on this PC?
+ocq recommend --workload coding       # which model and format to run, and why
+ocq feasibility Qwen/Qwen3-8B         # every format of one model on this PC
+ocq optimize Qwen/Qwen3-8B -b gguf --gguf-type Q4_K_M --execute
+ocq bench ocq-output/Qwen--Qwen3-8B/artifact/Qwen--Qwen3-8B-Q4_K_M.gguf --quality
 ```
 
-Gated models (Llama, Gemma, …): set **`HF_TOKEN`** or **`HUGGING_FACE_HUB_TOKEN`**.
+A model is a Hugging Face id, a folder of your own fine-tune (saved with `save_pretrained`), a `.gguf` file, or an Ollama model (`ollama:qwen3:8b`). `ocq models` lists the ones already on your PC: Ollama, LM Studio, the Hugging Face cache, your folders.
 
-**GGUF files work too**, from a repo that only has GGUFs or from disk. QuantPilot reads one file's header (with range requests, not the weights) and lists **one row per file** in `feasibility`, so you see which one fits:
+## The app
 
-```sh
-uv run ocq feasibility unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF
-uv run ocq inspect ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf     # a file, or a folder of GGUFs
-```
+Run `ocq` for the full-screen app. **Check a model** gives the pick with its reasons and confidence, and every format's memory, speed and quality side by side. **Quantize** makes it with live progress. **Benchmark** measures any model on the PC and keeps the history. **Discover** ranks models for a kind of work, **Settings** keeps a Hugging Face token for gated models.
 
-The tensor table is checked against the file size, and the context memory computed from a GGUF header matches llama.cpp's own log (Gemma 2/3, LFM2, Granite 4.0-H, Falcon-H1, Jamba).
+<p align="center">
+  <img src="https://raw.githubusercontent.com/glastonvelvarts/QuantPilot/main/assets/check.png" alt="Check a model: the pick, its confidence, memory and speed of every format" width="49%">
+  <img src="https://raw.githubusercontent.com/glastonvelvarts/QuantPilot/main/assets/benchmark.png" alt="Benchmark: speed, time to the first token and quality, measured against what was expected" width="49%">
+</p>
 
-**Already-quantized repos** (GPTQ, AWQ, bitsandbytes, FP8, W8A8, NVFP4, MXFP4, MLX) are recognised. `feasibility` shows them as stored, and `plan` / `optimize` refuse to quantize them again, since that would stack the rounding errors. They point you to the original instead:
+## How it decides
 
-```
-Error: Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int4 is already quantized (GPTQ 4-bit). Quantizing it
-again would stack the rounding errors; quantize the original instead: ocq optimize
-Qwen/Qwen2.5-1.5B-Instruct
-```
+| | Until measured | Once measured on your PC |
+|---|---|---|
+| **Memory** | Weights and context from the model's files, as each runtime allocates them (llama.cpp, vLLM, transformers), against your free VRAM and RAM | `ocq verify` compares it with llama.cpp's own numbers |
+| **Speed** | The upper bound your memory bandwidth allows | Learnt from your runs: every quantize and benchmark adds one |
+| **Time to first token** | Not known: said so | Learnt from your runs, by model size |
+| **Quality** | llama.cpp's published loss of each format | Perplexity on WikiText-2 against the original model |
 
-**MLX models** (mlx-community, LM Studio's MLX downloads) are read from MLX's own `quantization` settings, including layers it stored at another bit width (for example the 8-bit layers of `gpt-oss-20b-MXFP4-Q8`, whose count then matches the original gpt-oss to the weight). MLX runs only on Apple Silicon Macs (mlx-lm, LM Studio); on any other PC `feasibility` says so.
+Options that cannot run here are ruled out with the reason. The rest are ranked by the workload's priorities in order (coding: quality, then context, then speed), never by one blended score. Each pick says why it won, what the next options would give and cost, and how sure it is (Low to Very High) with the evidence.
 
-### Recommendations
+## Formats and where they run
 
-`ocq recommend` chooses the model, format, runtime and cache type for a kind of work (`--workload chat`, `coding`, `rag`, `agentic`, `reasoning`, `long-context`, `low-latency` or `throughput`), from the models on this PC and a list of popular ones (or only the ones you name):
+| Format | Runs with | Good for |
+|---|---|---|
+| **GGUF** (Q2_K to Q8_0) | llama.cpp, Ollama, LM Studio | any PC: CPU, Apple Silicon, NVIDIA, Windows; mixture-of-experts models with experts in RAM |
+| **AWQ**, **GPTQ** | vLLM, transformers | serving on an NVIDIA GPU (Linux or WSL2) |
+| **bitsandbytes** | transformers | a quick 4 or 8 bit load on an NVIDIA GPU |
+| **NVFP4** | vLLM | NVIDIA Blackwell (RTX 50xx, B200, GB10) |
+| **MLX** (read, not made) | mlx-lm, LM Studio | Apple Silicon |
 
-```
-ocq recommend --workload coding
-ocq recommend Qwen/Qwen3.5-9B Qwen/Qwen3.5-4B -w rag --context 65536 --why openai/gpt-oss-20b
-```
+Checked against llama.cpp's own numbers on Windows 11 with an RTX 4060 Laptop, Linux (WSL2) with NVIDIA and CPU only, and macOS on Apple Silicon, with GPU and CPU only.
 
-1. Every model x format x runtime x cache type becomes a candidate, sized as `feasibility` sizes it.
-2. Candidates that cannot run here are ruled out, each with its reason: memory, runtime (vLLM needs an NVIDIA GPU on Linux or WSL2), context longer than the model holds, an architecture llama.cpp cannot convert yet, quantizing (AWQ needs an NVIDIA GPU), disk.
-3. The rest are ranked by the workload's priorities in order, never by one blended score: Coding asks for quality, then context, then speed. A later priority only chooses between options as good as the best on the earlier ones. Options slower than reading speed, using most of the free memory, or keeping less than half the model's quality come last.
-4. The pick says why it won, what the next options would give and cost, and how sure it is (Low to Very High) with the evidence: what was read from the files, what was measured on this PC, what is estimated.
+## Commands
 
-Quality is an estimate until it is measured: each GGUF type's loss is llama.cpp's own measurement on Llama-3-8B, valued in parameters with llama.cpp's LLaMA 7B and 13B perplexities; AWQ, GPTQ and NVFP4 count as Q4_K_S, bitsandbytes and MLX 4-bit as Q4_0. Speed is the memory-bandwidth limit until runs on this PC teach the real figure; runs of the same setup raise the confidence.
-
-**Low Latency** ranks by the time to the first token after a 512 token prompt: reading the prompt, then writing one token. Reading a prompt is limited by computing, not memory speed, so its time grows with the parameters each token uses (a mixture of experts counts only its active ones). QuantPilot learns it from this PC's runs placed the same way (all on the GPU, on the CPU, ...): a line through two model sizes or more, else in proportion to the one measured. Every quantize and `ocq bench` adds a run. Until one exists, the pick says the time is not known and its confidence is Low.
-
----
-
-## Path B — Your own model (fine-tune on disk)
-
-Use this when you trained or merged a model locally and **did not** upload it to the Hub.
-
-### 1. Export a full checkpoint folder
-
-OCQ needs a standard **Hugging Face `save_pretrained` layout**, not LoRA adapters alone.
-
-| You trained with | Save like this |
-|------------------|----------------|
-| **Unsloth** | `model.save_pretrained_merged("my-model", tokenizer, save_method="safetensors")` |
-| **Axolotl** | Merged weights in `output_dir`, or `model.save_pretrained(path, safe_serialization=True)` |
-| **PyTorch / HF Trainer / TRL** | `model.save_pretrained("./my-model", safe_serialization=True)` + save tokenizer |
-
-**Folder must contain:**
-
-| File | Why |
-|------|-----|
-| `config.json` | Layers, heads, context — used for KV cache size |
-| `*.safetensors` | Weight shapes and dtypes (headers only for sizing; full files for quant) |
-| Tokenizer files | Required for conversion and benchmarks |
-
-**Not supported:** adapter-only LoRA folders, `.bin`-only weights (re-save with `safe_serialization=True`).
-
-### 2. Run the same commands as Hub — but pass the folder
-
-```sh
-# Path as argument
-uv run ocq feasibility ./my-model
-uv run ocq plan ./my-model -b gguf --gguf-type Q4_K_M
-
-# Or explicit flag (easier on Windows)
-uv run ocq feasibility -m C:\Users\you\models\my-model
-uv run ocq optimize -m C:\Users\you\models\my-model -b gguf --gguf-type Q4_K_M --execute
-```
-
-**Any backend works** on a local folder — same as Hub:
-
-```sh
-uv run ocq optimize ./my-model -b awq --execute
-uv run ocq optimize ./my-model -b gptq --bits 4 --execute
-uv run ocq optimize ./my-model -b bnb --bits 4 --execute
-uv run ocq optimize ./my-model -b gguf --gguf-type Q4_K_M --execute
-```
-
-Nothing is uploaded. **`feasibility`** reads **your** safetensors + config and shows one row per format (original, each GGUF level, AWQ, GPTQ, BNB).
-
----
-
-## Choosing a backend
-
-| Backend | `-b` | Bits | Best for | Runs with |
-|---------|------|------|----------|-----------|
-| **GGUF** | `gguf` | 2–8 (`--gguf-type`) | CPU, Windows, Ollama, llama.cpp | Ollama, LM Studio, llama.cpp |
-| **AWQ** | `awq` | 4 | NVIDIA GPU serving | vLLM, transformers |
-| **GPTQ** | `gptq` | 4, 8 | NVIDIA GPU (CPU calib = slow) | vLLM, transformers |
-| **BNB** | `bnb` | 4 (default), 8 | Quick 4/8-bit HF load | transformers |
-| **NVFP4** | `nvfp4` | 4 | NVIDIA Blackwell GPUs (RTX 50xx, B200, GB10…) | vLLM |
-
-**Auto-pick** (when you omit `-b`):
-
-- **Linux + NVIDIA Blackwell + enough RAM** for calibration → NVFP4 (4-bit)  
-- **Linux + other NVIDIA + enough RAM** for calibration → AWQ or GPTQ  
-- **Everything else** (including **Windows + NVIDIA**) → GGUF. vLLM, which serves AWQ, GPTQ and NVFP4, does not run natively on Windows; in WSL2 QuantPilot sees Linux. Forcing `-b awq` on Windows gives a warning.  
-
-GGUF downloads **llama.cpp** automatically on first use (`~/.cache/ocq/llama.cpp`). Conversion uses the checkpoint’s real dtype (**f32 / bf16 / f16**), then quantizes.
-
----
-
-## Reading `inspect`
-
-`inspect` prints what QuantPilot knows about a model before it sizes anything:
-
-```
-Parameters      cross-checked  1,543,714,304
-                               from safetensors headers + HF API + base model
-                               926 tensors, packed weights unpacked, scales left out
-                               (409,317,376 stored values); matches HF API total; matches base
-                               model Qwen/Qwen2.5-1.5B-Instruct
-Stored bytes    exact          1,149,760,512
-                               from safetensors headers
-Quantization    cross-checked  GPTQ 4-bit
-                               from config.json quantization_config + tensor names
-```
-
-| Kind | Meaning |
-|------|---------|
-| **exact** | Read from one of the model's files |
-| **cross-checked** | Read from two sources that agree (for example the tensor headers and the Hugging Face API) |
-| **estimate** | Worked out by QuantPilot, or the sources disagree (the note says how) |
-| **unknown** | Not in the files. QuantPilot says so instead of guessing |
-
-The facts: parameter count, precision, stored size, architecture, context length, context memory per token, **weights used per token** (less than all of them for mixture-of-experts models) and whether the model is already quantized.
-
-For quantized repos the Hugging Face API count can be wrong (it counts bitsandbytes scales as weights and does not unpack NVFP4), so the count is also checked against the **base model** the repo names. A model with no readable count gets **no fit verdict**, instead of a guess.
-
----
-
-## Reading `feasibility`
-
-The table has one row per **format**, not just GGUF:
-
-1. **Original** — model as saved (F32 / BF16 / F16 from safetensors)  
-2. **GGUF** — Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q3_K_M, Q2_K  
-3. **AWQ / GPTQ / BNB** — packed size from the same tensor list, scales included. BNB 4-bit gets two rows, **single** and **double** quantization (see below)  
-4. **NVFP4** — only shown when the PC has an NVIDIA GPU  
-
-Columns: weight GB, context GB (from `--context`, default 4096, and `--kv-cache`), total need, **fit**, **runs on** (`gpu`, `2 gpus`, `gpu+ram`, `gpu+ram (experts)`, `cpu`, `unfit`), **tok/s**.
-
-An already-quantized repo gets a single row, the files as stored.
-
-**Speed symbols**
-
-| Symbol | Meaning |
-|--------|---------|
-| `~ N` | Expected speed from **past GGUF benchmarks on this PC** |
-| `<= N` | Theoretical max from memory bandwidth (common for AWQ/GPTQ/BNB rows) |
-
-After **`optimize --execute`**, you get **measured** tok/s and time-to-first-token in the terminal.
-
-**Exact vs estimated:** If OCQ can read safetensors headers and `config.json`, sizes are **exact**. Without the headers it falls back to the parameter count from the Hugging Face API and labels the sizes **estimated**. When the context memory cannot be worked out (neither `config.json` nor the tensor names show the attention layout), the Context column shows **`?`** and no row is rated better than **Marginal**.
-
----
-
-## Useful options (`plan` and `optimize`)
-
-| Option | Purpose |
-|--------|---------|
-| `-g`, `--goal` | `balanced` (default), `speed`, `quality`, `memory` |
-| `-b`, `--backend` | `gguf`, `awq`, `gptq`, `bnb`, `nvfp4` |
-| `--bits` | 4 or 8 where the backend allows |
-| `--gguf-type` | e.g. `Q4_K_M`, `Q5_K_M`, `Q8_0` (full list in `ocq plan --help`) |
-| `-m`, `--model-path` | Local folder instead of Hub id |
-| `-c`, `--context` | Context length for KV cache math and GGUF bench (default 4096). Also on `feasibility` |
-| `--kv-cache` | Context cache type: `f16` (default), `q8_0`, `q4_0`. See [Context memory](#context-memory-and---kv-cache). Also on `feasibility` |
-| `-o`, `--output` | Output dir (default `./ocq-output/<model>`) |
-| `--samples`, `--seq-len` | AWQ/GPTQ calibration size |
-| `--double-quant` / `--single-quant` | BNB 4-bit: quantize the scales too, or not (default: double, single for `--goal speed`). Implies `-b bnb --bits 4` |
-| `--fp4-activations` / `--fp4-weights-only` | NVFP4: FP4 activations too, or weights only (default: activations on Blackwell). Implies `-b nvfp4` |
-| `--dry-run` / `--execute` | Plan only vs run quant (default: dry run) |
-
----
-
-## Double quantization
-
-Quantized weights need **scales** to turn the small integers back into real numbers, and those scales take memory too. *Double quantization* quantizes the scales themselves.
-
-| Format | Scales | Extra bits per weight |
-|--------|--------|-----------------------|
-| **BNB 4-bit single** | one 32-bit scale per 64 weights | 0.5 |
-| **BNB 4-bit double** | 8-bit scale per 64 weights, one 32-bit scale per 256 of those | ~0.127 |
-| **GGUF K-quants** (Q2_K–Q6_K) | built in: 16-bit scale per 256 weights, sub-block scales in 4–8 bits | always on |
-| **GGUF Q4_0 / Q5_0 / Q8_0** | one 16-bit scale per 32 weights | 0.5 |
-| **NVFP4** | 8-bit (FP8) scale per 16 weights, one 32-bit scale per tensor | always on (~0.5) |
-| **AWQ / GPTQ** | one 16-bit scale (+ zero point) per group, 128 by default | not available |
-| **BNB 8-bit** | one 32-bit scale per row | not available (already ~0) |
-
-Double quantization saves about **0.37 bits per weight**: roughly 300 MB on a 7B model, about 3 GB on a 70B model, with almost no quality loss. The cost is a slightly slower unpack. Only **bitsandbytes 4-bit** makes it a choice:
-
-```sh
-uv run ocq optimize ./my-model -b bnb --bits 4 --execute   # double (default)
-uv run ocq optimize ./my-model --single-quant --execute    # single
-```
-
-`plan` tells you how much it saves on your model. Sizes are checked against real bitsandbytes 0.50 artifacts.
-
----
-
-## NVFP4 and your GPU
-
-NVFP4 stores weights as 4-bit floats with two levels of scales. QuantPilot reads your GPU's compute capability from `nvidia-smi` (or its name, on old drivers) and adapts:
-
-| Your GPU | What you get |
-|----------|--------------|
-| **Blackwell** (compute capability 10+: RTX 50xx, RTX PRO Blackwell, B200, GB10…) | Picked automatically for 4-bit on Linux. Weights **and activations** in FP4, so the FP4 tensor cores do the math. Calibrated. |
-| **Other NVIDIA** (H100, RTX 40xx, …) | Available with `-b nvfp4`, weights only. vLLM runs it through its Marlin kernel at about AWQ speed, so AWQ stays the default. |
-| **No NVIDIA GPU** (Mac, CPU) | Row hidden in `feasibility`. `-b nvfp4` still quantizes (on the CPU, also on Apple Silicon), to serve on another machine. |
-
-Quantizing here to serve on a Blackwell server? Add `--fp4-activations`.
-
----
-
-## Context memory and `--kv-cache`
-
-Besides the weights, a model keeps a **key and a value for every token of context**, in every attention layer. QuantPilot reads how each layer does this from `config.json` and checks the total against the tensor shapes:
-
-| Layer kind | Models | What it keeps |
-|------------|--------|---------------|
-| **Full attention** | most models | every token |
-| **Sliding window** | Gemma 2/3, gpt-oss, Cohere2 | only the last *window* tokens (Gemma 3: 512) |
-| **Chunked** | Llama 4 | one 8,192-token chunk |
-| **MLA** | DeepSeek V2/V3, Kimi | one small compressed vector per token (transformers expands it to full keys and values) |
-| **No cache** | Mamba, linear-attention and convolution layers of hybrids (Granite 4.0-H, Nemotron-H, Jamba, LFM2, Qwen3-Next) | a fixed-size state per conversation (counted for Mamba and convolution layers, matching llama.cpp; not yet for linear attention) |
-
-Sliding-window sizes follow llama.cpp, checked against its own logs: a sliding layer keeps *window × conversations + 512* tokens. QuantPilot assumes **4 conversations**, `llama-server`'s default. A model with a window on every layer (Mistral 7B v0.1) is counted in full, as llama.cpp keeps it.
-
-**`--kv-cache`** stores the keys and values in fewer bits:
-
-| `--kv-cache` | llama.cpp (GGUF rows) | vLLM (AWQ, GPTQ, NVFP4 rows) | transformers (original, BNB rows) |
-|--------------|-----------------------|-------------------------------|-----------------------------------|
-| `f16` (default) | 16 bits | 16 bits | 16 bits |
-| `q8_0` | 8.5 bits, `-ctk q8_0 -ctv q8_0`, almost no quality loss | 8 bits, `--kv-cache-dtype fp8` (GPUs of compute capability 8.9+: RTX 40xx, H100, RTX 50xx; else 16 bits) | 16 bits |
-| `q4_0` | 4.5 bits, `-ctk q4_0 -ctv q4_0`, some quality loss | 8 bits (no 4-bit cache in vLLM) | 16 bits |
-
-```sh
-uv run ocq feasibility Qwen/Qwen2.5-32B-Instruct -c 32768 --kv-cache q8_0
-```
-
-A quantized V cache needs flash attention; llama.cpp turns it on by itself. The GGUF benchmark runs with the cache you chose, and `plan` prints the flags for your runtime. `inspect` shows the context memory per token and what it adds up to at 4,096 tokens and at the model's longest context.
-
----
-
-## How each runtime uses memory
-
-Each row of `feasibility` is run by one runtime (llama.cpp for GGUF, vLLM for AWQ, GPTQ and NVFP4, transformers for the original weights and bitsandbytes), and each budgets memory its own way:
-
-- **vLLM** takes a fixed share of each GPU's **total** memory (`--gpu-memory-utilization`: 0.92 since vLLM 0.20, 0.9 before; QuantPilot reads the default of the vLLM you have installed) and refuses to start when that much is not free, so a desktop using 2 GB of a 24 GB card already stops it. The weights, its working memory and the context must fit in that share: vLLM does not spill into RAM. Such a row says why it cannot run.
-
-## Several GPUs
-
-QuantPilot uses every GPU in the PC, the way the runtime that serves each format does:
-
-| Runtime | How it uses several GPUs | Memory | Speed limit |
-|---------|--------------------------|--------|-------------|
-| llama.cpp (GGUF), transformers (BNB, original) | whole layers on each card, the cards take turns | free VRAM adds up (RTX 3090 + 3060 = 35 GB) | a mix of the cards' speeds |
-| vLLM (AWQ, GPTQ, NVFP4) | tensor parallel: an equal slice of every layer on each card | N × the smallest card; N must divide the attention heads | N × one card |
-
-A model that fits on the fastest card alone stays there instead of being slowed down by a slower one. `plan` says how the GPUs are used, and gives `--tensor-parallel-size` for vLLM. Two identical cards are no longer counted as one.
-
----
-
-## Mixture-of-experts models
-
-Models like Qwen3-30B-A3B, Mixtral, DeepSeek and gpt-oss hold many **experts** per layer but run only a few for each token (Qwen3-30B-A3B: 8 of 128). All experts must fit in memory, but each token reads only about 10% of the weights, so the speed limit is set by the **weights used per token**. QuantPilot counts the experts from the tensor names, checks them against `config.json`, and matches the "active parameters" the model cards publish (3.3B for Qwen3-30B-A3B, 12.9B for Mixtral, 3.61B for gpt-oss-20b).
-
-**Too big for your VRAM?** On a PC with a separate GPU, a GGUF mixture of experts can keep the **experts of its first layers in RAM** and everything else (attention, the context) in VRAM: llama.cpp's `--n-cpu-moe N`. A token uses only a few experts, so little is read from the slow RAM. `feasibility` shows such rows as `gpu+ram (experts)`, `plan` gives the smallest `N` that fits, and the benchmark runs with it. Expert sizes match `llama-quantize` exactly (OLMoE, Granite MoE).
-
----
-
-## After `optimize --execute`
-
-```
-ocq-output/<model>/
-  artifact/          ← your quantized model (.gguf or HF folder)
-  workspace/         ← logs (convert, quantize, benchmark)
-  error.log          ← only if something failed
-```
-
-Validation checks: file exists, smaller than original, loads, generates readable text. Exit code **non-zero** if validation fails.
-
-- **GGUF** speed: **llama-bench**, the quick suite of the standard benchmark (a 512-token prompt read, 128 tokens written, 3 times each), with the `--kv-cache` you chose. Every run is saved to this PC's benchmark history.  
-- **AWQ/GPTQ/BNB/NVFP4** speed: **transformers** generate (sanity check, not vLLM deployment speed).
-
----
-
-## Models already on your PC: `ocq models`
-
-`models` lists what you have downloaded and how each one fits this PC **as it is on disk**, without loading anything or using the network:
-
-```sh
-uv run ocq models                    # Ollama, LM Studio, Hugging Face cache, llama.cpp cache
-uv run ocq models -c 32768           # the fit at another context size (--kv-cache too)
-uv run ocq models --dir ~/my-models  # also search your own folders (a few levels deep)
-uv run ocq models --all              # also partial downloads
-```
-
-```
-Model           Source              Format                Size     Fit      Runs on  tok/s   Use with ocq
-smollm2:135m    Ollama              GGUF F16              0.27 GB  Perfect  gpu      <= 253  ollama:smollm2:135m
-Qwen3-8B-GGUF/… LM Studio           GGUF Q4_K_M           5.03 GB  Good     gpu      <= 21   ~/.lmstudio/models/…
-org/name        Hugging Face cache  safetensors bfloat16  0.27 GB  Perfect  gpu      <= 253  org/name
-```
-
-Fit, runs on and tok/s mean the same as in `feasibility`, for the one format you have; `ocq feasibility <model>` shows the others. They are read from the local files (for a Hugging Face model, its snapshot folder, not the Hub). An MLX model on a PC that is not an Apple Silicon Mac says *needs a Mac*; a file QuantPilot cannot read gets `?` with the reason, and the rest of the list is still rated.
-
-The last column is what to pass to `inspect`, `feasibility` or `verify`, for example `ocq inspect ollama:smollm2:135m` (an Ollama model is a GGUF file under a hashed name; QuantPilot finds it from Ollama's manifest). Where it looks:
-
-| App | Folder | Moved with |
-|-----|--------|------------|
-| Ollama | `~/.ollama/models` (Linux service: `/usr/share/ollama/.ollama/models`) | `OLLAMA_MODELS` |
-| LM Studio | `~/.lmstudio/models` (older: `~/.cache/lm-studio/models`) | `~/.lmstudio-home-pointer`, *My Models → models directory* |
-| Hugging Face (and llama.cpp `-hf` downloads) | `~/.cache/huggingface/hub` | `HF_HUB_CACHE`, `HF_HOME`, `LLAMA_CACHE` |
-
-The quantization of a GGUF comes from its own header, not its file name. The Hugging Face cache often holds only `config.json` (QuantPilot and other tools fetch it to size a model without downloading it); those are hidden unless you pass `--all`. Newer Ollama versions can store a model for Apple's MLX instead of GGUF (one small safetensors file per tensor, the quantization in each file's metadata): `inspect` and `feasibility` read that too; `verify` and `optimize` need a GGUF.
-
----
-
-## Benchmark a model on your PC: `ocq bench`
-
-```
-ocq bench ./Qwen3-30B-A3B-Q4_K_M.gguf
-ocq bench ollama:qwen3:8b --kv-cache q8_0
-```
-
-Runs the standard benchmark on a GGUF model already on this PC (any name `ocq models` shows): llama-bench reads a 512 and a 4,096 token prompt and writes 128 tokens, 3 times each, with the model placed as QuantPilot plans it (all on the GPU, some layers on it, or the experts of some layers in RAM). It prints the writing speed next to what QuantPilot expected, the reading speed, and the time to the first token after a short and a long prompt:
-
-```
-llama.cpp b11429, all on the GPU, f16 cache
-  Writing        79.4 tok/s (± 1.0)  QuantPilot expected about 80
-  Reading        1,187 tok/s for 512 tokens, 1,138 tok/s for 4,096 tokens
-  First token    0.44 s after 512 tokens, 3.61 s after 4,096 tokens
-Saved to this PC's benchmark history (2 runs of this setup).
-```
-
-`--quality` also measures how good the model is: its perplexity on WikiText-2 (lower is better), the text llama.cpp's own quality numbers are measured on, the way llama-perplexity measures it (chunks of 512 tokens, each scored on its second half). By default the first 40 chunks (20,480 tokens: under a minute for a 1B model, a few minutes for a 7B one); `--full` takes the whole test text, comparable to published numbers but much longer. Every format of one model reads exactly the same tokens, so their perplexities compare much more closely than the ± suggests.
-
-```
-ocq bench ./Qwen3.5-0.8B-Q4_K_M.gguf --quality          # llama.cpp
-ocq bench Qwen/Qwen3.5-0.8B --quality                   # the original, in transformers
-ocq bench ./ocq-output/<model>/artifact/<awq folder> --quality   # AWQ, GPTQ, bitsandbytes (NVIDIA)
-```
-
-Models llama.cpp does not run (the original weights, AWQ, GPTQ, bitsandbytes, NVFP4) are measured in transformers with the same method: SmolLM2-135M scores 18.7853 there in BF16 and 18.7856 in llama.cpp as an f16 GGUF. The text (4.7 MB) is downloaded once and checked against llama.cpp's copy. Results are saved in `~/.cache/ocq/quality.json`, with where they ran: one file scores a little differently on a GPU and on a CPU (17.27 and 17.24).
-
-With `--quality`, a format is also compared with its reference, the model's original weights: `Q4_K_M keeps about 80% of the model's quality (perplexity 17.2720 vs 16.6079 for the original, BF16)`, in the same units as the estimate (perplexity valued in parameters with llama.cpp's LLaMA 7B and 13B numbers). When the original has not been measured yet and its weights are in the Hugging Face cache, QuantPilot measures it first, once: it converts it to a 16-bit GGUF (llama.cpp's perplexity matches transformers'), or to Q8_0 when 16 bits do not fit in memory, and deletes the files afterwards.
-
-`ocq recommend` and the app then use what was measured: a measured format's quality replaces the estimate (in the ranking, the reasons and the confidence), and the other formats of that model have their estimated losses scaled by how much more (or less) than Llama-3-8B the measured ones lost. Small models lose more: Qwen3.5-0.8B's Q4_K_M lost 1.4 times and its Q6_K 3.4 times what llama.cpp's table gives the 8B. A setup that ran on this PC is ranked by the speed it measured.
-
-Every run (here and after `optimize`) is saved in `~/.cache/ocq/measurements.json` with what ran (model, format, llama.cpp build, context, cache, placement) and where (this PC's CPU and RAM, and its GPU). Speed predictions and recommendations use only this PC's runs, and count a run for "this setup" only when it was placed the same way.
-
-## Check QuantPilot on your PC: `ocq verify`
-
-`verify` loads a local GGUF in llama.cpp once, reads llama.cpp's own memory numbers from its log, and puts them next to QuantPilot's prediction. It exits with an error when they differ beyond llama.cpp's rounding:
-
-```sh
-uv run ocq verify ./Qwen3-30B-A3B-Q4_K_M.gguf -c 16384 --kv-cache q8_0
-```
-
-```
-Memory                       QuantPilot   llama.cpp   Difference
-context cache (KV)               544.00      544.00        +0.00   ok
-weights on the GPU             2,410.10    2,410.10        +0.00   ok
-weights on the CPU (file range) 1,342.57   1,342.57        +0.00   ok
-```
-
-`verify` starts `llama-server`, the runtime QuantPilot plans for (4 conversations), waits until it has loaded the model, and stops it. The table also checks the **working memory** it reserved for one batch and its logits: QuantPilot's estimate must be at or above it. `--save-log FILE` keeps llama.cpp's whole log. On a separate GPU the weights are counted as CUDA allocates them: a quantized tensor whose rows are not a multiple of 512 values is padded (Gemma, gpt-oss: +0.02-0.04 MiB). Granite 3.x MoE with a quantized cache stops in llama.cpp b11429 (its cache rotation takes the graph over llama.cpp's node limit); `verify`, the benchmark and `feasibility` set or name `LLAMA_ATTN_ROT_DISABLE=1` for it.
-
-**On an NVIDIA PC**, these runs check the CUDA side (one small and one mixture-of-experts GGUF is enough):
-
-```sh
-uv run ocq verify ./model-Q4_K_M.gguf -c 4096  --save-log verify-4k.log
-uv run ocq verify ./model-Q4_K_M.gguf -c 32768 --save-log verify-32k.log
-uv run ocq verify ./Qwen3-30B-A3B-Q4_K_M.gguf -c 8192 --save-log verify-moe.log   # experts in RAM if it does not fit
-```
-
-By default it runs llama.cpp with QuantPilot's own plan for this PC (for a mixture of experts too big for the VRAM, the `--n-cpu-moe` it predicts), so that plan is what gets checked. On an Apple Silicon Mac it matched exactly for dense, sliding-window, mixture-of-experts, Mamba and convolution hybrids; running it on an NVIDIA PC checks the CUDA side.
-
-**Without a GPU** (or with `OCQ_CPU_ONLY=1`) every weight is in RAM. llama.cpp's CPU backend copies the weights of each matrix multiply into its own layout when it has kernels for the type on this CPU (Q4_0, Q4_K, IQ4_NL and MXFP4 with AVX2, Q2_K with AVX-512, more types on ARM), so `verify` shows two rows: the file range mapped from disk, and the repacked copy (LFM2-350M Q4_0 on a Ryzen: 204.62 + 154.12 MiB). A model without its own output layer uses the embedding table for it, and llama.cpp loads that table a second time for the output; when the CPU can repack its type (Q6_K on Arm), that copy is repacked too (the same file on an M1: 204.62 + 206.62 MiB). The pages of the repacked tensors are read once and then left to the OS, so the RAM a model needs stays about its file size, plus that second embedding table when it is repacked.
-
----
-
-## Platforms
-
-QuantPilot picks llama.cpp's official build for the PC (`win-cuda`, `win-cpu`, `macos`, `linux-cuda`, `linux-cpu`, pinned to b11429) and downloads it on first use. `ocq verify` has been run against llama.cpp's own numbers on:
-
-| Platform | Checked |
+| Command | |
 |---|---|
-| Windows 11 + NVIDIA (RTX 4060 Laptop, CUDA build) | 9 GGUFs × 4 settings, layer split, experts in RAM, vLLM in WSL2 |
-| Windows 11, CPU only (`OCQ_CPU_ONLY=1`, CPU build) | 3 GGUFs |
-| Linux + NVIDIA (Ubuntu in WSL2, CUDA build) | LFM2, vLLM 0.33 |
-| Linux, CPU only (Ubuntu in WSL2, CPU build) | 9 GGUFs at 4k and 16k `q8_0` |
-| macOS, Apple Silicon (M1, Metal) | dense, sliding-window, MoE, Mamba and convolution hybrids |
-| macOS, Apple Silicon, CPU only (M1, `OCQ_CPU_ONLY=1`) | LFM2 at 4k and 16k `q8_0` |
-
-Not run yet: native Linux (outside WSL) with NVIDIA, AMD and Intel GPUs, Intel Macs, several real GPUs.
-
-What differs between them:
-
-- **Windows (WDDM driver):** CUDA reports a fixed free figure, not what is left; see *Fit* below.
-- **NVIDIA:** attention keeps a 16-bit copy of one layer's keys and values with a quantized cache, and a GPU allocation is padded for some tensor widths.
-- **Mac:** the GPU and CPU share the memory; Metal always keeps the attention copy and a scratch buffer.
-- **CPU only:** weights repacked for the CPU's vector instructions (see `verify` above).
-- **Linux:** llama.cpp needs `libgomp1`. vLLM (AWQ, GPTQ, NVFP4) runs on Linux and WSL2 only.
-
----
-
-## How sizing works (short version)
-
-**Memory needed ≈ weights + context**
-
-- **Weights:** tensor names/shapes from safetensors (Hub metadata or local files). GGUF uses llama.cpp’s per-tensor rules; AWQ/GPTQ/BNB use packed linear-layer math plus their scales (single or double quantized for BNB 4-bit).  
-- **Context:** KV cache from `config.json` (layers, KV heads, head dim, and the layer kinds above) × `--context` at the `--kv-cache` type, cross-checked with the K and V projection shapes, plus the runtime's working memory. For llama.cpp that is `llama-server`'s: one row of logits per conversation, the attention mask, and up to 9 × the widest feed-forward layer × 512 tokens × 4 bytes (an upper bound of what 9 models reserved on an RTX 4060, at most 90 MiB over). Attention can also need a 16-bit copy of one layer's keys and values: on NVIDIA with a `q8_0` or `q4_0` cache, on NVIDIA when some layers' cache is in RAM, and on a Mac always. It can take more than the feed-forward layer (OLMoE at 32k reserves 308 MiB with `q8_0` against 112 MiB at `f16`), so QuantPilot counts the larger of the two; checked against 23 runs on an RTX 4060 and 7 on an M1. A layer that runs attention beside a Mamba block (Falcon-H1) keeps the copy while the rest of it works, so there the copy is added. Sliding-window layers get a second mask as long as their cache. An MLA model (DeepSeek, Kimi, GLM-4.7-Flash) keeps its compressed cache in llama.cpp only when the GGUF has `key_length_mla`; older conversions with one `attn_kv_b` tensor run as plain attention, with about 9× the cache, and are sized so.  
-- **Fit:** compared to **free VRAM and RAM right now**, not total installed memory, over every GPU the runtime would use. On an NVIDIA card QuantPilot reads two free figures. **CUDA's own** (from the driver, what a runtime sees once started) is what llama.cpp's `--fit` and vLLM's start-up check work from; without it, nvidia-smi's free memory less 0.55 GB. llama.cpp also keeps **1 GB free per GPU** by default (`--fit-target`) and moves layers to RAM to get it, and it keeps the input embedding table in RAM; QuantPilot plans the same. With `--n-cpu-moe` llama.cpp fits nothing itself, so the expert plan uses what is **really free**. On Linux that is CUDA's figure too. On Windows CUDA reports a fixed figure (7,106 MiB on an 8 GB RTX 4060 Laptop, whatever else runs) while nvidia-smi shows more, and a context really takes about 90 MiB, so the plan uses nvidia-smi's free memory less 90 MiB (gpt-oss: `--n-cpu-moe 9`, the fastest measured, instead of 11).  
-- **Speed:** memory bandwidth ÷ the bytes each token reads: the weights used per token (less for mixture-of-experts models, and only one row of the input embedding table).
-
-**Quantizing needs extra disk/RAM** beyond “running” the model (e.g. full weights on disk for GGUF convert, full model in RAM for AWQ/GPTQ calibration). `plan` warns about this.
-
-Details and hardware telemetry: see inline comments in `src/ocq/model_size.py` and `measurements.py`. Cache data lives under `~/.cache/ocq/`.
-
----
-
-## All commands
-
-| Command | Description |
-|---------|-------------|
-| `doctor` | Is QuantPilot ready on this PC (llama.cpp, tools, PyTorch, Hugging Face, disk), and the command that fixes what is not |
-| `profile` | This machine: CPU, RAM, GPU, bandwidth, disk |
-| `history` | This PC's saved benchmarks: speed runs and quality results |
-| `backends` | Installed quant backends and what’s missing |
-| `models` | The models already on this PC, how each fits, and the name to use for it |
-| `inspect` | Every fact about a model, its source and how sure it is |
-| `bench` | Run the standard benchmark on a model of this PC (speed; `--quality`: perplexity) and save it to its history |
-| `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
+| `ocq` | The full-screen app |
+| `doctor` | What is ready on this PC, and the command that fixes what is not |
 | `recommend` | Model, format, runtime and cache type for a kind of work, with reasons and confidence |
-| `feasibility` | Full format table for one model |
-| `plan` | Quant plan + warnings (no heavy work) |
-| `optimize` | Full pipeline; use `--execute` to quantize |
+| `models` | The models already on this PC and how each one fits |
+| `inspect` | Every fact about a model, where it came from and how sure it is |
+| `feasibility` | Every format of one model on this PC |
+| `plan`, `optimize` | What would be made, then `--execute` to make it, check it and benchmark it |
+| `bench` | Speed and time to the first token; `--quality`: perplexity and quality kept |
+| `verify` | Load a GGUF in llama.cpp once and compare its memory with QuantPilot's prediction |
+| `history` | This PC's saved benchmarks |
+| `profile`, `backends` | This PC's hardware, and the quantization tools installed |
 
----
+## For scripts and agents
 
-## Scripts and agents: `--json` and `ocq.api`
-
-`profile`, `inspect`, `feasibility`, `models`, `recommend`, `bench`, `history` and `doctor` take `--json`: stdout then holds only the result as JSON (progress goes to stderr), and a failure is `{"error": ...}` with exit code 1. The same data comes from Python:
+`recommend`, `bench`, `models`, `inspect`, `feasibility`, `profile`, `history` and `doctor` take `--json`, and Python gets the same data:
 
 ```python
 from ocq import api
@@ -566,47 +118,12 @@ pick = api.recommend(workload="coding")["best"]
 print(pick["model"]["id"], pick["format"]["label"], pick["quality"]["kept"])
 ```
 
-The shape is versioned (`schema_version`): within a version keys are only added, never renamed or removed. [docs/api.md](docs/api.md) lists every function and key.
+The shape is versioned and only grows within a version: see [docs/api.md](https://github.com/glastonvelvarts/QuantPilot/blob/main/docs/api.md).
 
-## Development
+## Learn more
 
-```sh
-make check                 # lint, format check and the fast tests (uv run pytest)
-uv run pytest -m slow      # real quantizations of SmolLM2-135M, each installed backend
-make test-gpu              # every backend for real, into one report in results/ (NVIDIA PC)
-```
+- [User guide](https://github.com/glastonvelvarts/QuantPilot/blob/main/docs/guide.md): every command and option, how memory, speed and quality are worked out, fine-tunes on disk, GPUs, mixture of experts, environment variables
+- [JSON and Python API](https://github.com/glastonvelvarts/QuantPilot/blob/main/docs/api.md)
+- [Contributing](https://github.com/glastonvelvarts/QuantPilot/blob/main/CONTRIBUTING.md) and [changelog](https://github.com/glastonvelvarts/QuantPilot/blob/main/CHANGELOG.md)
 
-The real tests make each format from SmolLM2-135M, check it, measure its speed and its quality against the original, and for GGUF compare llama.cpp's memory with QuantPilot's prediction (`ocq verify`). GitHub runs the fast suite on Linux, macOS and Windows with Python 3.10 and 3.13 on every push, checks that the package installs with `uv tool install` and `uvx`, and runs the GGUF real test on all three every night (CPU only). AWQ, GPTQ, NVFP4 and bitsandbytes need an NVIDIA GPU: `make test-gpu` on a PC with one installs every backend, runs them all and writes a report that says what passed and what could not run there.
-
-Size formulas are tested against real files: `tests/tests/data/` holds the `config.json`, safetensors headers (no weights) and Hugging Face counts of real repos, and expected values come from real artifacts and llama.cpp's own logs.
-
----
-
-## Environment variables
-
-| Variable | Use |
-|----------|-----|
-| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Gated Hub models |
-| `OCQ_LLMFIT_BIN` | Custom llmfit binary path |
-| `OCQ_LLAMA_CPP_BIN` | Your own `llama-quantize` / `llama-completion` / `llama-server` folder |
-| `OCQ_LLAMA_CPP` | Your own llama.cpp source with `convert_hf_to_gguf.py` |
-| `OCQ_CPU_ONLY=1` | Plan and run as on a PC without a GPU: no GPU rows, llama.cpp's CPU build, `--device none` |
-| `OLLAMA_MODELS`, `HF_HUB_CACHE`, `HF_HOME`, `LLAMA_CACHE` | Where `ocq models` looks, the same variables those apps use |
-
----
-
-## Project layout (for contributors)
-
-```
-src/ocq/
-  cli.py              Commands
-  hardware.py         PC detection (llmfit or built-in probe)
-  local_model.py      Local save_pretrained folders
-  model_analyzer.py   Feasibility tables, Hub + local resolve
-  model_size.py       Weight and KV cache byte math
-  engine.py / plan.py Backend and bit-width decisions
-  pipeline.py         optimize orchestration
-  quantizers/         gguf, awq, gptq, bnb, nvfp4 implementations
-```
-
-MIT license. CLI entry point: **`ocq`**.
+MIT license.
