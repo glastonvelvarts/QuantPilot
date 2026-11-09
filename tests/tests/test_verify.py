@@ -260,3 +260,31 @@ def test_a_missing_library_is_named_with_the_package_to_install():
     assert "DLL" in missing_library("", 0xC0000135) and "DLL" in missing_library("", -1073741515)
     assert missing_library("load_tensors: offloaded 17/17 layers to GPU", 1) is None
     assert missing_library("", None) is None
+
+
+# Qwen3.5-0.8B, made into Q8_0 by ocq optimize, loaded by llama-server b11429 on an M1
+# (4 conversations, 4,096 tokens). Its log: 48.00 MiB of cache for the 6 attention layers,
+# 77.06 MiB of linear-attention state for the 18 others (R 5.06 + S 72.00), and 15 tensors of
+# the multi-token prediction block "unused ... ignoring" (20.74 MiB, not in the GPU buffer).
+QWEN35_STEM = "Qwen3.5-0.8B-Q8_0"
+QWEN35_LOG = (
+    Path(__file__).parent / "data" / "gguf" / "llama-server-qwen3.5-0.8b-q8_0-4k-metal.log"
+).read_text()
+
+
+def test_linear_attention_and_the_prediction_block_match_llama_cpp():
+    header, _ = real_header(QWEN35_STEM)
+    loaded = header.loaded()
+    config = config_from_gguf(header)
+    snap = build_snapshot(QWEN35_STEM, {}, config, hf_style_tensors(loaded), None)
+    log = parse_log(QWEN35_LOG)
+    assert (log.kv_mib, log.state_mib) == (48.0, 77.06)
+    checks = {c.name: c for c in predict(snap, header, log, "f16", 0, unified_memory=True)}
+    for name, mib in (
+        ("context cache (KV)", 48.0),
+        ("Mamba / convolution state", 77.06),
+        ("weights on the GPU", 763.78),
+        ("weights on the CPU (file range)", 257.66),
+    ):
+        assert checks[name].ok and checks[name].actual_mib == mib, checks[name]
+        assert round(checks[name].predicted_mib, 2) == mib

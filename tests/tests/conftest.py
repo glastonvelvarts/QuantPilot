@@ -166,6 +166,8 @@ NEMOTRON_H = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"  # hybrid_override_pattern, mix
 FALCON_H1 = "tiiuae/Falcon-H1-0.5B-Instruct"  # attention and Mamba side by side in every layer
 LLAMA4_SCOUT = "unsloth/Llama-4-Scout-17B-16E-Instruct"  # 3 of 4 layers chunked attention
 QWEN3_NEXT = "Qwen/Qwen3-Next-80B-A3B-Instruct"  # config.json only: every 4th layer attention
+# Gated DeltaNet linear attention in 18 of 24 layers, a vision tower and an MTP block.
+QWEN35 = "Qwen/Qwen3.5-0.8B"
 
 # Lines as `nvidia-smi --query-gpu=name,memory.total,memory.free,compute_cap` prints them.
 RTX_3090 = "NVIDIA GeForce RTX 3090, 24576, 24000, 8.6"

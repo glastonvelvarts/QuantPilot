@@ -1,0 +1,87 @@
+0.00.036.471 I srv  llama_server: n_parallel is set to auto, using n_parallel = 4 and kv_unified = true
+0.00.150.592 I llama_prepare_model_devices: using device MTL0 (Apple M1) (unknown id) - 12123 MiB free
+0.00.307.789 I load_tensors: loading model tensors, this can take a while... (load_mode = none)
+0.00.312.337 I load_tensors: offloading output layer to GPU
+0.00.312.337 I load_tensors: offloading 24 repeating layers to GPU
+0.00.312.337 I load_tensors: offloaded 26/26 layers to GPU
+0.00.312.338 I load_tensors:          CPU model buffer size =     0.00 MiB
+0.00.312.339 I load_tensors:         MTL0 model buffer size =     0.00 MiB
+0.00.313.553 I llama_context: n_seq_max             = 4
+0.00.313.554 I llama_context: n_ctx                 = 4096
+0.00.313.554 I llama_context: n_ctx_seq             = 4096
+0.00.313.558 I llama_context: n_ctx_seq (4096) < n_ctx_train (262144) -- the full capacity of the model will not be utilized
+0.00.313.953 I llama_context:        CPU  output buffer size =     3.79 MiB
+0.00.314.015 I llama_kv_cache:       MTL0 KV buffer size =     0.00 MiB
+0.00.314.016 I llama_kv_cache: size =   48.00 MiB (  4096 cells,   6 layers,  4/1 seqs), K (f16):   24.00 MiB, V (f16):   24.00 MiB
+0.00.314.021 D llama_memory_recurrent, layer   0: dev = MTL0
+0.00.314.024 D llama_memory_recurrent, layer   1: dev = MTL0
+0.00.314.024 D llama_memory_recurrent, layer   2: dev = MTL0
+0.00.314.025 D llama_memory_recurrent: layer   3: skipped
+0.00.314.025 D llama_memory_recurrent, layer   4: dev = MTL0
+0.00.314.025 D llama_memory_recurrent, layer   5: dev = MTL0
+0.00.314.026 D llama_memory_recurrent, layer   6: dev = MTL0
+0.00.314.026 D llama_memory_recurrent: layer   7: skipped
+0.00.314.026 D llama_memory_recurrent, layer   8: dev = MTL0
+0.00.314.026 D llama_memory_recurrent, layer   9: dev = MTL0
+0.00.314.027 D llama_memory_recurrent, layer  10: dev = MTL0
+0.00.314.027 D llama_memory_recurrent: layer  11: skipped
+0.00.314.027 D llama_memory_recurrent, layer  12: dev = MTL0
+0.00.314.028 D llama_memory_recurrent, layer  13: dev = MTL0
+0.00.314.028 D llama_memory_recurrent, layer  14: dev = MTL0
+0.00.314.028 D llama_memory_recurrent: layer  15: skipped
+0.00.314.029 D llama_memory_recurrent, layer  16: dev = MTL0
+0.00.314.029 D llama_memory_recurrent, layer  17: dev = MTL0
+0.00.314.029 D llama_memory_recurrent, layer  18: dev = MTL0
+0.00.314.029 D llama_memory_recurrent: layer  19: skipped
+0.00.314.030 D llama_memory_recurrent, layer  20: dev = MTL0
+0.00.314.030 D llama_memory_recurrent, layer  21: dev = MTL0
+0.00.314.030 D llama_memory_recurrent, layer  22: dev = MTL0
+0.00.314.031 D llama_memory_recurrent: layer  23: skipped
+0.00.324.239 I llama_memory_recurrent:       MTL0 RS buffer size =    77.06 MiB
+0.00.324.245 I llama_memory_recurrent: size =   77.06 MiB (     4 cells,  24 layers,  4 seqs  0 rs_seq), R (f32):    5.06 MiB, S (f32):   72.00 MiB, P (f32):    0.00 MiB
+0.00.331.047 I sched_reserve:       MTL0 compute buffer size =    48.58 MiB
+0.00.331.048 I sched_reserve:        CPU compute buffer size =    12.02 MiB
+0.00.331.049 I sched_reserve:        CPU compute buffer size =    12.02 MiB
+0.00.454.272 I llama_prepare_model_devices: using device MTL0 (Apple M1) (unknown id) - 12123 MiB free
+0.00.611.608 I load_tensors: loading model tensors, this can take a while... (load_mode = mmap)
+0.00.656.281 I load_tensors: offloading output layer to GPU
+0.00.656.284 I load_tensors: offloading 24 repeating layers to GPU
+0.00.656.285 I load_tensors: offloaded 26/26 layers to GPU
+0.00.656.286 I load_tensors:   CPU_Mapped model buffer size =   257.66 MiB
+0.00.656.287 I load_tensors:  MTL0_Mapped model buffer size =   763.78 MiB
+0.00.659.225 I llama_context: n_seq_max             = 4
+0.00.659.225 I llama_context: n_ctx                 = 4096
+0.00.659.225 I llama_context: n_ctx_seq             = 4096
+0.00.659.229 I llama_context: n_ctx_seq (4096) < n_ctx_train (262144) -- the full capacity of the model will not be utilized
+0.00.659.644 I llama_context:        CPU  output buffer size =     3.79 MiB
+0.00.661.396 I llama_kv_cache:       MTL0 KV buffer size =    48.00 MiB
+0.00.663.384 I llama_kv_cache: size =   48.00 MiB (  4096 cells,   6 layers,  4/1 seqs), K (f16):   24.00 MiB, V (f16):   24.00 MiB
+0.00.663.390 D llama_memory_recurrent, layer   0: dev = MTL0
+0.00.663.394 D llama_memory_recurrent, layer   1: dev = MTL0
+0.00.663.395 D llama_memory_recurrent, layer   2: dev = MTL0
+0.00.663.395 D llama_memory_recurrent: layer   3: skipped
+0.00.663.396 D llama_memory_recurrent, layer   4: dev = MTL0
+0.00.663.396 D llama_memory_recurrent, layer   5: dev = MTL0
+0.00.663.396 D llama_memory_recurrent, layer   6: dev = MTL0
+0.00.663.397 D llama_memory_recurrent: layer   7: skipped
+0.00.663.397 D llama_memory_recurrent, layer   8: dev = MTL0
+0.00.663.397 D llama_memory_recurrent, layer   9: dev = MTL0
+0.00.663.398 D llama_memory_recurrent, layer  10: dev = MTL0
+0.00.663.398 D llama_memory_recurrent: layer  11: skipped
+0.00.663.398 D llama_memory_recurrent, layer  12: dev = MTL0
+0.00.663.399 D llama_memory_recurrent, layer  13: dev = MTL0
+0.00.663.399 D llama_memory_recurrent, layer  14: dev = MTL0
+0.00.663.399 D llama_memory_recurrent: layer  15: skipped
+0.00.663.399 D llama_memory_recurrent, layer  16: dev = MTL0
+0.00.663.400 D llama_memory_recurrent, layer  17: dev = MTL0
+0.00.663.400 D llama_memory_recurrent, layer  18: dev = MTL0
+0.00.663.400 D llama_memory_recurrent: layer  19: skipped
+0.00.663.401 D llama_memory_recurrent, layer  20: dev = MTL0
+0.00.663.401 D llama_memory_recurrent, layer  21: dev = MTL0
+0.00.663.401 D llama_memory_recurrent, layer  22: dev = MTL0
+0.00.663.402 D llama_memory_recurrent: layer  23: skipped
+0.00.670.394 I llama_memory_recurrent:       MTL0 RS buffer size =    77.06 MiB
+0.00.670.399 I llama_memory_recurrent: size =   77.06 MiB (     4 cells,  24 layers,  4 seqs  0 rs_seq), R (f32):    5.06 MiB, S (f32):   72.00 MiB, P (f32):    0.00 MiB
+0.00.679.520 I sched_reserve:       MTL0 compute buffer size =    48.58 MiB
+0.00.679.521 I sched_reserve:        CPU compute buffer size =    12.02 MiB
+0.00.729.216 I srv  llama_server: model loaded

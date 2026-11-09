@@ -19,7 +19,7 @@ import re
 import struct
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -158,12 +158,31 @@ class GgufHeader:
         return FILE_TYPES.get(code, f"type {code}") if code is not None else ""
 
     @property
+    def layers(self) -> int:
+        """The layers llama.cpp runs: block_count less the multi-token prediction blocks
+        (Qwen3.5, GLM-4.5), which come last (llama.cpp's n_layer)."""
+        return (self.get("block_count") or 0) - (self.get("nextn_predict_layers") or 0)
+
+    def loaded(self) -> GgufHeader:
+        """The header without the tensors llama.cpp does not load: those of the multi-token
+        prediction blocks ("model has unused tensor ... ignoring" in its log)."""
+        if not self.get("nextn_predict_layers"):
+            return self
+        return replace(self, tensors=tuple(t for t in self.tensors if block_of(t) < self.layers))
+
+    @property
     def data_bytes(self) -> int | None:
         """Bytes of all tensor data, alignment included: where the last tensor ends."""
         if not self.tensors:
             return 0
         last = max(self.tensors, key=lambda tensor: tensor.offset)
         return None if last.nbytes is None else last.offset + last.nbytes
+
+
+def block_of(tensor: GgufTensor) -> int:
+    """The block a tensor belongs to (blk.N.), -1 for the others (embeddings, output)."""
+    parts = tensor.name.split(".")
+    return int(parts[1]) if parts[0] == "blk" and parts[1].isdigit() else -1
 
 
 class Reader:
@@ -296,7 +315,7 @@ SWA_DISABLED = ("phi3", "phimoe")
 def config_from_gguf(header: GgufHeader) -> dict:
     """The header's settings in config.json's terms, so the same code sizes both."""
     arch, get = header.architecture, header.get
-    layers = get("block_count") or 0
+    layers = header.layers  # without the multi-token prediction blocks
     heads = get("attention.head_count")
     if isinstance(heads, list):
         heads = max(heads)
@@ -329,7 +348,7 @@ def config_from_gguf(header: GgufHeader) -> dict:
         config["qk_rope_head_dim"] = get("rope.dimension_count", 0)
     if get("shortconv.l_cache"):  # LFM2
         config["conv_L_cache"] = get("shortconv.l_cache")
-    if get("ssm.state_size") and arch != "qwen3next":  # Qwen3-Next's linear attention differs
+    if get("ssm.state_size"):  # Mamba, and linear attention, which llama.cpp sizes the same
         config["mamba_d_state"] = get("ssm.state_size")
         config["mamba_d_conv"] = get("ssm.conv_kernel", 4)
         if get("ssm.group_count"):  # Mamba-2: time_step_rank is the head count
@@ -367,6 +386,10 @@ def layer_types(header: GgufHeader, layers: int, kv_heads, window: int) -> list[
         if parts[0] == "blk" and parts[1].isdigit() and int(parts[1]) < layers:
             has[int(parts[1])].add(parts[2])
     pattern = header.get("attention.sliding_window_pattern", SWA_PATTERNS.get(header.architecture))
+    recurrent = header.get("attention.recurrent_layers")
+    if isinstance(recurrent, list) and any(recurrent):
+        # Qwen3.5 lists them: linear attention where true, full attention elsewhere.
+        return ["linear_attention" if flag else "full_attention" for flag in recurrent[:layers]]
     kinds = []
     for index in range(layers):
         heads = kv_heads[index] if isinstance(kv_heads, list) else kv_heads

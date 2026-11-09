@@ -26,6 +26,7 @@ from conftest import (
     QWEN3_8B_NVFP4,
     QWEN3_MOE,
     QWEN3_NEXT,
+    QWEN35,
     QWEN_72B,
     QWEN_AWQ,
     QWEN_BNB,
@@ -827,8 +828,22 @@ def test_qwen3_next_has_attention_every_fourth_layer():
     kv = real_snapshot(QWEN3_NEXT).facts.kv_cache
     assert kv.value == 12 * 2 * 2 * 256 * 2  # 12 layers x keys and values x 2 heads x 256 x 2 B
     assert "attention layers from full_attention_interval" in kv.note
-    # Its linear-attention state is a kind QuantPilot does not size yet, and says so.
-    assert "36 of 48 layers keep a fixed-size state of unknown size" in kv.note
+    # Linear attention: conv 3 x (4096 + 2 x 16 x 128) + state 128 x 4096 values of 4 bytes.
+    assert "36 of 48 layers keep a linear attention state of 2.09 MiB" in kv.note
+
+
+def test_qwen35_linear_attention_state_is_what_llama_cpp_keeps():
+    # llama-server b11429 (data/gguf/llama-server-qwen3.5-0.8b-q8_0-4k-metal.log), 4 x 4,096
+    # tokens: KV 48.00 MiB on the 6 attention layers, state 77.06 MiB on the 18 others.
+    snap = real_snapshot(QWEN35)
+    assert snap.num_layers == 24  # the MTP block (mtp.layers.0) is not a layer
+    assert snap.facts.kv_cache.kind == FactKind.CROSS_CHECKED  # its k_proj left out too
+    states = [layer.state_bytes for layer in snap.kv_layers]
+    per_layer = (3 * (2048 + 2 * 16 * 128) + 128 * 2048) * 4
+    assert states.count(per_layer) == 18 and states.count(0) == 6
+    total = snap.kv_cache_bytes(4096, LLAMA_CPP, 4)
+    state = sum(states) * 4
+    assert (round((total - state) / 2**20, 2), round(state / 2**20, 2)) == (48.0, 77.06)
 
 
 def test_a_hybrid_with_attention_in_every_layer_keeps_it_all():
