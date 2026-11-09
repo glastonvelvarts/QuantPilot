@@ -30,6 +30,19 @@ uv tool install quantpilot          # the ocq and quantpilot commands
 uvx quantpilot                      # or try it without installing
 ```
 
+### Open the app
+
+Type `ocq` in a terminal: with no command it opens the full-screen app (arrow keys and Enter, no flags to remember). `quantpilot` and `ocq tui` do the same, and `ocq --help` lists the commands.
+
+| You installed it with | Open the app |
+|---|---|
+| `uv tool install quantpilot` | `ocq` (or `quantpilot`) |
+| nothing: just try it | `uvx quantpilot` |
+| `pip install quantpilot` in a virtual environment | `ocq`, with that environment active |
+| a clone of this repo (`uv sync`) | `uv run ocq` |
+
+### Quantization formats
+
 Each quantization format is an extra, installed when you want it (they bring PyTorch, a large download):
 
 ```sh
@@ -44,12 +57,12 @@ uv tool install "quantpilot[gguf,awq,bnb]" --torch-backend auto # NVIDIA: PyTorc
 | `bnb` | bitsandbytes 4 and 8 bit for transformers | an NVIDIA GPU |
 | `nvfp4` | NVFP4 for vLLM | an NVIDIA GPU (Blackwell computes it in FP4) |
 
-`ocq doctor` then says what is ready on your PC and gives the command for anything that is not. The app's **This PC** page installs the extras with a button. With pip: `pip install "quantpilot[gguf]"`. From the source: `git clone https://github.com/glastonvelvarts/QuantPilot && cd QuantPilot && uv sync --extra gguf`, then `uv run ocq`.
+`ocq doctor` then says what is ready on your PC and gives the command for anything that is not. The app's **This PC** page installs the extras with a button. With pip: `pip install "quantpilot[gguf]"`. From a clone of the repo: `uv sync --extra gguf`.
 
 ## Quick start
 
 ```sh
-ocq                                   # the full-screen app: arrow keys and Enter
+ocq                                   # the full-screen app (uv run ocq in a clone of the repo)
 ocq doctor                            # is everything ready on this PC?
 ocq recommend --workload coding       # which model and format to run, and why
 ocq feasibility Qwen/Qwen3-8B         # every format of one model on this PC
