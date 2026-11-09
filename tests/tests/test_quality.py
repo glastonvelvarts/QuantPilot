@@ -187,3 +187,145 @@ def test_a_hugging_face_model_with_only_its_config_cached_is_not_on_this_pc(tmp_
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
     result = CliRunner().invoke(cli.app, ["bench", "org/model", "--quality"])
     assert result.exit_code == 1 and "org/model is not on this PC" in result.output
+
+
+# What a format keeps, against its reference (7E) --------------------------------------------
+
+
+def save(
+    label, ppl, model="Qwen/Qwen3.5-0.8B", device="gpu", piece=quality.FIXED, runtime="llama.cpp"
+):
+    quality.record(quality.Perplexity(ppl, 0.5, 40, runtime), piece, model=model, label=label,
+                   device=device)  # fmt: skip
+
+
+def test_quality_kept_is_the_perplexity_worth_in_parameters():
+    # Q4_K_M of Qwen3.5-0.8B on the M1: 17.2720 against 16.6079 for the BF16 original.
+    kept = quality.kept_share(17.2720, 16.6079)
+    assert kept == pytest.approx(math.exp(-math.log(17.2720 / 16.6079) / quality.SIZE_SLOPE))
+    assert 0.80 < kept < 0.81
+    assert quality.kept_share(16.5, 16.6) == 1.0  # a hair better by chance: all of it, no more
+
+
+def test_the_reference_is_the_original_else_q8_0_on_the_same_device():
+    assert quality.reference_for("Qwen/Qwen3.5-0.8B", "fixed") is None
+    save("Q8_0", 16.62)
+    assert quality.reference_for("Qwen/Qwen3.5-0.8B", "fixed")["label"] == "Q8_0"
+    save("BF16", 16.61, device="cpu", runtime="transformers")
+    save("BF16", 16.6079)
+    assert quality.reference_for("Qwen/Qwen3.5-0.8B", "fixed", "gpu")["ppl"] == 16.6079
+    assert quality.reference_for("Qwen/Qwen3.5-0.8B", "fixed", "cpu")["ppl"] == 16.61
+    assert quality.reference_for("Qwen/Qwen3.5-0.8B", "full") is None  # another slice
+
+
+def test_a_format_is_compared_on_the_same_slice_and_never_with_itself():
+    save("Q4_K_M", 17.2720)
+    assert quality.measured_kept("Qwen/Qwen3.5-0.8B", "Q4_K_M") is None  # nothing to compare
+    save("Q8_0", 16.62)
+    via_q8 = quality.measured_kept("Qwen/Qwen3.5-0.8B", "Q4_K_M")
+    assert via_q8.reference_label == "Q8_0"
+    assert quality.measured_kept("Qwen/Qwen3.5-0.8B", "Q8_0") is None  # it is the reference
+    save("BF16", 16.6079)
+    kept = quality.measured_kept("Qwen/Qwen3.5-0.8B", "Q4_K_M")
+    assert (kept.label, kept.reference_label, kept.slice, kept.same_device) == (
+        "Q4_K_M", "BF16", "fixed", True,
+    )  # fmt: skip
+    assert quality.measured_kept("Qwen/Qwen3.5-0.8B", "BF16") is None
+    save("Q4_K_M", 17.25, piece=quality.FULL)  # the whole text counts first, with its own ref
+    assert quality.measured_kept("Qwen/Qwen3.5-0.8B", "Q4_K_M").slice == "fixed"
+    save("BF16", 16.58, piece=quality.FULL)
+    assert quality.measured_kept("Qwen/Qwen3.5-0.8B", "Q4_K_M").slice == "full"
+    assert [m.label for m in quality.measured_formats("Qwen/Qwen3.5-0.8B")] == ["Q4_K_M", "Q8_0"]
+
+
+def test_the_reference_is_made_from_the_original_in_the_hugging_face_cache(tmp_path, monkeypatch):
+    from conftest import QWEN, real_model, write_safetensors
+    from test_discovery import hf_repo
+
+    from ocq import bench
+    from ocq.quantizers import gguf, llama_cpp
+    from ocq.types import RunMode
+
+    _, config, tensors, dtypes = real_model(QWEN)
+    write_safetensors(tmp_path / "weights", tensors, dtypes)
+    files = {"config.json": json.dumps(config).encode(), "tokenizer.json": b"{}",
+             "model.safetensors": (tmp_path / "weights").read_bytes()}  # fmt: skip
+    hf_repo(tmp_path / "hub", QWEN, files)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    text = quality.DATASETS / "wikitext-2-raw" / "wiki.test.raw"
+    text.parent.mkdir(parents=True)
+    text.write_text("text")
+    commands = []
+
+    def run_tool(command, log, env=None, progress=False):
+        commands.append(command)
+        if "--outfile" in command:  # the converter
+            Path(command[command.index("--outfile") + 1]).write_bytes(tiny_gguf(32))  # BF16
+        elif "llama-quantize" in command[0]:
+            Path(command[2]).write_bytes(tiny_gguf(7))  # Q8_0
+        elif "llama-perplexity" in command[0]:
+            return "", PERPLEXITY_LOG.read_text().replace("17.2720", "16.6079")
+        return "", ""
+
+    monkeypatch.setattr(gguf, "run_tool", run_tool)
+    monkeypatch.setattr(llama_cpp, "tool_path", lambda name, hardware: Path(name))
+    monkeypatch.setattr(llama_cpp, "converter_script", lambda: Path("convert_hf_to_gguf.py"))
+    hardware = nvidia_pc(RTX_3090)
+    saved = bench.make_reference(QWEN, hardware, quality.FIXED, tmp_path)
+    assert (saved["model"], saved["label"], saved["ppl"]) == (QWEN, "BF16", 16.6079)
+    convert, perplexity = commands
+    assert convert[convert.index("--outtype") + 1] == "bf16"  # as stored
+    assert perplexity[perplexity.index("--chunks") + 1] == "40"
+    assert not (quality.DATASETS.parent / "reference").exists()  # its files are gone
+
+    # Too big for this PC's memory in 16 bits: Q8_0 made from it.
+    real_fitted = bench.fitted
+    sizes = iter([RunMode.UNFIT, None])
+
+    def fitted(model, hw):
+        option, snapshot = real_fitted(model, hw)
+        mode = next(sizes)
+        return (replace(option, run_mode=mode) if mode else option), snapshot
+
+    from dataclasses import replace
+
+    monkeypatch.setattr(bench, "fitted", fitted)
+    commands.clear()
+    saved = bench.make_reference(QWEN, hardware, quality.FIXED, tmp_path)
+    assert saved["label"] == "Q8_0"
+    assert [c[0] for c in commands][1:] == ["llama-quantize", "llama-perplexity"]
+
+
+def test_ocq_bench_quality_says_how_much_the_format_keeps(tmp_path, monkeypatch):
+    from ocq.quantizers import gguf, llama_cpp
+
+    text = quality.DATASETS / "wikitext-2-raw" / "wiki.test.raw"
+    text.parent.mkdir(parents=True)
+    text.write_text("text")
+    made = tmp_path / "ocq-output" / "org--tiny" / "artifact" / "org--tiny-Q8_0.gguf"
+    made.parent.mkdir(parents=True)
+    made.write_bytes(tiny_gguf())
+    speed = fake_llama_bench([])
+
+    def run_tool(command, log, env=None, progress=False):
+        if command[0] == "llama-perplexity":
+            return "", PERPLEXITY_LOG.read_text()  # 17.2720
+        return speed(command, log, env, progress)
+
+    monkeypatch.setattr(gguf, "run_tool", run_tool)
+    monkeypatch.setattr(llama_cpp, "tool_path", lambda name, hardware: Path(name))
+    monkeypatch.setattr(cli, "detect_hardware", lambda _bin: nvidia_pc(RTX_3090))
+    args = ["bench", str(made), "--quality"]
+
+    # The original is not on this PC (not in the Hugging Face cache): nothing to compare with.
+    result = CliRunner().invoke(cli.app, args, env={"COLUMNS": "200"})
+    assert "the original weights of this model are not on this PC" in result.output
+
+    save("BF16", 16.6079, model="org/tiny")
+    result = CliRunner().invoke(cli.app, args, env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert (
+        "Q8_0 keeps about 80% of the model's quality (perplexity 17.2720 vs 16.6079 for the "
+        "original, BF16)"
+        in " ".join(result.output.split())
+    )

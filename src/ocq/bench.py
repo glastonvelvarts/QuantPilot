@@ -187,3 +187,84 @@ def made_from(path: Path) -> str | None:
 
 def file_gb(snapshot: ModelSnapshot) -> float:
     return sum(size for _, size in snapshot.gguf_files) / measurements.GB
+
+
+def make_reference(repo: str, hardware: HardwareProfile, piece, log_dir: Path) -> dict:
+    """Measures the reference a repo's formats are compared with: its original weights, from
+    the Hugging Face cache, converted to a 16-bit GGUF and run in llama.cpp (whose perplexity
+    matches transformers'). When that does not fit in this PC's memory, Q8_0 made from it,
+    which loses almost nothing. The files are made in a folder of their own, then deleted.
+    Returns the saved result."""
+    import shutil
+    import sys
+
+    from ocq import quality
+    from ocq.local_model import cached_hf_model
+    from ocq.model_analyzer import resolve_model
+    from ocq.plan import free_disk_gb
+    from ocq.quantizers.gguf import intermediate_precision, run_tool
+    from ocq.quantizers.llama_cpp import converter_script, tool_path
+
+    folder = cached_hf_model(repo)
+    if folder is None:
+        raise OcqError(f"The original weights of {repo} are not on this PC to measure.")
+    original = resolve_model(str(folder), hardware, None, 4096, "f16", use_llmfit=False)
+    precision = intermediate_precision(original.stored_precision)
+    size_gb = original.params_b * 1e9 * (4 if precision == "f32" else 2) / measurements.GB
+    work = quality.DATASETS.parent / "reference"
+    free = free_disk_gb(work.parent)
+    if free is not None and free < size_gb * 1.6:  # the 16-bit file, then Q8_0 beside it
+        raise OcqError(
+            f"Measuring the original of {repo} needs about {size_gb * 1.6:.1f} GB of free disk "
+            f"for a while; {free:.1f} GB is free."
+        )
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        model = work / f"{repo.replace('/', '--')}-{precision}.gguf"
+        print(f"Converting the original to a {precision} GGUF ...", flush=True)
+        run_tool(
+            [sys.executable, str(converter_script()), str(folder), "--outfile", str(model),
+             "--outtype", precision],
+            log=log_dir / "reference-convert.log",
+            progress=True,
+        )  # fmt: skip
+        option, snapshot = fitted(model, hardware)
+        if option.run_mode == RunMode.UNFIT:
+            smaller = work / f"{repo.replace('/', '--')}-Q8_0.gguf"
+            print("The original does not fit in memory here: making Q8_0 from it ...", flush=True)
+            run_tool(
+                [str(tool_path("llama-quantize", hardware)), str(model), str(smaller), "Q8_0"],
+                log=log_dir / "reference-quantize.log",
+                progress=True,
+            )
+            model.unlink()
+            model = smaller
+            option, snapshot = fitted(model, hardware)
+        place, device = placement(option)
+        print(f"Measuring the reference ({option.label}) ...", flush=True)
+        result = quality.llama_perplexity(
+            tool_path("llama-perplexity", hardware),
+            model,
+            quality.wikitext(),
+            piece,
+            place=place,
+            kv_cache="f16",
+            env=llama_cache_env(snapshot.architecture, "f16"),
+            log=log_dir / "reference-perplexity.log",
+        )
+        quality.record(
+            result, piece, model=repo, label=option.label, hardware=hardware, device=device
+        )
+        return quality.load()[-1]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def fitted(model: Path, hardware: HardwareProfile):
+    """The row llama.cpp would run a GGUF as for llama-perplexity: 4 chunks of 512 at once."""
+    from ocq.model_analyzer import quant_options, resolve_model
+
+    snapshot = resolve_model(str(model), hardware, None, 2048, "f16", use_llmfit=False)
+    (option,) = quant_options(snapshot, hardware, 2048, "f16")
+    return option, snapshot

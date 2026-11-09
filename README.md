@@ -458,6 +458,10 @@ ocq bench ./ocq-output/<model>/artifact/<awq folder> --quality   # AWQ, GPTQ, bi
 
 Models llama.cpp does not run (the original weights, AWQ, GPTQ, bitsandbytes, NVFP4) are measured in transformers with the same method: SmolLM2-135M scores 18.7853 there in BF16 and 18.7856 in llama.cpp as an f16 GGUF. The text (4.7 MB) is downloaded once and checked against llama.cpp's copy. Results are saved in `~/.cache/ocq/quality.json`, with where they ran: one file scores a little differently on a GPU and on a CPU (17.27 and 17.24).
 
+With `--quality`, a format is also compared with its reference, the model's original weights: `Q4_K_M keeps about 80% of the model's quality (perplexity 17.2720 vs 16.6079 for the original, BF16)`, in the same units as the estimate (perplexity valued in parameters with llama.cpp's LLaMA 7B and 13B numbers). When the original has not been measured yet and its weights are in the Hugging Face cache, QuantPilot measures it first, once: it converts it to a 16-bit GGUF (llama.cpp's perplexity matches transformers'), or to Q8_0 when 16 bits do not fit in memory, and deletes the files afterwards.
+
+`ocq recommend` and the app then use what was measured: a measured format's quality replaces the estimate (in the ranking, the reasons and the confidence), and the other formats of that model have their estimated losses scaled by how much more (or less) than Llama-3-8B the measured ones lost. Small models lose more: Qwen3.5-0.8B's Q4_K_M lost 1.4 times and its Q6_K 3.4 times what llama.cpp's table gives the 8B. A setup that ran on this PC is ranked by the speed it measured.
+
 Every run (here and after `optimize`) is saved in `~/.cache/ocq/measurements.json` with what ran (model, format, llama.cpp build, context, cache, placement) and where (this PC's CPU and RAM, and its GPU). Speed predictions and recommendations use only this PC's runs, and count a run for "this setup" only when it was placed the same way.
 
 ## Check QuantPilot on your PC: `ocq verify`

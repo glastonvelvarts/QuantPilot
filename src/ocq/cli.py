@@ -481,6 +481,7 @@ def cmd_bench(
                 file=path.name, hardware=hw, device=device,
             )  # fmt: skip
             print_quality(result, piece)
+            compare_with_reference(model_id, option.label, piece, hw)
     except OcqError as exc:
         raise fail(exc) from exc
 
@@ -488,30 +489,16 @@ def cmd_bench(
 def model_on_this_pc(model: str) -> Path:
     """The file or folder of a model on this PC: a path, ollama:name:tag, or a Hugging Face id
     whose files are all in the Hugging Face cache already."""
-    from ocq.local_model import has_tokenizer, parse_model_ref, weight_files
+    from ocq.local_model import cached_hf_model, parse_model_ref
 
-    path = parse_model_ref(model)[1]
-    if path is not None:
-        return path
-    not_here = OcqError(
-        f"{model} is not on this PC. ocq bench measures a model already here: a .gguf file or "
-        "folder, ollama:name:tag, or a model folder (ocq models lists them). To measure a "
-        "Hugging Face model, quantize it first with ocq optimize."
-    )
-    from huggingface_hub import try_to_load_from_cache
-
-    try:
-        config = try_to_load_from_cache(model, "config.json")
-    except Exception as exc:  # not a repo id
-        raise not_here from exc
-    if not isinstance(config, str):  # never downloaded
-        raise not_here
-    folder = Path(config).parent  # the cached snapshot: its files QuantPilot downloaded
-    # Often only config.json is cached (QuantPilot reads it to size a model): not a model.
-    files = weight_files(folder)
-    if not files or not all(file.is_file() for file in files) or not has_tokenizer(folder):
-        raise not_here
-    return folder
+    path = parse_model_ref(model)[1] or cached_hf_model(model)
+    if path is None:
+        raise OcqError(
+            f"{model} is not on this PC. ocq bench measures a model already here: a .gguf file "
+            "or folder, ollama:name:tag, or a model folder (ocq models lists them). To measure "
+            "a Hugging Face model, quantize it first with ocq optimize."
+        )
+    return path
 
 
 def bench_gguf_speed(snapshot, path: Path, model_id: str, context: int, kv_cache: str, hw):
@@ -589,6 +576,60 @@ def bench_transformers_quality(snapshot, path: Path, piece, hw) -> None:
     device = "gpu" if hw.has_cuda else "cpu"
     measured_quality.record(result, piece, model=model_id, label=label, hardware=hw, device=device)
     print_quality(result, piece)
+    compare_with_reference(model_id, label, piece, hw)
+
+
+def compare_with_reference(model_id: str, label: str, piece, hw) -> None:
+    """How much of the original's quality the format keeps, measuring the original first when
+    it has not been (from the Hugging Face cache, once)."""
+    from ocq import bench
+    from ocq import quality as measured_quality
+    from ocq.local_model import cached_hf_model
+
+    if label.upper() in measured_quality.FULL_PRECISION:
+        console.print(
+            "[dim]These are the original weights: the reference this model's formats are "
+            "compared with.[/dim]"
+        )
+        return
+    repo = model_id if not model_id.startswith(("local/", "ollama/")) else None
+    if (
+        repo
+        and measured_quality.reference_for(repo, piece.name) is None
+        and cached_hf_model(repo) is not None
+    ):
+        console.print(
+            f"Nothing to compare it with yet: measuring the original of {escape(repo)} once, "
+            "from the Hugging Face cache ...",
+            highlight=False,
+        )
+        try:
+            bench.make_reference(repo, hw, piece, Path(measured_quality.STORE).parent)
+        except OcqError as exc:
+            console.print(f"[yellow]Could not measure the original: {escape(str(exc))}[/yellow]")
+    kept = measured_quality.measured_kept(model_id, label)
+    if kept is None:
+        console.print(
+            "[dim]Nothing to compare it with: the original weights of this model are not on "
+            "this PC.[/dim]"
+        )
+        return
+    against = (
+        "the original"
+        if kept.reference_label.upper() != measured_quality.REFERENCE_FALLBACK
+        else "Q8_0, as the original does not fit in this PC's memory"
+    )
+    console.print(
+        f"[bold]Kept[/bold]         {label} keeps about {kept.kept:.0%} of the model's quality "
+        f"(perplexity {kept.perplexity:.4f} vs {kept.reference:.4f} for {against}, "
+        f"{kept.reference_label})",
+        highlight=False,
+    )
+    if not kept.same_device:
+        console.print(
+            "[dim]The two were measured on different devices (GPU and CPU), which round a "
+            "little differently.[/dim]"
+        )
 
 
 def print_quality(result, piece) -> None:

@@ -31,6 +31,16 @@ WIKITEXT_URL = "https://huggingface.co/datasets/ggml-org/ci/resolve/main/wikitex
 WIKITEXT_SHA256 = "ef7edb566e3e2b2d31b29c1fdb0c89a4cc683597484c3dc2517919c615435a11"
 DATASET = "WikiText-2 test"
 CHUNK = 512
+# The labels of a model's original weights: the reference its formats are measured against.
+FULL_PRECISION = ("F32", "F16", "BF16")
+REFERENCE_FALLBACK = "Q8_0"  # when the original does not fit: it loses almost nothing
+
+# How much perplexity is worth in parameters, measured by llama.cpp on this same text: its
+# README at ffb06a3 (2023-05-30) has LLaMA 7B (6.7B parameters) at 5.9066 and 13B (13.0B) at
+# 5.2543 in F16. Within a family, ln(perplexity) falls by SIZE_SLOPE for every e-fold of
+# parameters, so a format that adds dL to ln(perplexity) leaves a model as good as one with
+# exp(-dL / SIZE_SLOPE) of its parameters: the share of its quality it keeps.
+SIZE_SLOPE = math.log(5.9066 / 5.2543) / math.log(13.0 / 6.7)
 
 
 @dataclass(frozen=True)
@@ -243,3 +253,68 @@ def results_of(model: str, label: str = "", slice_name: str = "") -> list[dict]:
         and (not label or str(r.get("label", "")).upper() == label.upper())
         and (not slice_name or r.get("slice") == slice_name)
     ]
+
+
+def kept_share(perplexity: float, reference: float) -> float:
+    """The share of the reference's quality a format keeps, in parameters (see SIZE_SLOPE).
+    A format can score a hair under its reference by chance: it keeps all of it, not more."""
+    return min(1.0, math.exp(-math.log(perplexity / reference) / SIZE_SLOPE))
+
+
+@dataclass(frozen=True)
+class MeasuredKept:
+    label: str
+    kept: float
+    perplexity: float
+    reference: float
+    reference_label: str  # BF16, F16, F32, or Q8_0 when the original did not fit
+    slice: str
+    same_device: bool  # format and reference measured on the same device (gpu, cpu)
+
+
+def reference_for(model: str, slice_name: str, device: str = "") -> dict | None:
+    """The result a model's formats are compared with: its original weights, else Q8_0; the
+    one measured on device when there is one (GPUs and CPUs round a little differently)."""
+    results = results_of(model, slice_name=slice_name)
+    for wanted in (FULL_PRECISION, (REFERENCE_FALLBACK,)):
+        found = [r for r in results if str(r.get("label", "")).upper() in wanted]
+        if found:
+            same = [r for r in found if r.get("device") == device]
+            return (same or found)[-1]
+    return None
+
+
+def measured_kept(model: str, label: str) -> MeasuredKept | None:
+    """What a format keeps, from its perplexity and its reference's on the same slice of text
+    (the whole text before the fixed slice), latest first. None when either is missing, or
+    when the format is the reference itself."""
+    label = label.removesuffix(" (as stored)").strip()
+    if label.upper() in FULL_PRECISION:
+        return None
+    formats = results_of(model, label)
+    for slice_name in (FULL.name, FIXED.name):
+        for result in reversed([r for r in formats if r.get("slice") == slice_name]):
+            reference = reference_for(str(result["model"]), slice_name, result.get("device", ""))
+            if reference is None or str(reference["label"]).upper() == label.upper():
+                continue
+            return MeasuredKept(
+                label,
+                kept_share(result["ppl"], reference["ppl"]),
+                result["ppl"],
+                reference["ppl"],
+                str(reference["label"]),
+                slice_name,
+                reference.get("device") == result.get("device"),
+            )
+    return None
+
+
+def measured_formats(model: str) -> list[MeasuredKept]:
+    """Every format of a model whose quality kept is measured (one per label)."""
+    labels = {
+        str(r.get("label", "")).upper(): str(r.get("label", ""))
+        for r in results_of(model)
+        if str(r.get("label", "")).upper() not in FULL_PRECISION
+    }
+    found = [measured_kept(model, label) for label in labels.values()]
+    return [kept for kept in found if kept is not None]

@@ -729,7 +729,7 @@ def format_chart(result, rows):
         note = ""
         if not runs:
             note = SHORT_LIMITS.get(row.limit) or short_runtime_reason(row.why)
-        quality = engine.quality_kept(engine.rated_as(candidate))
+        quality = engine.kept_of(candidate)[0]  # measured on this PC when it was
         speed = option.estimated_tps if runs else 0.0
         chart.append(
             ChartRow(label, option.memory_required_gb, speed, quality, row.status == engine.PICK,

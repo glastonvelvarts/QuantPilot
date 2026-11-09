@@ -37,6 +37,7 @@ from ocq.model_analyzer import (
 )
 from ocq.model_size import kv_value_bytes
 from ocq.plan import free_disk_gb
+from ocq.quality import SIZE_SLOPE, MeasuredKept, measured_formats, measured_kept
 from ocq.quantizers.llama_cpp import TAG as LLAMA_CPP_TAG
 from ocq.quantizers.llama_cpp import converter_architectures
 from ocq.quantizers.protocol import PROMPT_TOKENS
@@ -816,14 +817,10 @@ GGUF_PPL_INCREASE = {
     "Q2_K_S": 3.1836,
     "Q2_K": 3.5199,
 }
-# 2. How much perplexity is worth in parameters, measured by the same tool on the same text:
-#    llama.cpp's README at ffb06a3 (2023-05-30) has LLaMA 7B (6.7B parameters) at 5.9066 and
-#    13B (13.0B) at 5.2543 in F16. Within a family, ln(perplexity) falls by SIZE_SLOPE for
-#    every e-fold of parameters, so a type that adds dL to ln(perplexity) leaves a model as
-#    good as one with exp(-dL / SIZE_SLOPE) of its parameters. (The same table: 13B at Q4_0,
-#    5.3860, still beats 7B at F16.) The share is applied to models of every size; bigger
-#    models lose less to quantization, so this is on the safe side for them.
-SIZE_SLOPE = math.log(5.9066 / 5.2543) / math.log(13.0 / 6.7)
+# 2. How much perplexity is worth in parameters: SIZE_SLOPE (quality.py), from llama.cpp's
+#    LLaMA 7B and 13B perplexities. The share is applied to models of every size; bigger
+#    models lose less to quantization, so this is on the safe side for them. Once a format's
+#    perplexity is measured on this PC (ocq bench --quality), that replaces the estimate.
 # Keeping less than this share of its quality, a model is worse than a smaller one at a
 # milder type (Q3_K_S and Q2_K on Llama-3-8B).
 DEGRADED = 0.5
@@ -861,13 +858,35 @@ TOLERANCE = {
 }
 
 
-def quality_kept(gguf_type: str) -> float:
-    """Share of a model's quality a GGUF type keeps (FULL and AS_RELEASED keep all of it)."""
+def quality_kept(gguf_type: str, sensitivity: float = 1.0) -> float:
+    """Share of a model's quality a GGUF type keeps (FULL and AS_RELEASED keep all of it).
+    sensitivity: how much more (or less) this model loses than Llama-3-8B (see sensitivity)."""
     if gguf_type in (FULL, AS_RELEASED):
         return 1.0
+    return math.exp(-table_loss(gguf_type) * sensitivity / SIZE_SLOPE)
+
+
+def table_loss(gguf_type: str) -> float:
+    """What a GGUF type adds to ln(perplexity) on Llama-3-8B (llama.cpp's measurements)."""
     increase = GGUF_PPL_INCREASE[gguf_type]
-    loss_added = math.log((LLAMA3_8B_PPL + increase) / LLAMA3_8B_PPL)
-    return math.exp(-loss_added / SIZE_SLOPE)
+    return math.log((LLAMA3_8B_PPL + increase) / LLAMA3_8B_PPL)
+
+
+def sensitivity(model: str) -> tuple[float, tuple[str, ...]] | None:
+    """How many times llama.cpp's Llama-3-8B losses this model loses, from its formats measured
+    on this PC (a small model loses more), and which ones. None when none are measured."""
+    ratios, labels = [], []
+    for measured in measured_formats(model):
+        rating = measured.label.upper()
+        if rating not in GGUF_PPL_INCREASE or table_loss(rating) <= 0:
+            continue
+        ratios.append(
+            max(math.log(measured.perplexity / measured.reference), 0.0) / table_loss(rating)
+        )
+        labels.append(measured.label)
+    if not ratios:
+        return None
+    return sum(ratios) / len(ratios), tuple(labels)
 
 
 def rated_as(candidate: Candidate) -> str:
@@ -930,9 +949,46 @@ def effective_parameters(model: ModelSnapshot) -> float:
     return total
 
 
+def with_measured_speed(candidate: Candidate, hardware: HardwareProfile) -> Candidate:
+    """The candidate with the speed its very setup measured on this PC, when it ran here: the
+    same number for the ranking, the drawbacks, the reasons and the tables."""
+    option = candidate.option
+    runs = runs_of(
+        history_id(candidate), option.label, candidate.runtime, hardware, placed_as(option.run_mode)
+    )
+    if not runs:
+        return candidate
+    measured = round(sum(run["tps"] for run in runs) / len(runs), 1)
+    return replace(candidate, option=replace(option, estimated_tps=measured, speed_basis=MEASURED))
+
+
+def history_id(candidate: Candidate) -> str:
+    """The name this PC's benchmark and quality history knows the candidate by: its repo id
+    for a model read from the Hugging Face cache (whose snapshot is named local/<commit>),
+    else the snapshot's id (a repo id, or local/<file> for a file on disk)."""
+    own = candidate.model.model_id
+    repo = candidate.model_id
+    if own.startswith("local/") and "/" in repo and not repo.startswith(("local/", "ollama/")):
+        return repo
+    return own
+
+
+def kept_of(candidate: Candidate) -> tuple[float, MeasuredKept | None]:
+    """The share of the model's quality the candidate's format keeps: measured on this PC when
+    its perplexity and its reference's were (ocq bench --quality), else llama.cpp's numbers."""
+    rating = rated_as(candidate)
+    if rating in (FULL, AS_RELEASED):
+        return 1.0, None
+    measured = measured_kept(history_id(candidate), candidate.option.label)
+    if measured is not None:
+        return measured.kept, measured
+    learnt = sensitivity(history_id(candidate))
+    return quality_kept(rating, learnt[0] if learnt else 1.0), None
+
+
 def estimated_quality(candidate: Candidate) -> float:
     """Effective parameters the candidate is worth: its size times the share its format keeps."""
-    return effective_parameters(candidate.model) * quality_kept(rated_as(candidate))
+    return effective_parameters(candidate.model) * kept_of(candidate)[0]
 
 
 def refit(candidate: Candidate, hardware: HardwareProfile, context: int) -> QuantOption:
@@ -1009,7 +1065,7 @@ def first_token(candidate: Candidate, hardware: HardwareProfile) -> tuple[float 
     runs = [
         run
         for run in runs_of(
-            candidate.model.model_id,
+            history_id(candidate),
             option.label,
             candidate.runtime,
             hardware,
@@ -1056,7 +1112,7 @@ def drawbacks(candidate: Candidate, workload: WorkloadProfile) -> list[str]:
         found.append(SLOW)
     if candidate.option.fit_level not in COMFORTABLE:
         found.append(TIGHT)
-    if quality_kept(rated_as(candidate)) < DEGRADED:
+    if kept_of(candidate)[0] < DEGRADED:
         found.append(DEGRADED_FORMAT)
     if CODER in candidate.tags and workload.key != "coding":
         found.append(SPECIALIST)
@@ -1138,6 +1194,7 @@ def recommend(
     """The whole engine: candidates, hard limits, ranking, explanations. The CLI and the TUI
     call this."""
     candidates, unread, too_big = generate_candidates(request, hardware, extra_dirs)
+    candidates = [with_measured_speed(c, hardware) for c in candidates]
     allowed, rejected = apply_limits(candidates, hardware, disk_free_gb)
     checks = {id(candidate): tuple(passed) for candidate, passed in allowed}
     ranked = rank([candidate for candidate, _ in allowed], request.workload, hardware)
@@ -1212,7 +1269,7 @@ def fit_reason(candidate: Candidate, hardware: HardwareProfile) -> Reason:
 def speed_reason(candidate: Candidate, hardware: HardwareProfile | None = None) -> Reason:
     option = candidate.option
     runs = runs_of(
-        candidate.model.model_id,
+        history_id(candidate),
         option.label,
         candidate.runtime,
         hardware,
@@ -1232,9 +1289,26 @@ def speed_reason(candidate: Candidate, hardware: HardwareProfile | None = None) 
 
 def quality_reason(candidate: Candidate) -> Reason:
     rating = rated_as(candidate)
-    kept = quality_kept(rating)
+    kept, measured = kept_of(candidate)
     label = candidate.option.label
-    if rating == FULL:
+    if measured is not None:
+        against = (
+            "the original"
+            if measured.reference_label.upper() != "Q8_0"
+            else "Q8_0, as the original does not fit here"
+        )
+        text = (
+            f"{label} keeps about {percent(kept)} of the model's quality, measured on this PC "
+            f"(perplexity {measured.perplexity:.2f} vs {measured.reference:.2f} for {against})"
+        )
+    elif rating not in (FULL, AS_RELEASED) and sensitivity(history_id(candidate)):
+        _, labels = sensitivity(history_id(candidate))
+        rated = f" as {rating}" if rating != label.upper() else ""
+        text = (
+            f"{label} keeps about {percent(kept)} of the model's quality (estimated{rated}, "
+            f"scaled by this model's measured {', '.join(labels)})"
+        )
+    elif rating == FULL:
         text = "Full quality: the original weights"
     elif rating == AS_RELEASED:
         text = "Full quality: the format the model was released in"
@@ -1265,7 +1339,7 @@ def difference(
     better = mine > theirs
     a, b = candidate.candidate, other.candidate
     if objective == Objective.QUALITY and a.model_ref == b.model_ref:
-        kept = (quality_kept(rated_as(a)), quality_kept(rated_as(b)))
+        kept = (kept_of(a)[0], kept_of(b)[0])
         word = "more" if better else "less"
         text = f"keeps {word} of the model's quality ({percent(kept[0])} vs {percent(kept[1])})"
     elif objective == Objective.QUALITY:
@@ -1435,7 +1509,7 @@ def confidence(
         )
     )
     runs = runs_of(
-        candidate.model.model_id,
+        history_id(candidate),
         option.label,
         candidate.runtime,
         hardware,
@@ -1466,7 +1540,18 @@ def confidence(
                 latency_known,
             )
         )
-    evidence.append(Evidence("Quality estimated from size and format (not measured yet)", False))
+    if kept_of(candidate)[1] is not None:
+        evidence.append(Evidence("Quality measured on this PC (perplexity on WikiText-2)", True))
+    elif rated_as(candidate) not in (FULL, AS_RELEASED) and sensitivity(history_id(candidate)):
+        evidence.append(
+            Evidence("Quality estimated, scaled by this model's formats measured here", False)
+        )
+    elif rated_as(candidate) in (FULL, AS_RELEASED):
+        evidence.append(Evidence("Full quality: the weights as released", True))
+    else:
+        evidence.append(
+            Evidence("Quality estimated from size and format (not measured yet)", False)
+        )
     unchecked = [check for check in recommendation.checks if check.text.startswith("not checked")]
     for check in unchecked:
         evidence.append(Evidence(f"{check.name.capitalize()} {check.text}", False))
