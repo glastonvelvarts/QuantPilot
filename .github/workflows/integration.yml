@@ -23,7 +23,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # Pinned: left to itself uv takes the runner's newest Python, which torch may not
+      # have wheels for yet (macOS failed this way).
       - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
       # llama.cpp's release, the WikiText text and the model: downloaded once, then reused.
       - uses: actions/cache@v4
         with:
